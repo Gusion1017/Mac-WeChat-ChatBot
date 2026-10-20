@@ -32,18 +32,21 @@
 - **私聊自动回复**；**群聊触发可多选**（@ / 关键词 / 拍一拍；「所有消息」独占），并支持学习群昵称后的纯文本 @ 兜底
 - **统一白名单 / 黑名单（会话 ID 或用户 wxid）/ 冷却 / 每分钟限流 / 工作时段**，支持按会话覆盖
 - **按会话人格**、系统提示词、模型覆盖；温度按模型单独配置
-- **记忆系统**：10 条短期窗口 → 窗口外旧消息攒够 20 条批量总结；
+- **记忆系统**：10 条短期窗口 → 窗口外旧消息攒够 8 条批量总结；
   记忆页按会话「文件夹」组织；综合权重 = 内容重要度 × 召回强化 × 30 天半衰期；
-  自动总结上限 600 字并自动压缩；核心记忆与手动编辑保留
+  自动总结上限 600 字并自动压缩；核心记忆按所属会话/全局作用域生效，手写编辑不被自动总结覆盖
 - **防睡眠**（通用设置）：永不 / 接入电源适配器时 / 始终；仅阻止系统空闲睡眠，不合盖睡眠
 - **拟人化**：随机延迟、单条回复（默认）、dry-run；多段发送因 4.1.12 canary 风险默认关闭
+- **回复进度倒计时**：收到消息后实时显示 AI 生成耗时、拟人化「N 秒后发送」倒计时、发送回执与
+  失败原因；详情头部、输入区与会话列表行同步可见，便于判断卡在哪一步
 - **4.1.15.55 原生发送（R3）**：设置 → Hook 内开关（默认开）；无发送句柄时消息自动排队，
   在本机微信手动发一条消息后自动重发；4.1.12 仍走 legacy，互相隔离
 - **多 AI 通道**：DeepSeek 默认，OpenAI / Ollama / 任意 OpenAI 兼容端点
 - **图片 / 语音 / 表情 / 文件**：文本 / 表情 / 群 @ 已验证；图片 / 文件下载 hook 在 4.1.12 暂缺（见验收报告）
 - **定时主动消息**、**实时会话看板**、**运行日志**
 - **原生苹果风格 UI**：Liquid Glass、SF Symbols、浅 / 深色、键盘快捷键、菜单栏；
-  关闭 Dock 图标后仍可从菜单栏恢复窗口；同页重复开关 / 设置已收敛为单一入口
+  关闭 Dock 图标后仍可从菜单栏恢复窗口；同页重复开关 / 设置已收敛为单一入口；
+  再次点击当前会话行或侧边栏「会话」可收起聊天详情
 - **关闭窗口即隐藏**，可从菜单栏（或 Dock，若启用）恢复；退出仅保留 ⌥⌘Q 与菜单栏入口
 - **低开销**：无 WebView / Electron；bridge 仅机器人开启时运行；SQLite WAL；日志环形缓冲
 
@@ -52,7 +55,7 @@
 | 模块 | 状态 |
 | --- | --- |
 | SwiftUI App（10 页面 / 设置 / 首次向导） | ✅ 构建与真机 E2E |
-| Swift 核心（OneBot、AI、SQLite 记忆、触发判定、调度） | ✅ 构建 / 48 项测试通过 |
+| Swift 核心（OneBot、AI、SQLite 记忆、触发判定、调度） | ✅ 构建 / 58 项测试通过 |
 | OneBot bridge（Go + frida-core） | ✅ 构建 / 鉴权 / 真机附加通过 |
 | 4.1.12.53 接收 + 主动发送 | ✅ 真机全链路，单条自动回复稳定 |
 | 4.1.15.55 接收（Message finalizer） | ✅ 历史验证 |
@@ -84,7 +87,8 @@ WeChatAI.app (SwiftUI)
 ```
 
 详细契约见 [`docs/architecture.md`](docs/architecture.md)，记忆设计见 [`docs/memory.md`](docs/memory.md)，
-完整文档索引见 [`docs/README.md`](docs/README.md)。
+开发与排障见 [`docs/development.md`](docs/development.md)，完整文档索引见 [`docs/README.md`](docs/README.md)，
+变更历史见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 快速开始
 
@@ -136,20 +140,24 @@ ChatBot/
 ├── app/                     SwiftUI macOS 应用（SwiftPM）
 │   ├── Package.swift        平台 macOS 26 / Swift 6.2
 │   ├── Sources/WeChatBot/   Models / Core / Services / DesignSystem / Views
-│   ├── Tests/WeChatAITests/ 48 项单元测试
+│   ├── Tests/WeChatAITests/ 58 项单元测试
 │   └── Packaging/Info.plist 打包模板
 ├── bridge/                  OneBot Go 桥接（GPL-3.0 衍生，含 proto/ 协议）
+│   └── NOTICE               上游来源与本项目修改/新增文件清单
 ├── hook/                    Frida 注入脚本
 │   ├── script.js            唯一事实来源（版本适配 + R3）
 │   ├── versions/*.json      微信版本地址表
 │   ├── gadget/              FridaGadget.config（.dylib 运行时下载，不入库）
 │   └── diag/                诊断与指针反查说明
 ├── tools/                   Mach-O 注入、微信备份/安装/还原、指针反查
-├── scripts/                 构建、打包、安装、运行、清理
+├── scripts/                 构建、打包、安装、运行、清理、自检
 ├── devtools/                本地 Mock（无需微信 / Frida 即可联调）
 ├── assets/                  App 图标源文件（.iconset / .icns）
-├── docs/                    架构、契约、Hook 移植与验收
+├── docs/                    架构、契约、开发手册、Hook 移植、性能与验收
 ├── .github/                 Issue / PR 模板
+├── Makefile                 常用开发命令（make help）
+├── AGENTS.md                AI 编码代理的仓库指南
+├── CHANGELOG.md             变更日志
 ├── CONTRIBUTING.md          贡献指南
 ├── SECURITY.md              安全与隐私报告
 └── ThirdPartyNotices.txt    第三方开源声明
@@ -160,31 +168,43 @@ ChatBot/
 
 ## 开发与测试
 
-```bash
-# Swift：构建 + 单元测试（48/48）
-cd app
-swift build
-swift test
+完整开发手册（环境、文件地图、常见任务、排障、发布）见
+[`docs/development.md`](docs/development.md)；AI 代理见 [`AGENTS.md`](AGENTS.md)。
 
-# Go bridge：构建时自动跑鉴权/参数/WS 测试
+```bash
+# 一条命令做静态检查 + Swift 测试
+bash scripts/check.sh
+
+# Swift：构建 + 单元测试（58/58）
+cd app && swift build && swift test
+
+# Go bridge：构建时自动跑 Go 测试（14 项）
 bash scripts/build_bridge.sh
 
 # 仅构建 bridge（跳过测试）
 BRIDGE_SKIP_TESTS=1 bash scripts/build_bridge.sh
+
+# 改了 hook/script.js 后同步 bridge 运行时副本
+bash scripts/sync_hook_script.sh
 ```
+
+也可以直接用根目录 `Makefile`（`make help`）：`make setup` / `make bridge` / `make app` /
+`make test` / `make check` / `make clean`。受限沙箱（CI / Agent）内构建时加
+`SWIFT_DISABLE_SANDBOX=1`。
 
 约定：
 
 - **文档优先**：`docs/` 是事实来源，接口 / 行为变更先改文档再改代码（见 `docs/architecture.md` §2）。
-- 并行开发使用独立 scratch path（`.build-core` / `.build-ui`）避免 SwiftPM 锁冲突。
+- 并行开发使用独立 scratch path（如 `.build-core` / `.build-ui`）避免 SwiftPM 锁冲突。
 - Hook 地址必须 runtime 验证文本收发后才能标记为可用。
-- 提交前跑 `swift test` 与 `git status`；不要提交构建产物、二进制和真实会话数据。
+- 提交前跑 `bash scripts/check.sh` 与 `git status`；不要提交构建产物、二进制和真实会话数据。
+- `scripts/check_docs.py` 会校验 Markdown 相对链接；新增文档请在 `docs/README.md` 登记。
 
 ## 清理、打包与分享
 
 ```bash
 bash scripts/clean.sh                      # 预览将删除的构建缓存/产物
-bash scripts/clean.sh --yes                # 清理 app/.build*、bridge/onebot、dist/、日志
+bash scripts/clean.sh --yes                # 清理 app/.build*、bridge/onebot、dist/、日志、__pycache__
 bash scripts/clean.sh --yes --keep-dist    # 保留 dist/ 打包产物
 bash scripts/clean.sh --yes --all          # 额外删除 Frida Gadget（需重新下载）
 ```

@@ -8,7 +8,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `Core/AppStore.swift` | 共享状态骨架（Lead 所有，本轮只调整 `persist()` 与移除运行时 stub） |
+| `Core/AppStore.swift` | 共享状态骨架（`@MainActor @Observable`，UI 只读；运行时方法在扩展中） |
 | `Core/AppStore+Runtime.swift` | 运行时编排 + 对 UI 暴露的全部运行时 API |
 | `Services/SettingsPersistence.swift` | 配置 JSON 原子写、串行化、合并写入 |
 | `Services/KeychainStore.swift` | API Key 的 Keychain 读写/删除/存在性 |
@@ -23,6 +23,9 @@
 | `Services/HookManager.swift` | 微信/Gadget 检测、安装/恢复脚本、bridge 子进程生命周期 |
 | `Services/ProcessRunner.swift` | `Process` 异步行流封装（脚本/bridge 输出） |
 | `Services/AppResources.swift` | bundle / 开发树资源定位（bridge/hook/tools） |
+| `Services/LogPipeline.swift` | 日志批量刷新、ANSI 清理、过滤与入库节流（200ms 批量，避免主线程逐行失效） |
+| `Services/CrashReporter.swift` | AppKit 布局安全阀、未捕获异常报告、会话面包屑、主线程看门狗（见 `performance.md`） |
+| `Services/MentionText.swift` | 群聊 @ 文本兜底解析（结构化 `at` 缺失时用群昵称匹配） |
 | `Services/Diagnostics.swift` | `WECHATAI_SELFTEST=1` 服务层自检 |
 
 本文件聚焦 Services/Core；设置模型、记忆页文件夹与 App 生命周期（防睡眠 apply/release）
@@ -95,6 +98,16 @@ RuntimeCoordinator.handle(event)
   不同会话可并行。
 - dry-run：仍调用 AI 生成，但只写入一条 `direction = .system` 的“将回复”记录并打日志，不发送。
 - 手动发送/定时任务复用同一发送路径（pending → sent/failed，含 DB 与统计）。
+- **回复进度（UI 可见）**：命中回复后，`RuntimeCoordinator` 在关键节点写入
+  `AppStore.replyProgress[conversationID]`（`ReplyProgress`，仅内存、不持久化）：
+  - 进入 AI 请求前 → `.generating`（记录通道名 / 模型，UI 正向计时「已等待 N 秒」）；
+  - 每段发送前若启用拟人化 → `.waitingToSend`，同时写入 `countdownEnd` / `countdownTotal`，
+    UI 据此渲染真实的「N 秒后发送」倒计时与收缩进度条；
+  - 提交 OneBot HTTP 前 → `.sending`（UI 显示回执等待时长；R3 未就绪时由 UI 叠加提示）；
+  - 投递完成 → `.completed`（约 3 秒后自动清理）；AI / 发送失败 → `.failed`（保留错误，可手动关闭，
+    60 秒后兜底清理）。
+  同一会话开始新一轮回复会刷新进度令牌，旧状态条的自动清理任务不会误删新进度；
+  bot 停止、运行时关闭、会话删除都会清空对应快照。
 
 ## 4. 并发与线程模型
 
@@ -110,6 +123,8 @@ RuntimeCoordinator.handle(event)
 | `RuleEngine` | `NSLock` 保护冷却/频率状态 | 纯内存判定，无 IO |
 | `ChatEngine` | 无共享可变状态 | 只依赖 `MemoryStore`/`AIClient` |
 | `HookManager` | `@MainActor`；`ProcessRunner` 后台读管道 | 脚本/bridge 输出行流式回主线程更新状态 |
+| `LogPipeline` | 内部锁 + 200ms 批量刷新 | 后台线程可写；批量合并 UI/SQLite 更新，避免逐行失效 |
+| `CrashReporter` / `MainThreadWatchdog` | 锁保护快照；看门狗独立线程 | 异常与卡顿取证不经过 MainActor，避免死锁 |
 
 禁止事项（已遵守）：MainActor 上无阻塞文件/DB/脚本 IO；无忙轮询；无 `sleep` 轮询循环。
 `SchedulerService` 只在下一个 `nextFireAt` 到来或 `update/stop` 唤醒时继续，属于事件驱动定时器。
@@ -191,20 +206,31 @@ RuntimeCoordinator.handle(event)
 ### 5.5 ChatEngine
 
 - system = persona.systemPrompt（无可用人格时回退到 `Persona.defaultSystemPrompt`）+ 真人聊天约束 +
-  当前时间/会话类型/会话名 + `conversation.note`（长期记忆）+ 相关历史消息召回
-  （从其它会话按关键词 LIKE 取最多 3 条，去重、截断）。
-- 近期上下文：`history.suffix(maxContextMessages)`，按方向映射 user/assistant，
+  当前时间/会话类型/会话名 + `conversation.note`（会话备注）+ 长期记忆注入 + 本会话早期片段召回。
+- 群聊：每条 incoming 消息（含历史 user 消息与当前消息）拼成「发言人：内容」，
+  `senderName` 优先、空则回退 `senderID`（`ChatEngine.attributedUserText` / `speakerLabel`）；
+  私聊不加前缀；自己的消息仍作为 `assistant` 原文。群聊 system prompt 说明
+  「结合长期记忆中的 wxid→昵称映射判断发言人，回复不输出 wxid」。
+- 近期上下文：`history.suffix(maxContextMessages)`（上限 10），按方向映射 user/assistant，
   同角色相邻消息合并；确保当前消息在末尾。
+- 早期片段召回：只在**当前会话**内按关键词 `LIKE` 检索，排除短期窗口内消息、当前消息、
+  系统消息与晚于当前消息的内容；最多 3 条、每条截断 120 字；发出标「我」，
+  私聊收到标「对方」，群聊收到标发言人（`speakerLabel`，通常是 wxid，缺失时「对方」）；
+  标题为「本会话较早的相关片段（可能已过时，仅供参考）」；不再检索其它会话原文。
 - 拟人化：`humanize.enabled && splitMessages` 时按句末标点/长度切分，
   合并过短片段，`maxSegments` 封顶，单段最长 600 字；每段随机延迟
   `[minDelayMs, maxDelayMs]`（`ChatReplyPlan.delaysMs`，由运行时执行）。
 - dry-run 时不分段/不延迟，只产出计划文本。
-- 长期记忆召回：核心记忆 + 当前会话记忆 + 全局记忆，按**综合权重**降序
-  （内容重要度 × 使用强化 × 30 天半衰期），默认最多 6 条；召回后
-  `MemoryStore.recordMemoryAccess(ids:)` 以 best-effort 累加访问次数。
-- 批量总结：短期窗口（10 条）外的未总结消息**攒够 20 条**才调用一次 AI，
-  单批最多 40 条；12 条不总结、30 条总结 20 条、50 条再总结 20 条。
-  AI 提示要求最多 5 条要点/300 字，结果经 `MemorySummaryCompactor` 强制 ≤600 字符；
+- 长期记忆召回：只注入「当前会话 + 全局」记忆，核心记忆同样遵守作用域
+  （其它会话的核心记忆不注入）；按核心 → 手写 → 自动总结的优先级、同层按**综合权重**降序，
+  默认最多 6 条（内容重要度 × 使用强化 × 30 天半衰期）；提示词注明核心/手写优先、
+  自动总结仅供参考、冲突时以核心/手写为准；召回后 `MemoryStore.recordMemoryAccess(ids:)`
+  以 best-effort 累加访问次数。
+- 批量总结：短期窗口（10 条）外的未总结消息**攒够 8 条**才调用一次 AI，
+  单批最多 40 条；12 条不总结、18 条总结 8 条、26 条再总结 8 条。
+  AI 提示要求结构化（人物与称呼 / 偏好 / 约定与待办 / 其他），最多 5 条要点、
+  总长 ≤600 字，不编造、不罗列成员 wxid 清单；同会话手写记忆作为「权威参考」传入
+  合并提示、不被覆盖；结果经 `MemorySummaryCompactor` 强制 ≤600 字符；
   无 Key/AI 失败时本地兜底同样压缩；同一会话只保留一条自动滚动总结，
   历史遗留的多条自动总结会先合并清理。详见 [memory.md](memory.md)。
 - 流式总开关：`settings.ai.streamReplies == false` 时所有通道强制非流式；
@@ -303,16 +329,20 @@ RuntimeCoordinator.handle(event)
 
 ### 8.1 `swift test`（推荐，无需 UI）
 
-测试 target 位于 `app/Tests/WeChatAITests/`（`CoreServicesTests.swift` +
-`SleepPreventionTests.swift`）：
+测试 target 位于 `app/Tests/WeChatAITests/`（`CoreServicesTests.swift`（41）、
+`SleepPreventionTests.swift`（9）、`MessageRoutingTests.swift`（5）、
+`NativeSendConfigTests.swift`（3），共 58 项）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 38 tests, with 0 failures
+# Executed 57 tests, with 0 failures（2026-10-21）
 ```
 
-覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 20 条批量阈值、
+覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
+（12/18/26 条场景）、长期记忆作用域（当前会话 + 全局，核心不注入其它会话）、
+同会话早期片段召回（排除窗口内/当前消息，最多 3 条）、群聊发言人标注
+（`senderName` 优先、回退 `senderID`）、手写记忆作为权威参考合并且不被覆盖、
 长期记忆滚动合并与历史多条合并、`MemorySummaryCompactor` 去重/600 字上限、
 `accessCount` 权重强化与 `sourceCount` 对数增长、旧库 v2→v4 迁移；
 防睡眠旧配置兼容/三档标签/决策表；OneBot 事件解析（群/@/私聊/非法帧）、
@@ -343,7 +373,7 @@ RuleEngine 白黑名单/@/关键词/冷却、Scheduler 各 repeat 的 nextFireAt
 ChatEngine 分段/角色合并/关键词分词。输出 `[selftest] PASS/FAIL/WARN` 与汇总退出码。
 
 历史 CLI 驱动实测：**63 passed / 0 failed / 0 warnings**；当前 `swift test` 为
-**48/48 通过**（见 8.1）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
+**58/58 通过**（见 8.1；2026-10-21 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
 Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Keychain 保存/删除、
 `config.json` 无明文 Key。
 
@@ -358,19 +388,25 @@ Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Ke
 - **“正在输入”指示**：bridge/OneBot v11 未暴露该动作，目前仅记录日志；`humanize.typingIndicator`
   暂不影响网络行为。
 - **记忆召回**：长期记忆已做批量 AI 摘要、确定性压缩（≤600 字）与权重强化；
-  跨会话召回仍为关键词 `LIKE` + `conversation.note` 的轻量方案，未做向量/语义检索；
-  `memoryTokens` 按 CJK/ASCII 切词，长文本召回可能漏召。
+  早期片段只在当前会话内按关键词 `LIKE` 召回（最多 3 条、可能已过时），
+  不再检索其它会话的原文；未做向量/语义检索，`memoryTokens` 按 CJK/ASCII 切词，
+  长文本召回可能漏召。
 - **日志按天切割**：当前 DB 环形裁剪（保留 5000 条）+ App 内存 2000 条；
   `logs/` 目录按天文件切割尚未实现（架构低开销目标不要求首版）。
-- **自消息 echo**：依赖 bridge 推送带 `sender.user_id == self_id` 的事件；
-  若 bridge 不推送自己消息，则仅靠本地发送记录展示，不影响正确性。
+- **自消息 echo**：bridge 用 `-self_id` 判定发送者并输出 `is_self` + `self_id` +
+  `target_id`（私聊=对方、群=群 ID）；App 据此把自消息记进正确会话并标 outgoing。
+  旧事件若只有 `self_id == sender.user_id` 的形态，仍按启发式兜底。
+  历史数据中已经误路由到「自己 wxid」会话的消息，启动时由
+  `MemoryStore.repairSelfRoutedMessages(selfID:)` 一次性归位（幂等）；随后
+  `get_login_info` 返回的账号是 selfID 权威来源。
+- **历史回放不触发回复**：微信加载历史/补同步会把旧消息重新投递，App 仍入库供检索，
+  但超过 120 秒的消息不再触发自动回复，也不会把会话预览/未读回退。
 - **白名单语义**：`effectiveWhitelist` / `effectiveBlacklist` 是“会话 ID 或用户 wxid”的统一名单；
   黑名单同时检查会话和发送者，白名单命中任一即可。旧版四列表在首次启动时迁移到
   `whitelistEntries` / `blacklistEntries` 并清空。
-- **安装脚本进度**：按 Lead 提供的 `install_gadget.sh` 协议解析；`manage_wechat.sh status`
+- **安装脚本进度**：按 `tools/install_gadget.sh` 的 stdout 进度协议解析；`manage_wechat.sh status`
   用于补充插件/备份信息，失败静默降级。
-- **测试 target**：已新增 `app/Tests/WeChatAITests` 与 `app/Package.swift` 的 `.testTarget`
-  （task-3 允许范围，已在汇报中说明）；`swift test --scratch-path .build-core-tests` 与
-  `swift build --scratch-path .build-core` 互不抢占构建目录。
+- **测试 target**：`app/Tests/WeChatAITests` 与 `app/Package.swift` 的 `.testTarget` 已就位；
+  并行构建时用独立 scratch path（如 `.build-core-tests` / `.build-core`）避免 SwiftPM 锁冲突。
 - **headless 环境限制**：无 WindowServer 的 shell 中直接运行 App 二进制不会创建 SwiftUI Scene，
   因此 `WECHATAI_SELFTEST` 的 App 内入口不会触发；CI 请用 `swift test`。

@@ -58,6 +58,11 @@
 | `docs/` | Lead | 架构、契约、研究记录与验收报告 |
 | `_research/` | hook-port | Hook 移植证据/日志/候选 JSON（git 忽略，仅本地保留） |
 
+> 「归属」列记录的是 2026-10 并行开发期的任务名（Lead / swift-core / swift-ui / bridge /
+> hook-port），用于说明**改动的主要责任面**，不是人员权限。日常维护按目录职责理解；
+> 跨目录改动先读 [`development.md`](development.md) 的「改动定位」与
+> [`AGENTS.md`](../AGENTS.md) 的写盘边界。
+
 ## 3. OneBot 桥接契约（已按上游 v0.0.18 源码核对）
 
 ### 3.1 启动参数
@@ -70,10 +75,17 @@ bridge/onebot \
   -receive_host=127.0.0.1:58080 \
   -token=<随机 32 字节十六进制> \
   -conn_type=websocket \
+  -self_id=<当前登录 wxid> \
+  -log_file=$HOME/Library/Logs/WeChatAI/bridge/macos.log \
   -image_path=/Users/<user>/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/temp/<...>/Img/
 ```
 
 - `onebot` 从**当前工作目录**读取 `script.js`，因此 App 启动进程时 `currentDirectoryURL` 必须指向 bridge 资源目录。
+- `-log_file` **必须**指向 app bundle 之外。旧实现固定写 `./log/macos.log`，而 cwd 在 bundle 内，
+  运行期会往 bundle 里追加文件、破坏 ad-hoc 签名，导致下次启动被系统以
+  `Launch Constraint Violation` 杀掉。App 现在传 `~/Library/Logs/WeChatAI/bridge/macos.log`。
+- `-self_id` 是当前登录账号的权威来源（App 已知时传入）；缺失时 bridge 才从 `image_path`
+  的 `xwechat_files/<wxid>_xxxx/` 推导。多账号目录下 App 取最近有活动的账号。
 - `-wechat_conf` 由 App **运行期生成**：读取 `hook/versions/<version>_mac.json` 后合并 App 设置
   （4.1.15.55 为 R3 发送开关），写入
   `~/Library/Application Support/WeChatAI/runtime/hook-<version>-<build>.json` 再传给 bridge；
@@ -108,7 +120,16 @@ bridge/onebot \
 - `group_id` 非空 → 群聊；否则私聊。
 - 发送者身份以 `sender.user_id` 为准，缺失时用 `user_id`。
 - `message` 可能是字符串或数组（上游 `Message` 结构），解析时容错。
-- 自己发送的消息可能以 `self_id == sender.user_id` 出现，App 需去重并标记 outgoing。
+- 自消息方向（2026-10-21 起）：
+  - hook 额外上报 `from_wxid` / `to_wxid` / `sender_wxid`；bridge 用
+    `-self_id`（App 传入，缺失时从 `image_path` 推导）判定发送者是否自己；
+  - 自己发出的消息带 `is_self:true`，`self_id`/`sender.user_id` 是当前账号，
+    私聊另带 `target_id=<对方 wxid>`，群聊 `target_id=<群 ID>`；
+  - App 的 `conversationID`：群 → `group_id`；私聊自消息 → `target_id`；
+    其余 → `user_id`。方向由 `is_self` 决定，不能再用 `self_id == user_id` 兜底
+    判断私聊自消息（会把它记进「自己 wxid」的会话）。
+- App 连接后主动发 `get_login_info`，把返回的 `data.user_id` 作为 selfID 的
+  权威来源；事件启发式仅作为旧 bridge 的兜底。
 - 媒体字段：`data.url` 为 `file://` 本地路径时复制到 App 媒体目录；`data.file` 可能为 base64。
 
 ### 3.3 WebSocket 动作（App → bridge）
@@ -131,7 +152,7 @@ bridge/onebot \
 
 ## 4. App 内部关键类型
 
-- `AppStore`（`Core/AppStore.swift`，swift-core 所有）：`@MainActor @Observable`，持有 settings/conversations/messages/logs/hookStatus/stats；UI 只读并调用其方法。
+- `AppStore`（`Core/AppStore.swift`）：`@MainActor @Observable`，持有 settings/conversations/messages/logs/hookStatus/stats；UI 只读并调用其方法。
 - `SleepPreventionCenter`（`Services/SleepPreventionService.swift`，`@MainActor @Observable`）：
   `general.sleepPrevention` 的运行时执行者，持有/释放 IOKit `PreventUserIdleSystemSleep` 断言，
   监听电源适配器变化；纯决策函数 `shouldPreventSleep(mode:onExternalPower:)` 可单测。
