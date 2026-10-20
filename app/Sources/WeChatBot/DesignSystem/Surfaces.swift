@@ -203,11 +203,13 @@ struct AvatarView: View {
     }
 
     var body: some View {
-        ZStack {
+        // Resolve the stable tint once per body instead of hashing the title twice.
+        let tint = Theme.avatarTint(for: title)
+        return ZStack {
             Circle()
                 .fill(
                     LinearGradient(
-                        colors: [Theme.avatarTint(for: title), Theme.avatarTint(for: title).opacity(0.7)],
+                        colors: [tint, tint.opacity(0.7)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )

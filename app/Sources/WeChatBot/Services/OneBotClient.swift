@@ -46,6 +46,9 @@ struct OneBotEvent: Sendable {
     var selfID: String
     var userID: String
     var groupID: String?
+    /// 会话目标：私聊=对方 wxid，群聊=群 ID。自消息的 `userID` 是发送者（自己），
+    /// 不能用来定位会话；bridge 会为自消息补上 `target_id`。
+    var targetID: String
     var senderName: String
     var timestamp: Date
     var segments: [OneBotSegment]
@@ -61,6 +64,9 @@ struct OneBotEvent: Sendable {
 
     var conversationID: String {
         if let groupID, !groupID.isEmpty { return groupID }
+        // 自消息（自己发出的私聊）必须落进对方会话，而不是「自己 wxid」的会话。
+        // 旧 bridge 没有 target_id 时退回 userID，并由启动时的一次性数据修复兜底。
+        if isSelf, !targetID.isEmpty { return targetID }
         return userID
     }
 
@@ -164,6 +170,8 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
     var onEvent: (@Sendable (OneBotEvent) -> Void)?
     var onStateChange: (@Sendable (OneBotConnectionState) -> Void)?
     var onLog: (@Sendable (LogLevel, String) -> Void)?
+    /// 连接建立后向 bridge 询问 `get_login_info`，拿到权威的 self wxid。
+    var onLoginInfo: (@Sendable (String) -> Void)?
 
     private let configuration: Configuration
     private let stateQueue = DispatchQueue(label: "com.gusionw.wechatai.onebot.state")
@@ -308,6 +316,12 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
         notifyLog(.info, "OneBot WebSocket 已连接 \(activeConfiguration.host):\(activeConfiguration.port)")
         startReceiveLocked(task: task, currentGeneration: currentGeneration)
         startPingLocked(task: task, currentGeneration: currentGeneration)
+        // 主动查询一次登录账号：self_id 是消息方向/会话归属的权威来源，
+        // 不能只靠消息启发式（历史回放/自消息会干扰）。
+        Task {
+            let payload = #"{"action":"get_login_info","echo":"login-info","params":{}}"#
+            try? await task.send(.string(payload))
+        }
     }
 
     private func startReceiveLocked(task: URLSessionWebSocketTask, currentGeneration: Int) {
@@ -417,6 +431,15 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
             data = nil
         }
         guard let data, !data.isEmpty else { return }
+        // get_login_info 的动作回包（{"status":"ok","data":{"user_id":...}}）不是消息事件，
+        // 单独解析；否则会被当成「无法识别的帧」丢弃，self_id 只能靠启发式。
+        if let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let status = object["status"] as? String, status == "ok",
+           let payload = object["data"] as? [String: Any],
+           let userID = payload["user_id"] as? String, !userID.isEmpty {
+            notifyLoginInfo(userID)
+            return
+        }
         let events = OneBotEventParser.parse(data: data)
         if events.isEmpty {
             if let text = String(data: data, encoding: .utf8) {
@@ -554,6 +577,10 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
         onLog?(level, message)
     }
 
+    private func notifyLoginInfo(_ userID: String) {
+        onLoginInfo?(userID)
+    }
+
     // MARK: URLSessionWebSocketDelegate
 
     func urlSession(
@@ -627,8 +654,13 @@ enum OneBotEventParser {
         let segments = parseSegments(raw["message"])
         // 群系统消息（如拍一拍 appmsg）可能把 group_id 同时写进 self_id/user_id，
         // 不能仅凭两者相等就判定为「自己发出」。
-        let isSelf = !selfID.isEmpty && selfID == userID
+        var isSelf = !selfID.isEmpty && selfID == userID
             && !(groupID != nil && userID == groupID)
+        // bridge 归一化后会显式标记 is_self（旧 bridge 没有该字段，保持启发式）。
+        if let explicit = bool(raw["is_self"]) {
+            isSelf = explicit
+        }
+        let targetID = string(raw["target_id"]) ?? string(raw["targetId"]) ?? ""
         guard !(userID.isEmpty && groupID == nil) || !segments.isEmpty else { return nil }
 
         let timeValue = (raw["time"] as? Double) ?? Double(string(raw["time"]) ?? "") ?? Date().timeIntervalSince1970
@@ -654,6 +686,7 @@ enum OneBotEventParser {
             selfID: selfID,
             userID: userID,
             groupID: groupID,
+            targetID: targetID,
             senderName: senderName,
             timestamp: timestamp,
             segments: segments,
@@ -704,6 +737,19 @@ enum OneBotEventParser {
         default:
             return nil
         }
+    }
+
+    private static func bool(_ value: Any?) -> Bool? {
+        // JSONSerialization 的 true/false 是 NSNumber(__NSCFBoolean)，不是 Swift Bool；
+        // 只接受 0/1，避免把普通数字误当成布尔。
+        if let number = value as? NSNumber {
+            switch number.intValue {
+            case 0: return false
+            case 1: return true
+            default: return nil
+            }
+        }
+        return value as? Bool
     }
 }
 

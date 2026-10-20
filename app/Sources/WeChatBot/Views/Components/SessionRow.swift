@@ -6,6 +6,8 @@ import SwiftUI
 struct SessionRow: View {
     let conversation: Conversation
     let isSelected: Bool
+    /// 该会话正在处理的自动回复进度；有值时用阶段计时替代相对时间。
+    var replyProgress: ReplyProgress?
     var onSelect: () -> Void
 
     @State private var isHovering = false
@@ -33,7 +35,9 @@ struct SessionRow: View {
                                 .help("AI 自动回复已关闭")
                         }
                         Spacer(minLength: 4)
-                        if let date = conversation.lastMessageAt {
+                        if let replyProgress {
+                            ReplyMiniStatus(progress: replyProgress)
+                        } else if let date = conversation.lastMessageAt {
                             Text(UIFormat.relativeShort(date))
                                 .font(.system(size: 9))
                                 .foregroundStyle(.tertiary)
@@ -59,8 +63,10 @@ struct SessionRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .help(isSelected ? "再次点击收起当前对话" : "打开会话")
         .accessibilityLabel("\(conversation.displayTitle)，\(conversation.kind.label)")
         .accessibilityValue(accessibilityValue)
+        .accessibilityHint(isSelected ? "再次点击收起当前对话" : "打开会话")
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
         .padding(.horizontal, 9)
         .padding(.vertical, 7)

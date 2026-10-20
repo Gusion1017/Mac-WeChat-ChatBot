@@ -3,9 +3,25 @@ import SwiftUI
 
 /// Chat bubble supporting text / image / voice / emoji / file / video / link,
 /// timestamps and delivery / generation state.
-struct MessageBubble: View {
+///
+/// Equatable so streaming updates to a message list don't re-evaluate unchanged
+/// bubbles (`ForEach` rows use `.equatable()`); all rendered state derives from
+/// `message` and `showsSender`.
+struct MessageBubble: View, Equatable {
     let message: ChatMessage
     var showsSender: Bool = true
+
+    /// Loaded once per media path instead of on every body evaluation: the previous
+    /// computed `NSImage(contentsOfFile:)` re-read the file from disk whenever the
+    /// bubble's body ran again (e.g. once per incoming message).
+    @State private var localImage: NSImage?
+    /// Path that `localImage` was decoded from, so a changed path reloads.
+    @State private var loadedImagePath: String?
+
+    /// Manual comparison: `localImage` is view-local state and must not participate.
+    static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
+        lhs.message == rhs.message && lhs.showsSender == rhs.showsSender
+    }
 
     var body: some View {
         if message.direction == .system || message.kind == .system {
@@ -125,9 +141,17 @@ struct MessageBubble: View {
         }
     }
 
-    private var localImage: NSImage? {
-        guard let path = message.mediaPath, !path.isEmpty else { return nil }
-        return NSImage(contentsOfFile: path)
+    /// Loads the local media file once per path (`.task(id:)`), never during body
+    /// evaluation. Previously every body re-run re-read the file from disk.
+    private func loadLocalImageIfNeeded() async {
+        guard let path = message.mediaPath, !path.isEmpty else {
+            localImage = nil
+            loadedImagePath = nil
+            return
+        }
+        guard loadedImagePath != path else { return }
+        loadedImagePath = path
+        localImage = NSImage(contentsOfFile: path)
     }
 
     private var remoteImageURL: URL? {
@@ -139,8 +163,13 @@ struct MessageBubble: View {
         return url
     }
 
-    @ViewBuilder
     private var imageContent: some View {
+        imageContentBody
+            .task(id: message.mediaPath) { await loadLocalImageIfNeeded() }
+    }
+
+    @ViewBuilder
+    private var imageContentBody: some View {
         if let localImage {
             Image(nsImage: localImage)
                 .resizable()
@@ -317,7 +346,7 @@ struct MessageBubble: View {
 }
 
 /// Centered system notice (connection errors, AI failures, service hints).
-struct SystemNoticeRow: View {
+struct SystemNoticeRow: View, Equatable {
     let message: ChatMessage
 
     var body: some View {
@@ -364,7 +393,7 @@ struct TypingIndicator: View {
 }
 
 /// Day / time separator between message bubbles.
-struct DateSeparator: View {
+struct DateSeparator: View, Equatable {
     let date: Date
 
     var body: some View {

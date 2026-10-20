@@ -21,11 +21,16 @@ private enum MemoryFolder: Hashable, Identifiable {
     case conversation(id: String, title: String, kind: ConversationKind)
     case orphaned(id: String)
 
+    /// 会话文件夹的稳定 id；派生快照用同一规则建索引，避免字面量漂移。
+    static func conversationFolderID(_ conversationID: String) -> String {
+        "conversation:\(conversationID)"
+    }
+
     var id: String {
         switch self {
         case .all: "all"
         case .global: "global"
-        case .conversation(let id, _, _), .orphaned(let id): "conversation:\(id)"
+        case .conversation(let id, _, _), .orphaned(let id): Self.conversationFolderID(id)
         }
     }
 
@@ -72,6 +77,59 @@ private struct MemoryFolderSection: Identifiable {
     var folders: [MemoryFolder]
 }
 
+/// 长期记忆列表排序：默认「综合权重」（核心优先），或「最近更新」（不强制核心前置）。
+private enum MemorySortMode: String, CaseIterable, Identifiable {
+    case weight
+    case recentlyUpdated
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .weight: "综合权重"
+        case .recentlyUpdated: "最近更新"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .weight: "scalemass"
+        case .recentlyUpdated: "clock.arrow.circlepath"
+        }
+    }
+}
+
+/// 文件夹计数（总数 / 核心数），随长期记忆遍历一次算出。
+private struct MemoryCounts: Equatable {
+    var total = 0
+    var core = 0
+}
+
+/// 长期记忆页的派生数据：一次遍历 + 一次排序，body 内只构建一次。
+private struct LongTermSnapshot {
+    let activeFolder: MemoryFolder
+    let isSearching: Bool
+    /// 已按当前文件夹/搜索/仅核心/排序模式处理好的列表。
+    let memories: [LongTermMemory]
+    let filteredCoreCount: Int
+    let totalMemoryCount: Int
+    let coreMemoryCount: Int
+    let folderSections: [MemoryFolderSection]
+    let folderSessionCount: Int
+    let folderCounts: [String: MemoryCounts]
+}
+
+/// 聊天记录页的派生数据：会话标题表、消息计数与搜索结果都只构建一次。
+private struct ChatSnapshot {
+    let conversationCount: Int
+    let totalMessages: Int
+    let messageCounts: [String: Int]
+    let searchResults: [ChatMessage]
+    let filteredConversations: [Conversation]
+    let selectedMessages: [ChatMessage]
+    let conversationTitles: [String: String]
+}
+
 /// 记忆库：长期记忆的新增/编辑/核心标记 + 会话/消息浏览与清理。
 struct MemoryView: View {
     @Environment(AppStore.self) private var store
@@ -81,14 +139,23 @@ struct MemoryView: View {
     @State private var search = ""
     @State private var selectedConversationID: String?
     @State private var selectedFolder: MemoryFolder = .all
+    @State private var sortMode: MemorySortMode = .weight
+    @State private var onlyCore = false
+    @State private var showWeightInfo = false
     @State private var showCleanup = false
     @State private var isClearing = false
     @State private var editingMemory: LongTermMemory?
     @State private var pendingDeletion: LongTermMemory?
 
     var body: some View {
+        // Derived collections are built exactly once per body evaluation (the old code
+        // re-filtered/re-sorted memories and messages 3-4 times per body, and did
+        // O(folders x memories) count lookups while rendering folder rows).
+        let longTerm = mode == .longTerm ? makeLongTermSnapshot() : nil
+        let chat = mode == .chat ? makeChatSnapshot() : nil
+
         VStack(spacing: 0) {
-            GlassToolbar(title: "记忆库", subtitle: subtitle) {
+            GlassToolbar(title: "记忆库", subtitle: subtitle(longTerm: longTerm, chat: chat)) {
                 Picker("", selection: $mode) {
                     ForEach(MemoryMode.allCases) { mode in
                         Text(mode.label).tag(mode)
@@ -125,14 +192,14 @@ struct MemoryView: View {
                         Label("清理…", systemImage: "trash")
                     }
                     .buttonStyle(.glass)
-                    .disabled(totalMessages == 0)
+                    .disabled((chat?.totalMessages ?? 0) == 0)
                 }
             }
 
-            if mode == .longTerm {
-                longTermPane
-            } else {
-                chatPanes
+            if let longTerm {
+                longTermPane(longTerm)
+            } else if let chat {
+                chatPanes(chat)
             }
         }
         .background(PageBackground())
@@ -180,9 +247,9 @@ struct MemoryView: View {
 
     // MARK: Chat browse
 
-    private var chatPanes: some View {
+    private func chatPanes(_ chat: ChatSnapshot) -> some View {
         HStack(spacing: 0) {
-            conversationPane
+            conversationPane(chat)
                 .frame(width: 300)
                 .background(.ultraThinMaterial)
 
@@ -191,7 +258,7 @@ struct MemoryView: View {
                 .frame(width: 1)
                 .accessibilityHidden(true)
 
-            messagePane
+            messagePane(chat)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -200,9 +267,9 @@ struct MemoryView: View {
     // MARK: Long-term memory
 
     /// 左侧文件夹栏 + 右侧记忆列表（与聊天模式的双栏结构一致）。
-    private var longTermPane: some View {
+    private func longTermPane(_ snapshot: LongTermSnapshot) -> some View {
         HStack(spacing: 0) {
-            memoryFolderPane
+            memoryFolderPane(snapshot)
                 .frame(width: 250)
                 .background(.ultraThinMaterial)
 
@@ -211,7 +278,7 @@ struct MemoryView: View {
                 .frame(width: 1)
                 .accessibilityHidden(true)
 
-            memoryListPane
+            memoryListPane(snapshot)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -219,14 +286,14 @@ struct MemoryView: View {
 
     // MARK: Memory folders
 
-    private var memoryFolderPane: some View {
+    private func memoryFolderPane(_ snapshot: LongTermSnapshot) -> some View {
         VStack(spacing: 0) {
             HStack {
                 Text("文件夹")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(store.longTermMemories.count) 条记忆")
+                Text("\(snapshot.totalMemoryCount) 条记忆")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
@@ -238,9 +305,17 @@ struct MemoryView: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 1) {
-                    memoryFolderRow(.all)
-                    memoryFolderRow(.global)
-                    ForEach(memoryFolderSections) { section in
+                    memoryFolderRow(
+                        .all,
+                        counts: snapshot.folderCounts[MemoryFolder.all.id] ?? MemoryCounts(),
+                        isSelected: snapshot.activeFolder.id == MemoryFolder.all.id
+                    )
+                    memoryFolderRow(
+                        .global,
+                        counts: snapshot.folderCounts[MemoryFolder.global.id] ?? MemoryCounts(),
+                        isSelected: snapshot.activeFolder.id == MemoryFolder.global.id
+                    )
+                    ForEach(snapshot.folderSections) { section in
                         Text(section.title)
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.tertiary)
@@ -248,7 +323,11 @@ struct MemoryView: View {
                             .padding(.top, 10)
                             .padding(.bottom, 2)
                         ForEach(section.folders) { folder in
-                            memoryFolderRow(folder)
+                            memoryFolderRow(
+                                folder,
+                                counts: snapshot.folderCounts[folder.id] ?? MemoryCounts(),
+                                isSelected: snapshot.activeFolder.id == folder.id
+                            )
                         }
                     }
                 }
@@ -262,11 +341,11 @@ struct MemoryView: View {
                 Image(systemName: "star.fill")
                     .font(.system(size: 9))
                     .foregroundStyle(Theme.violet)
-                Text("核心 \(coreMemoryCount) 条")
+                Text("核心 \(snapshot.coreMemoryCount) 条")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(folderCount) 个会话文件夹")
+                Text("\(snapshot.folderSessionCount) 个会话文件夹")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -275,10 +354,12 @@ struct MemoryView: View {
         }
     }
 
-    private func memoryFolderRow(_ folder: MemoryFolder) -> some View {
-        let isSelected = activeFolder.id == folder.id
-        let counts = memoryCounts(for: folder)
-        return Button {
+    private func memoryFolderRow(
+        _ folder: MemoryFolder,
+        counts: MemoryCounts,
+        isSelected: Bool
+    ) -> some View {
+        Button {
             selectedFolder = folder
         } label: {
             HStack(spacing: 8) {
@@ -319,29 +400,35 @@ struct MemoryView: View {
 
     // MARK: Memory list
 
-    private var memoryListPane: some View {
+    private func memoryListPane(_ snapshot: LongTermSnapshot) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Image(systemName: isSearching ? "magnifyingglass" : activeFolder.symbol)
+                Image(systemName: snapshot.isSearching ? "magnifyingglass" : snapshot.activeFolder.symbol)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.accent)
-                Text(listTitle)
+                Text(listTitle(snapshot))
                     .font(.caption.weight(.semibold))
-                Text("\(filteredMemories.count) 条")
+                Text("\(snapshot.memories.count) 条")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
-                if isSearching {
+                if snapshot.isSearching {
                     PillLabel(text: "跨全部记忆", color: Theme.info)
                 }
-                let coreCount = filteredMemories.filter(\.isCore).count
-                if coreCount > 0 {
-                    PillLabel(text: "★ 核心 \(coreCount)", color: Theme.violet)
+                if snapshot.filteredCoreCount > 0 {
+                    PillLabel(text: "★ 核心 \(snapshot.filteredCoreCount)", color: Theme.violet)
                 }
                 Spacer(minLength: 8)
-                Text("权重 = 基础 × 重要度(合并条数对数) × 使用(召回≤+40%) × 30 天半衰期")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                FilterChip(
+                    title: "仅核心",
+                    symbol: "star.fill",
+                    isSelected: onlyCore,
+                    tint: Theme.violet
+                ) {
+                    onlyCore.toggle()
+                }
+                .help(onlyCore ? "显示全部记忆" : "只显示核心记忆")
+                memorySortMenu
+                memoryWeightInfoButton
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
@@ -349,18 +436,25 @@ struct MemoryView: View {
 
             Divider().opacity(0.5)
 
-            if filteredMemories.isEmpty {
+            if snapshot.memories.isEmpty {
                 VStack(spacing: 12) {
                     EmptyState(
                         symbol: "brain.head.profile",
-                        title: emptyTitle,
-                        message: emptyMessage
+                        title: emptyTitle(snapshot),
+                        message: emptyMessage(snapshot)
                     )
-                    if !isSearching {
+                    if !snapshot.isSearching {
                         Button {
-                            startNewMemory()
+                            if onlyCore {
+                                onlyCore = false
+                            } else {
+                                startNewMemory()
+                            }
                         } label: {
-                            Label(emptyActionTitle, systemImage: "plus")
+                            Label(
+                                onlyCore ? "显示全部记忆" : emptyActionTitle(snapshot),
+                                systemImage: onlyCore ? "line.3.horizontal.decrease.circle" : "plus"
+                            )
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(Theme.accent)
@@ -370,7 +464,7 @@ struct MemoryView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 8) {
-                        ForEach(filteredMemories) { memory in
+                        ForEach(snapshot.memories) { memory in
                             LongTermMemoryCard(
                                 memory: memory,
                                 onEdit: { editMemory(memory) },
@@ -393,16 +487,87 @@ struct MemoryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    /// 排序菜单：菜单里直接列出两种模式，标签只显示当前模式，避免挤压顶栏。
+    private var memorySortMenu: some View {
+        Menu {
+            Section("排序方式") {
+                ForEach(MemorySortMode.allCases) { mode in
+                    Button {
+                        sortMode = mode
+                    } label: {
+                        Label(
+                            mode.label,
+                            systemImage: sortMode == mode ? "checkmark" : mode.symbol
+                        )
+                    }
+                }
+            }
+        } label: {
+            Label(sortMode.label, systemImage: sortMode.symbol)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("排序方式：综合权重（核心优先）/ 最近更新")
+        .accessibilityLabel("排序方式：\(sortMode.label)")
+    }
+
+    /// 顶栏只保留「权重」短标签；公式放进 help 与点击弹出的 popover。
+    private var memoryWeightInfoButton: some View {
+        Button {
+            showWeightInfo.toggle()
+        } label: {
+            Label("权重", systemImage: "info.circle")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("综合权重公式：点击查看说明")
+        .accessibilityLabel("综合权重公式说明")
+        .popover(isPresented: $showWeightInfo, arrowEdge: .bottom) {
+            weightInfoPopover
+        }
+    }
+
+    private var weightInfoPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("综合权重", systemImage: "scalemass")
+                .font(.headline)
+            Text("权重越高越优先进入提示词；核心记忆在所属会话内始终注入，不参与权重淘汰。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider()
+            Text(weightFormula)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("编辑、合并或召回都会抬高权重；越近、越常用的记忆优先级越高。")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(width: 350, alignment: .leading)
+    }
+
+    /// 公式引用模型里的系数常量，避免界面说明与实现漂移。
+    private var weightFormula: String {
+        let importanceGrowth = String(format: "%.2f", LongTermMemory.importanceGrowth)
+        let usageGrowth = String(format: "%.2f", LongTermMemory.usageGrowth)
+        let halfLifeDays = Int(LongTermMemory.halfLifeDays)
+        return """
+        权重 = 基础权重 × 重要度 × 使用强化 × 时间衰减
+        重要度 = 1 + \(importanceGrowth) × log₂(1 + 合并条数)
+        使用强化 = 1 + \(usageGrowth) × min(召回次数, \(LongTermMemory.usageCap))
+        时间衰减 = 0.5^(距最近更新或召回天数 / \(halfLifeDays))
+        """
+    }
+
     // MARK: Memory folder derivation
-
-    private var isSearching: Bool {
-        !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private var isAllFolder: Bool {
-        if case .all = activeFolder { return true }
-        return false
-    }
 
     /// 选中的文件夹若已没有记忆（例如删掉最后一条），回退到「全部」。
     private var activeFolder: MemoryFolder {
@@ -414,108 +579,6 @@ struct MemoryView: View {
         case .all, .global: return true
         case .conversation(let id, _, _), .orphaned(let id):
             return store.longTermMemories.contains { $0.conversationID == id }
-        }
-    }
-
-    /// 全部/全局之外，按会话类型分组的会话文件夹（只显示有记忆的会话）。
-    private var memoryFolderSections: [MemoryFolderSection] {
-        let conversationIDs = Set(store.longTermMemories.map(\.conversationID).filter { !$0.isEmpty })
-        guard !conversationIDs.isEmpty else { return [] }
-        let known = Dictionary(
-            store.conversations.map { ($0.id, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-
-        var sections: [MemoryFolderSection] = []
-        var claimed = Set<String>()
-        for kind in [ConversationKind.direct, .group, .official] {
-            let folders = conversationIDs
-                .filter { id in known[id]?.kind == kind }
-                .compactMap { id -> MemoryFolder? in
-                    guard let conversation = known[id] else { return nil }
-                    return .conversation(id: id, title: conversation.displayTitle, kind: kind)
-                }
-                .sorted { lhs, rhs in
-                    let left = memoryCounts(for: lhs).total
-                    let right = memoryCounts(for: rhs).total
-                    if left != right { return left > right }
-                    return lhs.title.localizedCompare(rhs.title) == .orderedAscending
-                }
-            guard !folders.isEmpty else { continue }
-            for folder in folders { claimed.insert(folder.conversationID) }
-            sections.append(MemoryFolderSection(id: kind.rawValue, title: kind.label, folders: folders))
-        }
-
-        let orphanedIDs = conversationIDs.subtracting(claimed).sorted()
-        if !orphanedIDs.isEmpty {
-            sections.append(MemoryFolderSection(
-                id: "orphaned",
-                title: "未关联会话",
-                folders: orphanedIDs.map { MemoryFolder.orphaned(id: $0) }
-            ))
-        }
-        return sections
-    }
-
-    private var folderCount: Int {
-        memoryFolderSections.reduce(0) { $0 + $1.folders.count }
-    }
-
-    private var coreMemoryCount: Int {
-        store.longTermMemories.filter(\.isCore).count
-    }
-
-    private func memoryCounts(for folder: MemoryFolder) -> (total: Int, core: Int) {
-        let matches: [LongTermMemory]
-        switch folder {
-        case .all: matches = store.longTermMemories
-        case .global: matches = store.longTermMemories.filter(\.isGlobal)
-        case .conversation(let id, _, _), .orphaned(let id):
-            matches = store.longTermMemories.filter { $0.conversationID == id }
-        }
-        return (matches.count, matches.filter(\.isCore).count)
-    }
-
-    private var listTitle: String {
-        isSearching ? "搜索结果" : activeFolder.title
-    }
-
-    private var emptyTitle: String {
-        if isSearching { return "没有匹配的长期记忆" }
-        return isAllFolder ? "还没有长期记忆" : "此文件夹暂无长期记忆"
-    }
-
-    private var emptyMessage: String {
-        if isSearching {
-            return "尝试其他关键词；搜索会跨全部记忆匹配摘要、会话标题与 ID。"
-        }
-        if isAllFolder {
-            return "短期窗口外攒够 \(ChatEngine.overflowBatchThreshold) 条旧消息后会自动批量总结；也可以手动新增核心记忆。"
-        }
-        return "新增的记忆默认归入当前文件夹，也可以在编辑器中改到其它会话。"
-    }
-
-    private var emptyActionTitle: String {
-        isAllFolder ? "新增第一条长期记忆" : "新增记忆"
-    }
-
-    private var filteredMemories: [LongTermMemory] {
-        let keyword = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        let list: [LongTermMemory]
-        if keyword.isEmpty {
-            list = store.longTermMemories.filter { activeFolder.contains($0) }
-        } else {
-            list = store.longTermMemories.filter {
-                $0.summary.localizedCaseInsensitiveContains(keyword)
-                    || $0.conversationTitle.localizedCaseInsensitiveContains(keyword)
-                    || $0.conversationID.localizedCaseInsensitiveContains(keyword)
-            }
-        }
-        return list.sorted {
-            if $0.isCore != $1.isCore { return $0.isCore && !$1.isCore }
-            let left = $0.timeWeight(), right = $1.timeWeight()
-            if abs(left - right) > 0.000001 { return left > right }
-            return $0.updatedAt > $1.updatedAt
         }
     }
 
@@ -549,14 +612,14 @@ struct MemoryView: View {
 
     // MARK: Conversation pane
 
-    private var conversationPane: some View {
+    private func conversationPane(_ chat: ChatSnapshot) -> some View {
         VStack(spacing: 0) {
             HStack {
                 Text("会话")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(store.conversations.count)")
+                Text("\(chat.conversationCount)")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
@@ -566,7 +629,7 @@ struct MemoryView: View {
 
             Divider().opacity(0.5)
 
-            if filteredConversations.isEmpty {
+            if chat.filteredConversations.isEmpty {
                 EmptyState(
                     symbol: "brain",
                     title: "记忆库为空",
@@ -578,8 +641,11 @@ struct MemoryView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 1) {
-                        ForEach(filteredConversations) { conversation in
-                            memoryConversationRow(conversation)
+                        ForEach(chat.filteredConversations) { conversation in
+                            memoryConversationRow(
+                                conversation,
+                                count: chat.messageCounts[conversation.id] ?? 0
+                            )
                         }
                     }
                     .padding(.horizontal, 6)
@@ -592,7 +658,7 @@ struct MemoryView: View {
                 Image(systemName: "cylinder.split.1x2")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
-                Text("\(totalMessages) 条消息")
+                Text("\(chat.totalMessages) 条消息")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -603,9 +669,8 @@ struct MemoryView: View {
         }
     }
 
-    private func memoryConversationRow(_ conversation: Conversation) -> some View {
+    private func memoryConversationRow(_ conversation: Conversation, count: Int) -> some View {
         let isSelected = selectedConversationID == conversation.id
-        let count = (store.messages[conversation.id] ?? []).count
         return Button {
             selectedConversationID = conversation.id
         } label: {
@@ -641,20 +706,20 @@ struct MemoryView: View {
 
     // MARK: Message pane
 
-    private var messagePane: some View {
+    private func messagePane(_ chat: ChatSnapshot) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 if !search.isEmpty {
                     Label("搜索结果", systemImage: "magnifyingglass")
                         .font(.caption.weight(.medium))
-                    Text("\(searchResults.count) 条匹配")
+                    Text("\(chat.searchResults.count) 条匹配")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else if let conversation = selectedConversation {
                     AvatarView(title: conversation.displayTitle, kind: conversation.kind, size: 22)
                     Text(conversation.displayTitle)
                         .font(.caption.weight(.semibold))
-                    Text("\(selectedMessages.count) 条消息")
+                    Text("\(chat.selectedMessages.count) 条消息")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else {
@@ -676,14 +741,14 @@ struct MemoryView: View {
 
             if search.isEmpty {
                 if selectedConversation != nil {
-                    if selectedMessages.isEmpty {
+                    if chat.selectedMessages.isEmpty {
                         EmptyState(
                             symbol: "text.bubble",
                             title: "此会话暂无记录",
                             message: "新的消息会自动写入记忆库。"
                         )
                     } else {
-                        messageList(selectedMessages, showConversation: false)
+                        messageList(chat.selectedMessages, showConversation: false, titles: chat.conversationTitles)
                     }
                 } else {
                     EmptyState(
@@ -693,27 +758,34 @@ struct MemoryView: View {
                     )
                 }
             } else {
-                if searchResults.isEmpty {
+                if chat.searchResults.isEmpty {
                     EmptyState(
                         symbol: "magnifyingglass",
                         title: "没有匹配的消息",
                         message: "尝试其他关键词，搜索会匹配消息文本与会话标题。"
                     )
                 } else {
-                    messageList(searchResults, showConversation: true)
+                    messageList(chat.searchResults, showConversation: true, titles: chat.conversationTitles)
                 }
             }
         }
     }
 
-    private func messageList(_ messages: [ChatMessage], showConversation: Bool) -> some View {
+    private func messageList(
+        _ messages: [ChatMessage],
+        showConversation: Bool,
+        titles: [String: String]
+    ) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(messages) { message in
                     MemoryMessageRow(
                         message: message,
-                        conversationTitle: showConversation ? conversationTitle(for: message.conversationID) : nil
+                        conversationTitle: showConversation
+                            ? (titles[message.conversationID] ?? message.conversationID)
+                            : nil
                     )
+                    .equatable()
                     Divider().opacity(0.35)
                 }
             }
@@ -721,65 +793,264 @@ struct MemoryView: View {
         }
     }
 
-    // MARK: Derived
+    // MARK: Snapshot derivation
 
-    private var subtitle: String {
+    /// 长期记忆页的一次性派生数据。旧实现里 `filteredMemories` 每次 body 至少求值
+    /// 3-4 次，`memoryFolderSections`/`memoryCounts(for:)` 还会对每个文件夹、每次
+    /// 排序比较都重新遍历全部记忆（O(文件夹 × 记忆数)）；这里统一为一次遍历 + 一次排序。
+    private func makeLongTermSnapshot() -> LongTermSnapshot {
+        let keyword = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isSearching = !keyword.isEmpty
+        let allMemories = store.longTermMemories
+
+        var allCounts = MemoryCounts()
+        var globalCounts = MemoryCounts()
+        var perConversation: [String: MemoryCounts] = [:]
+        var existingConversationIDs = Set<String>()
+        for memory in allMemories {
+            allCounts.total += 1
+            if memory.isCore { allCounts.core += 1 }
+            if memory.isGlobal {
+                globalCounts.total += 1
+                if memory.isCore { globalCounts.core += 1 }
+            }
+            let conversationID = memory.conversationID
+            guard !conversationID.isEmpty else { continue }
+            existingConversationIDs.insert(conversationID)
+            var counts = perConversation[conversationID] ?? MemoryCounts()
+            counts.total += 1
+            if memory.isCore { counts.core += 1 }
+            perConversation[conversationID] = counts
+        }
+
+        var folderCounts: [String: MemoryCounts] = [:]
+        folderCounts[MemoryFolder.all.id] = allCounts
+        folderCounts[MemoryFolder.global.id] = globalCounts
+        for (conversationID, counts) in perConversation {
+            folderCounts[MemoryFolder.conversationFolderID(conversationID)] = counts
+        }
+
+        let activeFolder: MemoryFolder = folderStillExists(selectedFolder, ids: existingConversationIDs)
+            ? selectedFolder
+            : .all
+
+        var filtered: [LongTermMemory]
+        if isSearching {
+            filtered = allMemories.filter {
+                $0.summary.localizedCaseInsensitiveContains(keyword)
+                    || $0.conversationTitle.localizedCaseInsensitiveContains(keyword)
+                    || $0.conversationID.localizedCaseInsensitiveContains(keyword)
+            }
+        } else {
+            filtered = allMemories.filter { activeFolder.contains($0) }
+        }
+        if onlyCore {
+            filtered = filtered.filter(\.isCore)
+        }
+        let filteredCoreCount = filtered.reduce(0) { $0 + ($1.isCore ? 1 : 0) }
+
+        // 排序键只计算一次（timeWeight 涉及 log/exp/日期运算）。旧实现让排序闭包
+        // 对每次比较都调用 timeWeight()，是记忆较多时 body 变慢的主要原因之一。
+        let weighted = filtered.map { (memory: $0, weight: $0.timeWeight()) }
+        let sorted: [LongTermMemory]
+        switch sortMode {
+        case .weight:
+            sorted = weighted.sorted { lhs, rhs in
+                if lhs.memory.isCore != rhs.memory.isCore { return lhs.memory.isCore && !rhs.memory.isCore }
+                if abs(lhs.weight - rhs.weight) > 0.000001 { return lhs.weight > rhs.weight }
+                return lhs.memory.updatedAt > rhs.memory.updatedAt
+            }.map { $0.memory }
+        case .recentlyUpdated:
+            sorted = weighted.sorted { lhs, rhs in
+                if lhs.memory.updatedAt != rhs.memory.updatedAt {
+                    return lhs.memory.updatedAt > rhs.memory.updatedAt
+                }
+                return lhs.weight > rhs.weight
+            }.map { $0.memory }
+        }
+
+        let known = Dictionary(
+            store.conversations.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        var sections: [MemoryFolderSection] = []
+        var claimed = Set<String>()
+        for kind in [ConversationKind.direct, .group, .official] {
+            let folders = existingConversationIDs
+                .filter { id in known[id]?.kind == kind }
+                .compactMap { id -> MemoryFolder? in
+                    guard let conversation = known[id] else { return nil }
+                    return .conversation(id: id, title: conversation.displayTitle, kind: kind)
+                }
+                .sorted { lhs, rhs in
+                    let left = folderCounts[lhs.id]?.total ?? 0
+                    let right = folderCounts[rhs.id]?.total ?? 0
+                    if left != right { return left > right }
+                    return lhs.title.localizedCompare(rhs.title) == .orderedAscending
+                }
+            guard !folders.isEmpty else { continue }
+            for folder in folders { claimed.insert(folder.conversationID) }
+            sections.append(MemoryFolderSection(id: kind.rawValue, title: kind.label, folders: folders))
+        }
+
+        let orphanedIDs = existingConversationIDs.subtracting(claimed).sorted()
+        if !orphanedIDs.isEmpty {
+            sections.append(MemoryFolderSection(
+                id: "orphaned",
+                title: "未关联会话",
+                folders: orphanedIDs.map { MemoryFolder.orphaned(id: $0) }
+            ))
+        }
+
+        return LongTermSnapshot(
+            activeFolder: activeFolder,
+            isSearching: isSearching,
+            memories: sorted,
+            filteredCoreCount: filteredCoreCount,
+            totalMemoryCount: allMemories.count,
+            coreMemoryCount: allCounts.core,
+            folderSections: sections,
+            folderSessionCount: sections.reduce(0) { $0 + $1.folders.count },
+            folderCounts: folderCounts
+        )
+    }
+
+    private func folderStillExists(_ folder: MemoryFolder, ids: Set<String>) -> Bool {
+        switch folder {
+        case .all, .global: return true
+        case .conversation(let id, _, _), .orphaned(let id): return ids.contains(id)
+        }
+    }
+
+    private func isAllFolderScope(_ folder: MemoryFolder) -> Bool {
+        if case .all = folder { return true }
+        return false
+    }
+
+    private func listTitle(_ snapshot: LongTermSnapshot) -> String {
+        snapshot.isSearching ? "搜索结果" : snapshot.activeFolder.title
+    }
+
+    private func emptyTitle(_ snapshot: LongTermSnapshot) -> String {
+        if snapshot.isSearching { return "没有匹配的长期记忆" }
+        if onlyCore { return "没有核心记忆" }
+        return isAllFolderScope(snapshot.activeFolder) ? "还没有长期记忆" : "此文件夹暂无长期记忆"
+    }
+
+    private func emptyMessage(_ snapshot: LongTermSnapshot) -> String {
+        if snapshot.isSearching {
+            var text = "尝试其他关键词；搜索会跨全部记忆匹配摘要、会话标题与 ID。"
+            if onlyCore { text += "当前仅显示核心记忆。" }
+            return text
+        }
+        if onlyCore {
+            return "当前范围没有标记★的核心记忆；关闭「仅核心」可查看全部记忆。"
+        }
+        if isAllFolderScope(snapshot.activeFolder) {
+            return "短期窗口外攒够 \(ChatEngine.overflowBatchThreshold) 条旧消息后会自动批量总结；也可以手动新增一条手写记忆。"
+        }
+        return "新增的记忆默认归入当前文件夹，也可以在编辑器中改到其它会话。"
+    }
+
+    private func emptyActionTitle(_ snapshot: LongTermSnapshot) -> String {
+        isAllFolderScope(snapshot.activeFolder) ? "新增第一条长期记忆" : "新增记忆"
+    }
+
+    private func subtitle(longTerm: LongTermSnapshot?, chat: ChatSnapshot?) -> String {
         if mode == .longTerm {
-            let core = store.longTermMemories.filter(\.isCore).count
-            return "\(store.longTermMemories.count) 条长期记忆 · 核心 \(core)"
+            return "\(longTerm?.totalMemoryCount ?? 0) 条长期记忆 · 核心 \(longTerm?.coreMemoryCount ?? 0)"
                 + " · 短期窗口 \(ChatEngine.shortTermMemoryLimit) 条"
                 + " · 每 \(ChatEngine.overflowBatchThreshold) 条批量总结 · 本地 SQLite"
         }
-        let conversationCount = store.conversations.count
-        return "\(conversationCount) 个会话 · \(totalMessages) 条消息 · 本地 SQLite"
+        return "\(chat?.conversationCount ?? 0) 个会话 · \(chat?.totalMessages ?? 0) 条消息 · 本地 SQLite"
     }
 
-    private var totalMessages: Int {
-        store.messages.values.reduce(0) { $0 + $1.count }
-    }
-
-    private var searchedMessages: [ChatMessage] {
-        store.messages.values.flatMap { $0 }
-    }
-
-    private var searchResults: [ChatMessage] {
+    /// 聊天记录页的一次性派生数据。旧实现里 `searchResults` 每个 body 被求值 2-3 次，
+    /// 且逐条消息调用 `conversationTitle(for:)` 做线性查找（O(消息 × 会话)）。
+    private func makeChatSnapshot() -> ChatSnapshot {
         let keyword = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !keyword.isEmpty else { return [] }
-        return searchedMessages
-            .filter {
-                $0.text.localizedCaseInsensitiveContains(keyword)
-                    || $0.senderName.localizedCaseInsensitiveContains(keyword)
-                    || (conversationTitle(for: $0.conversationID).localizedCaseInsensitiveContains(keyword))
-            }
-            .sorted { $0.timestamp > $1.timestamp }
-    }
+        let isSearching = !keyword.isEmpty
+        let conversations = store.conversations
 
-    private var filteredConversations: [Conversation] {
-        let keyword = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        var list = store.conversations
-        if !keyword.isEmpty {
-            let matchedIDs = Set(searchResults.map(\.conversationID))
-            list = list.filter {
-                matchedIDs.contains($0.id)
-                    || $0.displayTitle.localizedCaseInsensitiveContains(keyword)
-                    || $0.id.localizedCaseInsensitiveContains(keyword)
-            }
+        var titles: [String: String] = [:]
+        titles.reserveCapacity(conversations.count)
+        for conversation in conversations {
+            titles[conversation.id] = conversation.displayTitle
         }
-        return list.sorted { ($0.lastMessageAt ?? .distantPast) > ($1.lastMessageAt ?? .distantPast) }
+
+        var totalMessages = 0
+        var messageCounts: [String: Int] = [:]
+        messageCounts.reserveCapacity(store.messages.count)
+        for (conversationID, list) in store.messages {
+            totalMessages += list.count
+            messageCounts[conversationID] = list.count
+        }
+
+        let searchResults: [ChatMessage]
+        if isSearching {
+            var matches: [ChatMessage] = []
+            for list in store.messages.values {
+                for message in list {
+                    let title = titles[message.conversationID] ?? message.conversationID
+                    if message.text.localizedCaseInsensitiveContains(keyword)
+                        || message.senderName.localizedCaseInsensitiveContains(keyword)
+                        || title.localizedCaseInsensitiveContains(keyword) {
+                        matches.append(message)
+                    }
+                }
+            }
+            matches.sort { $0.timestamp > $1.timestamp }
+            searchResults = matches
+        } else {
+            searchResults = []
+        }
+
+        let filteredConversations: [Conversation]
+        if isSearching {
+            let matchedIDs = Set(searchResults.map(\.conversationID))
+            filteredConversations = conversations
+                .filter {
+                    matchedIDs.contains($0.id)
+                        || $0.displayTitle.localizedCaseInsensitiveContains(keyword)
+                        || $0.id.localizedCaseInsensitiveContains(keyword)
+                }
+                .sorted { ($0.lastMessageAt ?? .distantPast) > ($1.lastMessageAt ?? .distantPast) }
+        } else {
+            filteredConversations = conversations
+                .sorted { ($0.lastMessageAt ?? .distantPast) > ($1.lastMessageAt ?? .distantPast) }
+        }
+
+        // store.messages 中每个会话数组由 appendMessage/loadMessages 保持 timestamp
+        // 升序，因此不再为每次 body 重新排序。
+        let selectedMessages: [ChatMessage] = selectedConversationID.flatMap { store.messages[$0] } ?? []
+
+        return ChatSnapshot(
+            conversationCount: conversations.count,
+            totalMessages: totalMessages,
+            messageCounts: messageCounts,
+            searchResults: searchResults,
+            filteredConversations: filteredConversations,
+            selectedMessages: selectedMessages,
+            conversationTitles: titles
+        )
     }
+
+    // MARK: Derived
 
     private var selectedConversation: Conversation? {
         guard let selectedConversationID else { return nil }
         return store.conversations.first(where: { $0.id == selectedConversationID })
     }
 
+    /// 仅供清理确认弹窗计数使用；消息数组本身已按时间升序维护。
     private var selectedMessages: [ChatMessage] {
         guard let selectedConversationID else { return [] }
-        return (store.messages[selectedConversationID] ?? []).sorted { $0.timestamp < $1.timestamp }
+        return store.messages[selectedConversationID] ?? []
     }
 
-    private func conversationTitle(for id: String) -> String {
-        store.conversations.first(where: { $0.id == id })?.displayTitle ?? id
+    /// 仅供清理确认弹窗计数使用（弹窗内容按需求值，不参与页面 body 渲染）。
+    private var totalMessages: Int {
+        store.messages.values.reduce(0) { $0 + $1.count }
     }
 
     private func selectFirstIfNeeded() {
@@ -841,6 +1112,10 @@ private struct LongTermMemoryCard: View {
                         text: memory.isGlobal ? "全局" : (memory.conversationTitle.isEmpty ? memory.conversationID : memory.conversationTitle),
                         color: memory.isGlobal ? Theme.info : Theme.accent
                     )
+                    PillLabel(
+                        text: memory.source == "manual" ? "手写" : "自动滚动",
+                        color: memory.source == "manual" ? Theme.warning : Color.secondary
+                    )
                     if memory.isCore {
                         PillLabel(text: "★ 核心", color: Theme.violet)
                     }
@@ -850,6 +1125,7 @@ private struct LongTermMemoryCard: View {
                         .font(.system(size: 9.5))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
+                        .help(activityHelp)
                 }
             }
 
@@ -882,10 +1158,27 @@ private struct LongTermMemoryCard: View {
 
     /// 合并条数/召回次数与更新时间合并成一行，避免卡片徽标过多挤压布局。
     private var activitySummary: String {
-        var parts = ["更新 \(UIFormat.relativeShort(memory.updatedAt))"]
+        var parts: [String] = []
+        if isStale { parts.append("7 天以上未更新") }
+        parts.append("更新 \(UIFormat.relativeShort(memory.updatedAt))")
         if memory.sourceCount > 0 { parts.append("合并 \(memory.sourceCount) 条") }
         if memory.accessCount > 0 { parts.append("召回 \(memory.accessCount) 次") }
         return parts.joined(separator: " · ")
+    }
+
+    /// 超过 7 天没更新时给出衰减提示；只读现有字段，不新增模型属性。
+    private var isStale: Bool {
+        Date().timeIntervalSince(memory.updatedAt) > 7 * 86_400
+    }
+
+    private var activityHelp: String {
+        var text = "最近更新 \(UIFormat.fullDateTime.string(from: memory.updatedAt))"
+        if let lastAccessedAt = memory.lastAccessedAt {
+            text += "；最近召回 \(UIFormat.fullDateTime.string(from: lastAccessedAt))"
+        }
+        text += "。距最近更新/召回越久，权重按 \(Int(LongTermMemory.halfLifeDays)) 天半衰期衰减。"
+        if isStale { text += "该记忆已超过 7 天未更新。" }
+        return text
     }
 }
 
@@ -929,9 +1222,10 @@ private struct MemoryEditorSheet: View {
                     .foregroundStyle(isCore ? Theme.violet : Theme.accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(isNew ? "新增长期记忆" : "编辑长期记忆").font(.headline)
-                    Text("核心记忆始终加入上下文；普通记忆按综合权重参与召回")
+                    Text("核心记忆在所属会话内始终注入；关联“全局记忆”时对所有会话生效")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
             }
@@ -950,6 +1244,20 @@ private struct MemoryEditorSheet: View {
                 Text("例如：对方叫小林，喜欢猫；我们约好周五晚上讨论旅行计划。")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+            }
+
+            if isNew {
+                InlineNotice(
+                    kind: .info,
+                    title: "手写记忆",
+                    message: "自动总结不会覆盖手写内容，并会作为后续合并的权威参考。"
+                )
+            } else if original.source != "manual" {
+                InlineNotice(
+                    kind: .warning,
+                    title: "保存后转为手写记忆",
+                    message: "自动总结不再覆盖这条记忆，并作为后续合并的权威参考。"
+                )
             }
 
             HStack(spacing: 14) {
@@ -974,7 +1282,7 @@ private struct MemoryEditorSheet: View {
                     Toggle("核心记忆", isOn: $isCore)
                         .toggleStyle(.switch)
                         .tint(Theme.violet)
-                    Text("核心记忆始终加入上下文，不受权重淘汰")
+                    Text("核心记忆在所属会话内始终注入，不受权重淘汰")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -1140,7 +1448,7 @@ private struct MemoryCleanupSheet: View {
 
 // MARK: - Message row
 
-private struct MemoryMessageRow: View {
+private struct MemoryMessageRow: View, Equatable {
     let message: ChatMessage
     var conversationTitle: String?
 

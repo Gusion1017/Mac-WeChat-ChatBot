@@ -217,10 +217,9 @@ fi
 # ---------- 本地接口自检（不依赖 Gadget） ----------
 
 if [[ "${BRIDGE_SKIP_TESTS:-0}" != "1" ]]; then
-  info "运行 HTTP 鉴权 / WS 动作契约测试（httptest，不连接 Frida）…"
-  ( cd "${BRIDGE_DIR}" && "${GO_BIN}" test -count=1 -timeout=120s \
-      -run 'TestSendHandlerAuth|TestWebSocketGetLoginInfo' . ) \
-    || fail "本地契约测试失败。"
+  info "运行 bridge 单元/契约测试（httptest，不连接 Frida）…"
+  ( cd "${BRIDGE_DIR}" && "${GO_BIN}" test -count=1 -timeout=180s ./... ) \
+    || fail "bridge 测试失败。"
 fi
 
 # ---------- 输出 ----------

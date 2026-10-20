@@ -124,10 +124,8 @@ final class HookManager {
 
     private var bridgeProcess: Process?
     private var bridgeMonitorTask: Task<Void, Never>?
-    private var bridgeRedactedToken: String = ""
-    private var bridgeLogCount = 0
     /// Incremented on every start/stop; stale monitor callbacks from a terminated bridge
-    /// (rapid stop/start, QA kill/restart) are ignored instead of clobbering new status.
+    /// (rapid stop/restart, QA kill/restart) are ignored instead of clobbering new status.
     private var bridgeGeneration = 0
 
     init(wechatPath: String = "/Applications/WeChat.app") {
@@ -140,11 +138,20 @@ final class HookManager {
 
     func currentStatus() -> HookStatus { status }
 
+    /// Reads WeChat's `Info.plist` metadata off the main actor. This is disk I/O that
+    /// used to run synchronously inside `refresh()`/`startBridge()` on the UI thread.
+    private func inspectInstallation() async -> WeChatInstallation {
+        let path = wechatPath
+        return await Task.detached(priority: .utility) {
+            WeChatInstallation.inspect(path: path)
+        }.value
+    }
+
     // MARK: Detection
 
     @discardableResult
     func refresh() async -> HookStatus {
-        let installation = WeChatInstallation.inspect(path: wechatPath)
+        let installation = await inspectInstallation()
         var updated = status
         updated.wechatVersion = installation.version
         updated.wechatBuild = installation.build
@@ -249,7 +256,7 @@ final class HookManager {
         guard let script = AppResources.installScript else { throw HookError.installScriptMissing }
         guard let bridgeRoot = AppResources.root else { throw HookError.resourcesMissing }
 
-        let installation = WeChatInstallation.inspect(path: wechatPath)
+        let installation = await inspectInstallation()
         guard installation.exists else { throw HookError.weChatNotInstalled(wechatPath) }
         guard !Self.isWeChatRunning() else { throw HookError.weChatRunning }
         guard let gadget = AppResources.gadgetDylib, let gadgetConfig = AppResources.gadgetConfig else {
@@ -347,7 +354,7 @@ final class HookManager {
             throw HookError.commandFailed("缺少 tools/manage_wechat.sh")
         }
         guard AppResources.root != nil else { throw HookError.resourcesMissing }
-        let installation = WeChatInstallation.inspect(path: wechatPath)
+        let installation = await inspectInstallation()
         guard installation.exists else { throw HookError.weChatNotInstalled(wechatPath) }
         guard !Self.isWeChatRunning() else { throw HookError.weChatRunning }
 
@@ -390,6 +397,7 @@ final class HookManager {
         gadgetPort: Int,
         explicitVersionConfigPath: String,
         explicitImagePath: String,
+        selfID: String = "",
         configOverrides: [String: String] = [:]
     ) async throws {
         guard bridgeProcess == nil else { return }
@@ -397,7 +405,7 @@ final class HookManager {
         guard let bridgeDirectory = AppResources.bridgeDirectory else { throw HookError.bridgeDirectoryMissing }
         guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw HookError.missingToken }
 
-        let installation = WeChatInstallation.inspect(path: wechatPath)
+        let installation = await inspectInstallation()
         guard installation.exists else { throw HookError.weChatNotInstalled(wechatPath) }
         guard Self.isWeChatRunning() else { throw HookError.weChatNotRunning }
         guard await installation.hasGadgetLoadCommand() else { throw HookError.gadgetNotInstalled }
@@ -431,7 +439,12 @@ final class HookManager {
             throw HookError.imagePathUnavailable
         }
 
-        let arguments = [
+        // bridge 的 cwd 必须保持在 bundle 内的 bridge/（它从这里读 script.js），
+        // 因此日志路径必须显式指到 ~/Library/Logs 下；否则写进 app bundle 会
+        // 破坏 ad-hoc 签名，导致下次启动被系统直接杀掉。
+        try? FileManager.default.createDirectory(at: AppPaths.bridgeLogDirectory, withIntermediateDirectories: true)
+
+        var arguments = [
             "-type=gadget",
             "-gadget_addr=127.0.0.1:\(gadgetPort)",
             "-wechat_conf=\(versionConfig.path)",
@@ -439,10 +452,17 @@ final class HookManager {
             "-token=\(token)",
             "-conn_type=websocket",
             "-image_path=\(imagePath.path)",
+            "-log_file=\(AppPaths.bridgeLogFile.path)",
             // 上游默认 1000ms：既延迟入站事件转发，也延迟发送任务。
             // 本项目已有冷却/每分钟限流，这里收紧到 100ms 以降低端到端延迟。
             "-send_interval=100"
         ]
+        let trimmedSelfID = selfID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedSelfID.isEmpty {
+            // 多账号目录时 image_path 推导可能选错账号；App 已知账号时直接告诉 bridge，
+            // 用于判定自消息方向与 target_id。
+            arguments.append("-self_id=\(trimmedSelfID)")
+        }
 
         let handle = ProcessRunner.launch(
             executable: binary,
@@ -452,8 +472,6 @@ final class HookManager {
         bridgeGeneration += 1
         let generation = bridgeGeneration
         bridgeProcess = handle.process
-        bridgeRedactedToken = token
-        bridgeLogCount = 0
 
         var updated = status
         updated.bridgeRunning = true
@@ -467,20 +485,34 @@ final class HookManager {
         onLog?(.info, "bridge 启动：PID \(updated.bridgePID)，WS \(host):\(port)，配置 \(versionConfig.lastPathComponent)")
 
         bridgeMonitorTask?.cancel()
-        bridgeMonitorTask = Task { [weak self] in
-            guard let self, self.bridgeGeneration == generation else { return }
+        // Consume bridge stdout on a background task: ANSI stripping, redaction, level
+        // classification and log emission all happen off the main actor. Only genuine
+        // status transitions (rare) hop back to the main actor, so a bridge emitting
+        // 3–10 lines/second no longer causes per-line main-thread work / UI churn.
+        let events = handle.events
+        bridgeMonitorTask = Task.detached(priority: .utility) { [weak self] in
+            var lineCount = 0
             do {
-                for try await event in handle.events {
-                    guard self.bridgeGeneration == generation else { return }
+                for try await event in events {
+                    if Task.isCancelled { return }
                     switch event {
-                    case .line(let line, let kind):
-                        self.handleBridgeLine(line, kind: kind, generation: generation)
+                    case .line(let rawLine, let kind):
+                        lineCount += 1
+                        guard let line = HookManager.sanitizeBridgeLine(rawLine, token: token) else { continue }
+                        let level = HookManager.bridgeLineLevel(line, kind: kind)
+                        if lineCount <= 400 || level == .error {
+                            LogPipeline.shared.emit(level, "Hook", "bridge: \(line)")
+                        }
+                        if let effect = HookManager.bridgeLineEffect(line) {
+                            await self?.applyBridgeLineEffect(effect, generation: generation)
+                        }
                     case .terminated(let code):
-                        self.handleBridgeTermination(code, generation: generation)
+                        await self?.handleBridgeTermination(code, generation: generation)
                     }
                 }
             } catch {
-                self.handleBridgeTermination(-1, error: error.localizedDescription, generation: generation)
+                guard !Task.isCancelled else { return }
+                await self?.handleBridgeTermination(-1, error: error.localizedDescription, generation: generation)
             }
         }
     }
@@ -494,7 +526,6 @@ final class HookManager {
             onLog?(.info, "已请求停止 bridge（PID \(process.processIdentifier)）")
         }
         bridgeProcess = nil
-        bridgeRedactedToken = ""
         var updated = status
         updated.bridgeRunning = false
         updated.bridgePID = 0
@@ -510,51 +541,89 @@ final class HookManager {
         stopBridge()
     }
 
-    private func handleBridgeLine(_ rawLine: String, kind: ProcessStreamKind, generation: Int) {
-        guard bridgeGeneration == generation else { return }
-        let line = Self.redact(rawLine, token: bridgeRedactedToken)
-        guard !line.isEmpty else { return }
-        bridgeLogCount += 1
-        let level: LogLevel = line.contains("panic") || line.contains("Fatal") || line.contains("ERROR")
-            ? .error
-            : (kind == .stderr ? .warning : .debug)
-        if bridgeLogCount <= 400 || level == .error {
-            onLog?(level, "bridge: \(line)")
+    // MARK: Bridge output classification (off-main)
+
+    /// Small value describing the status change a bridge log line implies.
+    /// Built off the main actor, applied on it — keeps per-line work off the UI thread.
+    private struct BridgeLineEffect: Sendable {
+        enum DetailUpdate: Sendable {
+            case set(String)
+            case setIfEmpty(String)
         }
 
-        var updated = status
+        var detail: DetailUpdate?
+        var state: HookState?
+        var r3Active: Bool?
+        var r3Seeded: Bool?
+        var r3Queued: Int?
+
+        var isEmpty: Bool {
+            detail == nil && state == nil && r3Active == nil && r3Seeded == nil && r3Queued == nil
+        }
+    }
+
+    /// Strips ANSI escapes and redacts the OneBot token. Returns `nil` for empty lines.
+    nonisolated private static func sanitizeBridgeLine(_ rawLine: String, token: String) -> String? {
+        let line = redact(AnsiText.strip(rawLine), token: token)
+        return line.isEmpty ? nil : line
+    }
+
+    nonisolated private static func bridgeLineLevel(_ line: String, kind: ProcessStreamKind) -> LogLevel {
+        if line.contains("panic") || line.contains("Fatal") || line.contains("ERROR") { return .error }
+        return kind == .stderr ? .warning : .debug
+    }
+
+    nonisolated private static func bridgeLineEffect(_ line: String) -> BridgeLineEffect? {
+        var effect = BridgeLineEffect()
         if line.contains("HTTP 服务启动在") || line.contains("HTTP 服务") {
-            updated.detail = "bridge HTTP 已启动，等待事件连接"
+            effect.detail = .set("bridge HTTP 已启动，等待事件连接")
         }
         if line.contains("FridaGadget") || (line.contains("gadget") && (line.contains("connect") || line.contains("连接"))) {
-            updated.state = .bridgeStarting
-            updated.detail = "Gadget 连接中…"
+            effect.state = .bridgeStarting
+            effect.detail = .set("Gadget 连接中…")
         }
         if line.contains("panic") || line.contains("服务启动失败") || line.contains("Fatal") {
-            updated.state = .failed
-            updated.detail = line
+            effect.state = .failed
+            effect.detail = .set(line)
         }
         // 4.1.15.55 R3 原生发送状态（来自 hook/script.js 的 console 日志）
         if line.contains("R3 原生发送模式") || line.contains("R3: init 完成") {
-            updated.r3Active = true
-            if updated.detail.isEmpty { updated.detail = "R3 原生发送已启用，等待发送句柄" }
+            effect.r3Active = true
+            effect.detail = .setIfEmpty("R3 原生发送已启用，等待发送句柄")
         }
         if line.contains("R3: slot13 捕获 newsendmsg 闭包") || line.contains("R3: 捕获 newsendmsg 闭包") {
-            updated.r3Active = true
-            updated.r3Seeded = true
-            updated.r3Queued = 0
-            updated.detail = "R3 发送句柄已就绪"
+            effect.r3Active = true
+            effect.r3Seeded = true
+            effect.r3Queued = 0
+            effect.detail = .set("R3 发送句柄已就绪")
         }
         if line.contains("尚无发送句柄") || line.contains("尚无真实 newsendmsg 闭包") {
-            updated.r3Active = true
-            updated.r3Seeded = false
-            updated.detail = "R3 等待信号：请在本机微信手动发一条消息以捕获发送句柄"
+            effect.r3Active = true
+            effect.r3Seeded = false
+            effect.detail = .set("R3 等待信号：请在本机微信手动发一条消息以捕获发送句柄")
         }
         if line.contains("消息已排队") {
-            updated.r3Active = true
-            updated.r3Seeded = false
-            if updated.detail.isEmpty { updated.detail = "R3 等待信号：请在本机微信手动发一条消息" }
+            effect.r3Active = true
+            effect.r3Seeded = false
+            effect.detail = .setIfEmpty("R3 等待信号：请在本机微信手动发一条消息")
         }
+        return effect.isEmpty ? nil : effect
+    }
+
+    @MainActor
+    private func applyBridgeLineEffect(_ effect: BridgeLineEffect, generation: Int) {
+        guard bridgeGeneration == generation else { return }
+        var updated = status
+        if let detail = effect.detail {
+            switch detail {
+            case .set(let value): updated.detail = value
+            case .setIfEmpty(let value): if updated.detail.isEmpty { updated.detail = value }
+            }
+        }
+        if let state = effect.state { updated.state = state }
+        if let active = effect.r3Active { updated.r3Active = active }
+        if let seeded = effect.r3Seeded { updated.r3Seeded = seeded }
+        if let queued = effect.r3Queued { updated.r3Queued = queued }
         if updated != status { publish(updated) }
     }
 
@@ -630,7 +699,7 @@ final class HookManager {
         return nil
     }
 
-    private static func redact(_ line: String, token: String = "") -> String {
+    nonisolated private static func redact(_ line: String, token: String = "") -> String {
         var redacted = line
         if !token.isEmpty {
             redacted = redacted.replacingOccurrences(of: token, with: "<redacted-token>")

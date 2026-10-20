@@ -21,13 +21,17 @@ struct ChatReplyPlan: Sendable {
 final class ChatEngine: @unchecked Sendable {
     /// 短期记忆窗口：固定最多 10 条消息。超出的旧消息由 summarizeOverflow 总结。
     static let shortTermMemoryLimit = 10
-    /// 批量总结阈值：短期窗口外未总结消息攒够 20 条才触发一次 AI 总结，
-    /// 避免超过 10 条后每条新消息都调用一次模型。
-    static let overflowBatchThreshold = 20
+    /// 批量总结阈值：短期窗口外未总结消息攒够 8 条才触发一次 AI 总结，
+    /// 既避免每条新消息都调用模型，也把「窗口外未总结」的遗忘区间压到最多 7 条。
+    static let overflowBatchThreshold = 8
     /// 单次批量总结的消息上限（多出的部分留到下一批）。
     static let maxOverflowBatch = 40
     /// 长期记忆正文长度上限；AI 结果与本地兜底摘要都会被压缩到该长度。
     static let summaryCharacterLimit = 600
+    /// 长期记忆正文的要点条数上限（AI 提示与本地兜底共用）。
+    static let summaryBulletLimit = 5
+    /// 同会话早期相关片段的召回条数上限。
+    static let earlierRecallLimit = 3
 
     private let memory: MemoryStore
     private let aiClient: AIClient
@@ -87,8 +91,12 @@ final class ChatEngine: @unchecked Sendable {
         dryRun: Bool
     ) async throws -> ChatReplyPlan {
         let longTermNotes = await recallLongTermMemory(conversation: conversation)
-        let keywordNotes = await recallMemory(conversation: conversation, incoming: incoming)
-        let memoryParts = [longTermNotes, keywordNotes].compactMap { value -> String? in
+        let earlierNotes = await recallEarlierMessages(
+            conversation: conversation,
+            incoming: incoming,
+            history: history
+        )
+        let memoryParts = [longTermNotes, earlierNotes].compactMap { value -> String? in
             guard let value, !value.isEmpty else { return nil }
             return value
         }
@@ -138,6 +146,10 @@ final class ChatEngine: @unchecked Sendable {
         systemLines.append("你在 macOS 微信客户端上以真人身份聊天，回复要简短自然，不要暴露自己是 AI。")
         systemLines.append("当前时间：\(ISO8601DateFormatter.localDateTimeString())")
         systemLines.append("会话类型：\(conversation.kind.label)；会话名称：\(conversation.displayTitle)")
+        if conversation.kind == .group {
+            systemLines.append("群聊消息格式为「发言人：内容」，发言人是微信 ID；"
+                + "请结合长期记忆中的人员对应关系（wxid→昵称）判断谁在说话，回复时不要输出 wxid。")
+        }
         let note = conversation.note.trimmingCharacters(in: .whitespacesAndNewlines)
         if !note.isEmpty {
             systemLines.append("关于此会话的长期记忆：\(note)")
@@ -151,6 +163,7 @@ final class ChatEngine: @unchecked Sendable {
         let configured = max(2, settings.bot.maxContextMessages)
         let maxContext = min(configured, Self.shortTermMemoryLimit)
         let recent = Array(history.suffix(maxContext))
+        let isGroupChat = conversation.kind == .group
         var conversationMessages: [AIMessage] = recent.compactMap { message in
             guard message.direction != .system else { return nil }
             let content = Self.promptText(for: message)
@@ -158,14 +171,36 @@ final class ChatEngine: @unchecked Sendable {
             if message.direction == .outgoing {
                 return .assistant(content)
             }
-            return .user(content)
+            return .user(Self.attributedUserText(content, message: message, isGroupChat: isGroupChat))
         }
         let incomingText = Self.promptText(for: incoming)
         if recent.last?.id != incoming.id, !incomingText.isEmpty {
-            conversationMessages.append(.user(incomingText))
+            conversationMessages.append(.user(
+                Self.attributedUserText(incomingText, message: incoming, isGroupChat: isGroupChat)
+            ))
         }
         messages.append(contentsOf: Self.mergeAdjacentRoles(conversationMessages))
         return messages
+    }
+
+    /// 群聊里给 incoming 内容加上发言人前缀，避免多人群聊丢失说话人；
+    /// 私聊保持原文，减少提示词噪声。
+    static func attributedUserText(_ content: String, message: ChatMessage, isGroupChat: Bool) -> String {
+        guard isGroupChat, let speaker = speakerLabel(for: message) else { return content }
+        return "\(speaker)：\(content)"
+    }
+
+    /// 发言人展示名：优先 senderName，缺失时回退 senderID。
+    static func speakerLabel(for message: ChatMessage) -> String? {
+        let name = message.senderName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty, name != "我", name != "系统", name != "self" {
+            return name
+        }
+        let id = message.senderID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !id.isEmpty, id != "self", id != "system", id != "我" {
+            return id
+        }
+        return nil
     }
 
     static func promptText(for message: ChatMessage) -> String {
@@ -197,28 +232,48 @@ final class ChatEngine: @unchecked Sendable {
 
     // MARK: Memory recall
 
-    private func recallMemory(conversation: Conversation, incoming: ChatMessage) async -> String? {
+    /// 只在本会话内召回短期窗口之外的早期片段：避免把其他会话的原文塞进当前对话。
+    /// 结果明确标注为「较早、可能过时」，最多 `earlierRecallLimit` 条。
+    func recallEarlierMessages(
+        conversation: Conversation,
+        incoming: ChatMessage,
+        history: [ChatMessage]
+    ) async -> String? {
         let text = incoming.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard text.count >= 2 else { return nil }
         let tokens = Self.memoryTokens(from: text)
         guard !tokens.isEmpty else { return nil }
 
+        let recentIDs = Set(history.suffix(Self.shortTermMemoryLimit).map(\.id))
+        let excluded = recentIDs.union([incoming.id])
         var lines: [String] = []
         var seen = Set<String>()
         for token in tokens.prefix(2) {
-            guard let hits = try? await memory.searchMessages(query: token, limit: 4) else { continue }
+            guard let hits = try? await memory.searchMessages(query: token, limit: 12) else { continue }
             for hit in hits {
-                guard hit.message.id != incoming.id else { continue }
-                if hit.message.conversationID == conversation.id { continue }
-                let snippet = Self.promptText(for: hit.message)
+                let message = hit.message
+                guard message.conversationID == conversation.id else { continue }
+                guard !excluded.contains(message.id) else { continue }
+                guard message.direction != .system else { continue }
+                guard message.timestamp <= incoming.timestamp else { continue }
+                let snippet = Self.promptText(for: message)
                 guard snippet.count >= 2, !seen.contains(snippet) else { continue }
                 seen.insert(snippet)
-                lines.append("- \(hit.message.direction == .outgoing ? "我" : "对方")：\(snippet.prefix(120))")
-                if lines.count >= 3 { break }
+                let who: String
+                if message.direction == .outgoing {
+                    who = "我"
+                } else if conversation.kind == .group {
+                    who = Self.speakerLabel(for: message) ?? "对方"
+                } else {
+                    who = "对方"
+                }
+                lines.append("- \(who)：\(snippet.prefix(120))")
+                if lines.count >= Self.earlierRecallLimit { break }
             }
-            if lines.count >= 3 { break }
+            if lines.count >= Self.earlierRecallLimit { break }
         }
-        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+        guard !lines.isEmpty else { return nil }
+        return "本会话较早的相关片段（可能已过时，仅供参考）：\n" + lines.joined(separator: "\n")
     }
 
     static func memoryTokens(from text: String) -> [String] {
@@ -269,11 +324,19 @@ final class ChatEngine: @unchecked Sendable {
         try? await memory.recordMemoryAccess(ids: memories.map(\.id))
 
         let lines = memories.map { memory -> String in
-            let badge = memory.isCore ? "★核心" : "记忆"
+            let badge: String
+            if memory.isCore {
+                badge = "★核心"
+            } else if memory.source == "manual" {
+                badge = "手写"
+            } else {
+                badge = "自动"
+            }
             let scope = memory.isGlobal ? "全局" : "本会话"
             return "- [\(badge)·\(scope)·权重 \(memory.weightLabel)] \(memory.summary)"
         }
-        return "长期记忆（核心优先；权重 = 基础 × 重要度 × 使用强化 × 30 天半衰期，越近、越常用越高）：\n"
+        return "长期记忆（核心/手写优先，自动总结仅供参考，冲突时以核心/手写为准；"
+            + "权重越高表示越近、越常用）：\n"
             + lines.joined(separator: "\n")
     }
 
@@ -297,6 +360,8 @@ final class ChatEngine: @unchecked Sendable {
 
         // 同一会话只保留一条自动滚动总结：先合并历史遗留的多条（失败不阻塞）。
         let existing = await consolidateAutoMemories(conversation: conversation)
+        // 用户手写的同会话记忆是权威参考：自动总结要避让，不得覆盖或重复罗列。
+        let manuals = (try? await memory.manualMemories(conversationID: conversation.id)) ?? []
 
         let transcript = Self.transcript(for: overflow.messages)
         guard !transcript.isEmpty else {
@@ -310,16 +375,30 @@ final class ChatEngine: @unchecked Sendable {
         var summary: String?
         if let provider, aiClient.hasCredential(for: provider) {
             var prompt = "请把下面的微信聊天压缩成一条可长期使用的记忆。"
-            prompt += "要求：最多 5 条要点，总长不超过 300 字；与已有记忆合并去重；"
-            prompt += "保留事实、偏好、称呼、约定和未完成事项；删除已解决或过时的细节；不要编造。\n"
+            prompt += "要求：最多 \(Self.summaryBulletLimit) 条要点，每行以「- 」开头，"
+            prompt += "总长不超过 \(Self.summaryCharacterLimit) 字；与已有记忆合并去重；"
+            prompt += "按「人物与称呼 / 偏好 / 约定与待办 / 其他」组织；"
+            prompt += "保留事实、偏好、称呼、约定和未完成事项；删除已解决或过时的细节；"
+            prompt += "不要编造；不要罗列成员 wxid 清单，提到人时优先用已知称呼。\n"
             prompt += "\n会话：\(conversation.displayTitle)（\(conversation.kind.label)）\n"
+            if !manuals.isEmpty {
+                let manualText = manuals
+                    .map(\.summary)
+                    .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                    .joined(separator: "\n")
+                if !manualText.isEmpty {
+                    prompt += "\n用户手写记忆（权威参考，必须保留原意，不要覆盖或重复罗列）：\n"
+                    prompt += "\(manualText.prefix(1_200))\n"
+                }
+            }
             if let existing, !existing.summary.isEmpty {
-                prompt += "\n已有长期记忆（请在此基础上合并去重，保留仍然有效的内容）：\n\(existing.summary)\n"
+                prompt += "\n已有自动记忆（请在此基础上合并去重，保留仍然有效的内容）：\n\(existing.summary)\n"
             }
             prompt += "\n新增对话（\(overflow.messages.count) 条）：\n\(transcript)"
             let messages: [AIMessage] = [
                 .system("你负责维护聊天机器人的长期记忆。只输出更新后的记忆正文，"
-                    + "用不超过 5 条要点组织，不要解释，总长不超过 \(Self.summaryCharacterLimit) 字。"),
+                    + "最多 \(Self.summaryBulletLimit) 条要点，每行以「- 」开头，"
+                    + "不要解释，总长不超过 \(Self.summaryCharacterLimit) 字。"),
                 .user(prompt)
             ]
             do {

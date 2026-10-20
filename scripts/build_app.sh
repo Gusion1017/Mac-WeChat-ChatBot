@@ -74,6 +74,11 @@ chmod +x "$RES/tools/manage_wechat.sh" "$RES/tools/install_gadget.sh"
 cp "$ROOT_DIR/LICENSE" "$RES/LICENSE" 2>/dev/null || true
 cp "$ROOT_DIR/ThirdPartyNotices.txt" "$RES/ThirdPartyNotices.txt" 2>/dev/null || true
 
+# 旧版 bridge 会在运行期把日志写进 Contents/Resources/bridge/log/，破坏 ad-hoc
+# 签名并导致下次启动被系统杀掉。新版日志外置到 ~/Library/Logs/WeChatAI/bridge/，
+# 打包时绝不能把本地调试残留的 log/ 带进 bundle。
+rm -rf "$RES/bridge/log"
+
 # Icon sanity (macOS uses AppIcon.icns declared in Info.plist).
 [ -s "$RES/AppIcon.icns" ] || say "WARNING: AppIcon.icns missing"
 

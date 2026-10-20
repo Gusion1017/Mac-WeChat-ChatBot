@@ -245,6 +245,10 @@ private final class ProcessLifecycle: @unchecked Sendable {
 
 /// Splits streamed bytes into complete lines. Thread-safe: reader callbacks may run
 /// concurrently for stdout/stderr.
+///
+/// ANSI escape codes are removed here, on the background pipe-reader threads, before
+/// lines are yielded to callers — so bridge colour codes never reach the main actor,
+/// the log buffer or SQLite. Content-only consumers (scripts, otool) see the same text.
 private final class LineBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var buffer = ""
@@ -259,7 +263,7 @@ private final class LineBuffer: @unchecked Sendable {
             var line = String(buffer[buffer.startIndex..<index])
             if line.hasSuffix("\r") { line.removeLast() }
             buffer.removeSubrange(buffer.startIndex...index)
-            lines.append(line)
+            lines.append(AnsiText.strip(line))
         }
         return lines
     }
@@ -267,7 +271,7 @@ private final class LineBuffer: @unchecked Sendable {
     func flush() -> String? {
         lock.lock()
         defer { lock.unlock() }
-        let remainder = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remainder = AnsiText.strip(buffer).trimmingCharacters(in: .whitespacesAndNewlines)
         buffer = ""
         return remainder.isEmpty ? nil : remainder
     }

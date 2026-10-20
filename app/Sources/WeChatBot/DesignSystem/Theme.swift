@@ -212,6 +212,17 @@ enum UIFormat {
         return path
     }
 
+    /// 实时计时文案（回复流水线）：60 秒内保留一位小数，超过后显示「分 秒」。
+    static func liveSeconds(_ interval: TimeInterval) -> String {
+        let value = max(0, interval)
+        if value < 60 {
+            return String(format: "%.1f 秒", value)
+        }
+        let minutes = Int(value) / 60
+        let seconds = Int(value) % 60
+        return "\(minutes) 分 \(String(format: "%02d", seconds)) 秒"
+    }
+
     static func logLine(_ entry: LogEntry) -> String {
         let stamp = fullDateTime.string(from: entry.date)
         return "\(stamp) [\(entry.level.label)] \(entry.source): \(entry.message)"

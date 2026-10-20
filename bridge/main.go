@@ -66,10 +66,15 @@ func initFlag() {
 	flag.StringVar(&config.ConnType, "conn_type", "http", "连接类型: http | websocket")
 	flag.IntVar(&config.SendInterval, "send_interval", 1000, "发送间隔: ms")
 	flag.IntVar(&config.WechatPid, "wechat_pid", 0, "微信进程 PID，不设置则自动查找")
+	flag.StringVar(&selfIDFlag, "self_id", "", "当前微信账号 wxid（App 已知时传入；优先于 image_path 推导）")
+	flag.StringVar(&logFilePath, "log_file", "./log/macos.log", "日志文件路径（App 会指向 ~/Library/Logs/WeChatAI/bridge/macos.log，避免写入 app bundle）")
 	flag.StringVar(&logLevel, "log_level", "info", "log level")
 
 	flag.Parse()
 
+	if selfIDFlag != "" {
+		myWechatId = selfIDFlag
+	}
 	if myWechatId == "" && config.ImagePath != "" {
 		if idx := strings.Index(config.ImagePath, "xwechat_files/"); idx != -1 {
 			rest := config.ImagePath[idx+len("xwechat_files/"):]

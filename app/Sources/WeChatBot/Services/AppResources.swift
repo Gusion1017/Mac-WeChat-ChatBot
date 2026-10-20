@@ -43,6 +43,23 @@ enum AppResources {
         return binary
     }
 
+    /// 旧版 bridge 的日志写在 `Contents/Resources/bridge/log/macos.log`，
+    /// 这会在 ad-hoc 签名的 bundle 里多出一个未封存的文件，导致下次启动被
+    /// macOS 以 `Launch Constraint Violation` 杀掉。新版日志已外置到
+    /// `AppPaths.bridgeLogDirectory`；这里启动时顺手清掉历史残留（自愈）。
+    @discardableResult
+    static func removeLegacyBridgeLog() -> Bool {
+        guard let bridgeDirectory else { return false }
+        let legacy = bridgeDirectory.appendingPathComponent("log", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: legacy.path) else { return false }
+        do {
+            try FileManager.default.removeItem(at: legacy)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     static var hookDirectory: URL? {
         guard let root else { return nil }
         let directory = root.appendingPathComponent("hook", isDirectory: true)
@@ -159,24 +176,46 @@ enum AppResources {
     }
 
     /// WeChat's media temp directory. The upstream bridge derives the wxid from
-    /// `.../xwechat_files/<account>/temp/`, so any existing account temp dir works.
+    /// `.../xwechat_files/<account>/temp/`.
+    ///
+    /// 一台 Mac 上可能同时存在多个账号目录（例如主号和机器人号都登录过）。
+    /// 旧实现按目录名字典序取第一个，常把 image_path 指到**非当前登录**的账号，
+    /// 进而让 bridge 推导出错误的 myWechatId（影响自消息方向/发送 proto）。
+    /// 现在改为取最近有活动的账号：优先看 session/message 库与 temp 的 mtime。
     static func imageDirectory() -> URL? {
         let containers = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files",
                                     isDirectory: true)
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: containers,
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles]
         ) else { return nil }
+
+        func mtime(_ url: URL) -> Date {
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+                ?? .distantPast
+        }
+
+        var best: (temp: URL, activity: Date)?
         for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
             let temp = entry.appendingPathComponent("temp", isDirectory: true)
             var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: temp.path, isDirectory: &isDirectory), isDirectory.boolValue {
-                return temp
+            guard FileManager.default.fileExists(atPath: temp.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { continue }
+            let activity = max(
+                max(mtime(entry), mtime(temp)),
+                max(
+                    mtime(entry.appendingPathComponent("db_storage/session/session.db")),
+                    mtime(entry.appendingPathComponent("db_storage/message/message_0.db"))
+                )
+            )
+            if best == nil || activity > best!.activity {
+                best = (temp, activity)
             }
         }
-        return nil
+        // 只返回目录；账号身份由 App 通过 -self_id 传给 bridge（见 HookManager）。
+        return best?.temp
     }
 
     static func candidateRoots() -> [URL] {

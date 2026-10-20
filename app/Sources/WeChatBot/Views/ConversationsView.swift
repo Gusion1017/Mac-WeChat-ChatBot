@@ -10,6 +10,8 @@ struct ConversationsView: View {
     @State private var draft = ""
     @State private var isSending = false
     @State private var workingHoursTarget: Conversation?
+    /// Coalesces deferred programmatic scrolling (see `scheduleScrollToBottom`).
+    @State private var autoScrollTask: Task<Void, Never>?
 
     enum ConversationFilter: String, CaseIterable, Identifiable {
         case all
@@ -43,11 +45,10 @@ struct ConversationsView: View {
         }
         .background(PageBackground())
         .onAppear { selectFirstIfNeeded() }
+        .onDisappear { autoScrollTask?.cancel() }
         .onChange(of: store.selectedConversationID) { _, newValue in
-            guard let newValue else {
-                selectFirstIfNeeded()
-                return
-            }
+            // nil 是用户「再次点击当前会话行收起对话」的合法状态，不再自动选回第一条。
+            guard let newValue else { return }
             markRead(conversationID: newValue)
         }
         .sheet(item: $workingHoursTarget) { conversation in
@@ -64,7 +65,10 @@ struct ConversationsView: View {
     // MARK: Conversation list
 
     private var conversationList: some View {
-        VStack(spacing: 0) {
+        // Derived once per body instead of re-filtering/re-sorting for the empty
+        // check and the ForEach separately.
+        let visibleConversations = filteredConversations
+        return VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 9) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text("会话")
@@ -93,7 +97,7 @@ struct ConversationsView: View {
 
             Divider().opacity(0.5)
 
-            if filteredConversations.isEmpty {
+            if visibleConversations.isEmpty {
                 EmptyState(
                     symbol: store.conversations.isEmpty ? "bubble.left.and.bubble.right" : "magnifyingglass",
                     title: store.conversations.isEmpty ? "还没有会话" : "没有匹配的会话",
@@ -105,10 +109,11 @@ struct ConversationsView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 1) {
-                        ForEach(filteredConversations) { conversation in
+                        ForEach(visibleConversations) { conversation in
                             SessionRow(
                                 conversation: conversation,
                                 isSelected: store.selectedConversationID == conversation.id,
+                                replyProgress: store.replyProgress[conversation.id],
                                 onSelect: { select(conversation) }
                             )
                         }
@@ -161,7 +166,7 @@ struct ConversationsView: View {
                 EmptyState(
                     symbol: "bubble.left.and.bubble.right",
                     title: "选择一个会话",
-                    message: "从左侧选择一个聊天，查看消息并在需要时手动发送回复。",
+                    message: "从左侧选择一个聊天，查看消息并在需要时手动发送回复；再次点击当前会话行可收起对话。",
                     actionTitle: store.conversations.isEmpty ? "启动机器人" : nil
                 ) {
                     store.sidebarSelection = .bot
@@ -198,13 +203,8 @@ struct ConversationsView: View {
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    if store.selectedMessages.last?.status == .generating {
-                        HStack(spacing: 3) {
-                            ProgressView().controlSize(.mini)
-                            Text("AI 正在生成…")
-                                .font(.caption2)
-                                .foregroundStyle(Theme.accent)
-                        }
+                    if let progress = store.replyProgress[conversation.id] {
+                        ReplyStatusBadge(progress: progress)
                     }
                 }
             }
@@ -282,10 +282,10 @@ struct ConversationsView: View {
     }
 
     private func messageList(_ conversation: Conversation) -> some View {
-        ScrollViewReader { proxy in
+        let messages = store.messages[conversation.id] ?? []
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 7) {
-                    let messages = store.messages[conversation.id] ?? []
                     if messages.isEmpty {
                         EmptyState(
                             symbol: "text.bubble",
@@ -297,12 +297,13 @@ struct ConversationsView: View {
                         ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
                             if index == 0 || message.timestamp.timeIntervalSince(messages[index - 1].timestamp) > 300 {
                                 DateSeparator(date: message.timestamp)
+                                    .equatable()
                             }
                             MessageBubble(
                                 message: message,
                                 showsSender: conversation.kind == .group
                             )
-                            .id(message.id)
+                            .equatable()
                         }
                     }
                     Color.clear
@@ -314,14 +315,19 @@ struct ConversationsView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .scrollIndicators(.automatic)
-            .defaultScrollAnchor(.bottom)
-            .onChange(of: store.messages[conversation.id]?.count) { _, _ in
-                withAnimation(.smooth(duration: 0.2)) {
-                    proxy.scrollTo("conversation-bottom", anchor: .bottom)
-                }
+            // NOTE: `.defaultScrollAnchor(.bottom)` is intentionally gone. It re-anchors
+            // the scroll view on every content-size change, which keeps a LazyVStack
+            // dirty while it prefetches (crash stack: LazyLayoutViewCache.signalPrefetch
+            // -> NSHostingView.requestUpdate -> setNeedsUpdateConstraints). The bottom
+            // position is restored explicitly after the layout update instead.
+            .onChange(of: messages.last?.id) { _, _ in
+                scheduleScrollToBottom(proxy)
             }
             .onChange(of: conversation.id) { _, _ in
-                proxy.scrollTo("conversation-bottom", anchor: .bottom)
+                scheduleScrollToBottom(proxy, delay: .zero)
+            }
+            .onAppear {
+                scheduleScrollToBottom(proxy, delay: .zero)
             }
         }
     }
@@ -329,6 +335,20 @@ struct ConversationsView: View {
     private func composer(_ conversation: Conversation) -> some View {
         VStack(spacing: 0) {
             Divider().opacity(0.5)
+
+            // 回复流水线状态：AI 生成耗时、拟人化发送倒计时、bridge 回执与失败原因。
+            if let progress = store.replyProgress[conversation.id] {
+                ReplyProgressBar(
+                    progress: progress,
+                    r3Active: store.hookStatus.r3Active,
+                    r3Seeded: store.hookStatus.r3Seeded,
+                    r3Queued: store.hookStatus.r3Queued,
+                    onDismiss: { store.dismissReplyProgress(conversationID: conversation.id) }
+                )
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+            }
+
             VStack(spacing: 7) {
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField("输入消息…", text: $draft, axis: .vertical)
@@ -432,6 +452,22 @@ struct ConversationsView: View {
         }
     }
 
+    /// 把自动滚动推迟到当前布局周期之外执行，并合并连续消息到达产生的多次滚动请求。
+    /// 在懒惰容器的布局过程中直接 `scrollTo` 会再次触发 lazy prefetch / 布局更新，
+    /// 正是 AppKit display-cycle 布局次数超限崩溃的触发路径。
+    /// - Parameter delay: 新消息到达时留出一小段时间让 layout 收敛；切换会话/首次出现
+    ///   只需等到下一个 main-actor tick，避免用户看到列表先停在顶部的闪烁。
+    private func scheduleScrollToBottom(_ proxy: ScrollViewProxy, delay: Duration = .milliseconds(50)) {
+        autoScrollTask?.cancel()
+        autoScrollTask = Task { @MainActor in
+            if delay > .zero {
+                try? await Task.sleep(for: delay)
+            }
+            guard !Task.isCancelled else { return }
+            proxy.scrollTo("conversation-bottom", anchor: .bottom)
+        }
+    }
+
     // MARK: Actions
 
     private func selectFirstIfNeeded() {
@@ -443,7 +479,12 @@ struct ConversationsView: View {
         }
     }
 
+    /// 点击会话行：未选中时打开；已选中时再次点击收起当前对话（回到空状态）。
     private func select(_ conversation: Conversation) {
+        if store.selectedConversationID == conversation.id {
+            store.selectedConversationID = nil
+            return
+        }
         store.selectedConversationID = conversation.id
         markRead(conversationID: conversation.id)
     }

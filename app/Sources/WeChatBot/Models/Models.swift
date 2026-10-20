@@ -160,6 +160,86 @@ struct ChatMessage: Identifiable, Codable, Hashable {
     }
 }
 
+// MARK: - Live reply pipeline
+
+/// 自动回复流水线的当前阶段。仅用于运行期 UI 展示（不写数据库、不参与重启恢复），
+/// 让用户能直接看出消息卡在「AI 生成 / 拟人化延迟 / 发送」中的哪一步。
+enum ReplyStage: String, Sendable, Equatable {
+    /// 正在等待 AI 返回完整回复（请求已发出，耗时取决于模型与网络）。
+    case generating
+    /// AI 已返回，正在等待拟人化随机延迟结束；`countdownEnd` 是真实的发送倒计时。
+    case waitingToSend
+    /// 正在把消息提交给 OneBot / bridge（等待发送回执）。
+    case sending
+    /// 回复已投递成功（短暂展示后自动收起）。
+    case completed
+    /// 回复失败（保留展示，可手动关闭）。
+    case failed
+
+    var label: String {
+        switch self {
+        case .generating: "AI 正在生成回复"
+        case .waitingToSend: "等待发送"
+        case .sending: "正在发送"
+        case .completed: "回复已发送"
+        case .failed: "回复失败"
+        }
+    }
+
+    var isActive: Bool {
+        self == .generating || self == .waitingToSend || self == .sending
+    }
+
+    /// 完成/失败态没有持续计时需求，UI 不需要以刷新频率驱动 TimelineView。
+    var needsTicking: Bool { isActive }
+}
+
+/// 单个会话当前的自动回复进度快照。
+///
+/// `countdownEnd` 只在已知剩余时间时（拟人化延迟）存在；AI 生成阶段耗时不可预知，
+/// 因此 UI 显示「已等待」正向计时，拟人化阶段显示「N 秒后发送」倒计时。
+struct ReplyProgress: Identifiable, Equatable, Sendable {
+    let conversationID: String
+    var stage: ReplyStage
+    /// 整个回复流水线开始时间（用于总耗时）。
+    let startedAt: Date
+    /// 当前阶段开始时间（用于阶段耗时）。
+    var stageStartedAt: Date
+    /// 已知延迟的结束时间；只有 `waitingToSend` 阶段设置。
+    var countdownEnd: Date?
+    /// 拟人化延迟总长度（秒），用于倒计时进度条比例。
+    var countdownTotal: TimeInterval?
+    var providerName: String?
+    var model: String?
+    var segmentIndex: Int?
+    var segmentCount: Int?
+    var note: String?
+    var errorText: String?
+
+    var id: String { conversationID }
+
+    /// 当前倒计时剩余秒数；未设置倒计时时为 nil，倒计时结束后为 0。
+    func remainingSeconds(at date: Date) -> TimeInterval? {
+        guard let countdownEnd else { return nil }
+        return max(0, countdownEnd.timeIntervalSince(date))
+    }
+
+    /// 倒计时已消耗比例（0...1），用于 determinate 进度条。
+    func countdownFraction(at date: Date) -> Double? {
+        guard let total = countdownTotal, total > 0,
+              let remaining = remainingSeconds(at: date) else { return nil }
+        return min(1, max(0, 1 - remaining / total))
+    }
+
+    func elapsedSeconds(at date: Date) -> TimeInterval {
+        max(0, date.timeIntervalSince(startedAt))
+    }
+
+    func stageElapsedSeconds(at date: Date) -> TimeInterval {
+        max(0, date.timeIntervalSince(stageStartedAt))
+    }
+}
+
 // MARK: - AI Providers
 
 enum ProviderKind: String, Codable, CaseIterable, Hashable, Identifiable {
@@ -299,7 +379,7 @@ struct ScheduledTask: Identifiable, Codable, Hashable {
 /// - 使用强化 = 1 + 0.02 × min(accessCount, 20)，最多 +40%；
 /// - 衰减锚点取 `updatedAt` 与 `lastAccessedAt` 中较晚者：更新或召回都会刷新权重。
 ///
-/// 核心记忆（isCore）始终加入上下文，但仍展示综合权重。
+/// 核心记忆（isCore）在所属会话（或全局）内优先注入，但仍展示综合权重。
 struct LongTermMemory: Identifiable, Codable, Hashable {
     var id: String = UUID().uuidString
     /// 空字符串表示全局记忆；否则为对应会话 ID。

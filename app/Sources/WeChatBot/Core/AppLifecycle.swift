@@ -44,6 +44,7 @@ struct MainWindowBehavior: NSViewRepresentable {
             if self.window === window {
                 MainWindowRegistry.window = window
                 applyCloseAction(to: window)
+                CrashReporter.noteMainWindowPresented()
                 return
             }
             if let keyObserver {
@@ -53,6 +54,8 @@ struct MainWindowBehavior: NSViewRepresentable {
             window.isReleasedWhenClosed = false
             MainWindowRegistry.window = window
             applyCloseAction(to: window)
+            // SwiftUI 场景真正挂载到窗口后记一笔面包屑：崩溃取证时能确认“主窗口已出现”。
+            CrashReporter.noteMainWindowPresented()
             keyObserver = NotificationCenter.default.addObserver(
                 forName: NSWindow.didBecomeKeyNotification,
                 object: window,
@@ -122,6 +125,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var workspaceObservers: [NSObjectProtocol] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 启动完成：AppKit 自己的顶层异常处理器可能在此前覆盖了 App.init 安装的那次，
+        // 这里再装一遍（实测只有 launch 阶段安装的处理器才会被真正调用）。
+        CrashReporter.reinstallExceptionHandler(phase: "didFinishLaunching")
+        CrashReporter.markPhase(.running)
+        CrashReporter.captureSnapshot(reason: "didFinishLaunching", force: true)
+        // 主线程看门狗：给「卡顿 → 布局风暴 → 显示周期断言」这条链路留下时间线。
+        MainThreadWatchdog.shared.start()
+
         let settings = SettingsStore.load()
         SleepPreventionCenter.shared.apply(mode: settings.general.sleepPrevention)
         // Re-assert the persisted Dock preference once the run loop is up; AppKit can
@@ -141,9 +152,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             })
         }
+
+        #if DEBUG
+        // 诊断自检（仅 DEBUG 二进制）：WECHATAI_CRASHTEST=1 时主动抛一个未捕获异常，
+        // 用来验证 crash-*.log 确实被写出。计划任务/正常使用不会设置这个变量。
+        if ProcessInfo.processInfo.environment["WECHATAI_CRASHTEST"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                NSException(
+                    name: .internalInconsistencyException,
+                    reason: "WECHATAI_CRASHTEST 诊断自检（不是真实故障）",
+                    userInfo: nil
+                ).raise()
+            }
+        }
+        #endif
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // 稳定性：App.init 已安装过安全阀，这里在 AppKit 窗口出现前再确认一次（幂等）。
+        AppKitLayoutGuard.install("applicationWillFinishLaunching")
+        // AppKit 在启动早期会覆盖 `NSSetUncaughtExceptionHandler`，
+        // 必须在这里重新安装，否则未捕获异常处理器不会被调用（macOS 26 实测）。
+        // `install()` 幂等：App.init 已装过时只会重装处理器。
+        CrashReporter.install()
+        CrashReporter.markPhase(.willFinishLaunch)
+
         // The bundle declares LSUIElement, so it starts as a menu-bar agent; applying
         // the preference here shows a regular Dock icon before the first window appears
         // when the setting is on. It also re-asserts a hidden Dock icon at launch.
@@ -170,6 +203,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // 正常退出：面包屑写 clean-exit（崩溃时不会走到这里，下次启动即可判定硬退出）。
+        CrashReporter.noteCleanExit(reason: "applicationWillTerminate")
+        MainThreadWatchdog.shared.stop()
         // Drop the idle-sleep assertion explicitly; the process would release it on
         // exit anyway, but this keeps the system state consistent for the whole shutdown.
         SleepPreventionCenter.shared.release()

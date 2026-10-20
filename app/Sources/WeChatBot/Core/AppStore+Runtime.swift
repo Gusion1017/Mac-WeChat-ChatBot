@@ -7,6 +7,7 @@ enum RuntimeError: LocalizedError {
     case providerNotFound(String)
     case noProvider
     case providerNotConfigured(String)
+    case providerCredentialUnreadable(String, OSStatus)
     case conversationNotFound(String)
     case notRunning
 
@@ -15,6 +16,10 @@ enum RuntimeError: LocalizedError {
         case .providerNotFound(let id): return "未找到 AI 服务：\(id)"
         case .noProvider: return "尚未配置 AI 服务，请先在「AI 模型」中添加"
         case .providerNotConfigured(let name): return "AI 服务「\(name)」缺少 API Key，请先配置"
+        case .providerCredentialUnreadable(let name, let status):
+            return "AI 服务「\(name)」的 API Key 无法从钥匙串读取（OSStatus \(status)）。"
+                + "通常是 app 重新构建/重签后钥匙串授权失效：请在「钥匙串访问」删除 "
+                + "\(AppPaths.bundleID) 下的条目，再在「AI 模型」里重新填写 Key。"
         case .conversationNotFound(let id): return "未找到会话：\(id)"
         case .notRunning: return "机器人未运行"
         }
@@ -81,9 +86,15 @@ final class RuntimeCoordinator {
     private var memoryMaintenanceInFlight: Set<String> = []
     private var lastSchedulerTasks: [ScheduledTask] = []
 
-    private var pendingLogs: [LogEntry] = []
-    private var logFlushTask: Task<Void, Never>?
-    private var logWriteCount = 0
+    /// Conversations whose newest message page is loaded synchronously at launch.
+    /// The rest are filled in by a low-priority background prefetch after first paint.
+    private static let preloadedConversationLimit = 48
+    private static let preloadedMessagePageSize = 30
+    /// 超过该时长的事件视为历史回放/补同步，只入库、不触发自动回复。
+    private static let staleReplyWindow: TimeInterval = 120
+    private var backgroundPrefetchTask: Task<Void, Never>?
+    private var selfMentionBackfillTask: Task<Void, Never>?
+
     private var statsFlushTask: Task<Void, Never>?
     private var statsDay: String = RuntimeCoordinator.dayKey()
     private var terminationObserver: NSObjectProtocol?
@@ -93,10 +104,15 @@ final class RuntimeCoordinator {
         self.hookManager = HookManager(wechatPath: store.settings.hook.wechatPath)
         self.chatEngine = ChatEngine(memory: memory, aiClient: aiClient)
 
+        // Single coalescing sink for UI + database log writes (batched every 200 ms).
+        LogPipeline.shared.attach(store: store, memory: memory)
+
         hookManager.onStatusChange = { [weak self] status in
             guard let self else { return }
-            self.store.hookStatus = status
-            self.store.gatewayConnected = status.gatewayConnected
+            if self.store.hookStatus != status { self.store.hookStatus = status }
+            if self.store.gatewayConnected != status.gatewayConnected {
+                self.store.gatewayConnected = status.gatewayConnected
+            }
         }
         hookManager.onLog = { [weak self] level, message in
             self?.log(level, "Hook", message)
@@ -145,6 +161,7 @@ final class RuntimeCoordinator {
         defer { bootstrapping = false }
 
         AppPaths.ensureDirectories()
+        prewarmWeChatVersion()
         log(.info, "Runtime", "正在启动服务层…")
         do {
             try await memory.open()
@@ -164,6 +181,20 @@ final class RuntimeCoordinator {
             if ProcessInfo.processInfo.environment["WECHATAI_SELFTEST_EXIT"] == "1" {
                 exit(Int32(code))
             }
+        }
+    }
+
+    /// Reads WeChat's bundle version off the main thread so it no longer blocks
+    /// `AppStore.init`; the value is only a display fallback until `refreshStatus()`
+    /// publishes the full hook status.
+    private func prewarmWeChatVersion() {
+        let path = store.settings.hook.wechatPath
+        Task { [weak self] in
+            let version = await Task.detached(priority: .utility) {
+                AppStore.installedWeChatVersion(path: path) ?? ""
+            }.value
+            guard let self, !version.isEmpty, self.store.hookStatus.wechatVersion.isEmpty else { return }
+            self.store.hookStatus.wechatVersion = version
         }
     }
 
@@ -257,24 +288,50 @@ final class RuntimeCoordinator {
     }
 
     private func loadPersistedState() async {
+        // selfID 必须最先读：历史数据修复需要用它识别「自己 wxid」会话，
+        // 修复完成后再读取会话/消息，UI 打开时就是修正后的数据。
+        if let id = try? await memory.setting(key: "onebot.self_id"), !id.isEmpty {
+            selfID = id
+        }
+        await repairSelfRoutingIfNeeded()
+
         do {
             store.conversations = try await memory.fetchConversations(limit: 300)
         } catch {
             log(.warning, "Database", "读取会话失败：\(error.localizedDescription)")
         }
 
-        // Preload the newest page for each conversation so the UI has content immediately.
-        var preloaded: [String: [ChatMessage]] = [:]
-        for conversation in store.conversations {
-            if let page = try? await memory.fetchMessages(conversationID: conversation.id, limit: 30) {
-                preloaded[conversation.id] = page
+        // Preload the newest page for the most recent conversations so the UI has
+        // content immediately. One batched SQL query replaces the old N+1 pattern
+        // (one `fetchMessages` round trip per conversation) and bounds the launch
+        // work: 48 conversations × 30 messages instead of up to 300 × 30.
+        let recentConversations = Array(store.conversations.prefix(Self.preloadedConversationLimit))
+        if !recentConversations.isEmpty {
+            if let preloaded = try? await memory.fetchLatestMessages(
+                conversationIDs: recentConversations.map(\.id),
+                perConversation: Self.preloadedMessagePageSize
+            ) {
+                store.messages = preloaded
             }
         }
-        store.messages = preloaded
 
         if let persistedLogs = try? await memory.fetchLogs(limit: 500) {
-            store.logs = persistedLogs.reversed()
-            if store.logs.count > 2000 { store.logs.removeFirst(store.logs.count - 2000) }
+            // Merge with entries flushed while the database was opening (dedupe by id,
+            // because the runtime log batch may already have written some of them).
+            let live = store.logs
+            var seen = Set(persistedLogs.map(\.id))
+            var merged: [LogEntry] = persistedLogs.reversed().map { entry in
+                var cleaned = entry
+                cleaned.message = AnsiText.strip(cleaned.message)
+                return cleaned
+            }
+            for entry in live where seen.insert(entry.id).inserted {
+                merged.append(entry)
+            }
+            if merged.count > AppStore.logBufferLimit {
+                merged.removeFirst(merged.count - AppStore.logBufferLimit)
+            }
+            store.logs = merged
         }
 
         if let memories = try? await memory.fetchMemories(limit: 500) {
@@ -290,10 +347,94 @@ final class RuntimeCoordinator {
             try? await memory.replaceSchedules(store.schedules)
         }
 
-        if let id = try? await memory.setting(key: "onebot.self_id"), !id.isEmpty {
-            selfID = id
+        scheduleSelfMentionBackfill()
+        scheduleRemainingMessagePrefetch()
+    }
+
+    /// 修复旧 hook/App 把「自己发出的私聊消息」记进「自己 wxid」会话的历史数据。
+    /// 幂等；selfID 为空时也能跑（内部会从历史事件反推账号）。
+    private func repairSelfRoutingIfNeeded() async {
+        guard let result = try? await memory.repairSelfRoutedMessages(selfID: selfID) else { return }
+        if let inferred = result.inferredSelfID, inferred != selfID {
+            // 旧事件可能把 selfID 污染成好友 wxid；历史事件反推的账号更可信。
+            selfID = inferred
+            try? await memory.setSetting(key: "onebot.self_id", value: inferred)
+            log(.warning, "Database", "self_id 已按历史事件自动校正为 \(inferred)")
+            scheduleSelfMentionBackfill()
         }
-        backfillSelfMentionNames()
+        guard result.didChange else { return }
+        log(.info, "Database", "已修复历史自消息归属：移动 \(result.movedMessages) 条，"
+            + "影响 \(result.affectedConversationIDs.count) 个会话"
+            + (result.removedSelfConversation ? "，删除「自己」会话" : ""))
+    }
+
+    /// 采纳 bridge `get_login_info` 返回的权威账号 wxid。
+    private func adoptSelfID(_ raw: String) async {
+        let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, id != selfID else { return }
+        let previous = selfID
+        selfID = id
+        try? await memory.setSetting(key: "onebot.self_id", value: id)
+        log(.info, "Bot", "已确认登录账号：\(id)")
+        // selfID 从空/错误值变成正确值时，补跑一次修复并刷新 UI。
+        if let result = try? await memory.repairSelfRoutedMessages(selfID: id), result.didChange {
+            log(.info, "Database", "已修复历史自消息归属：移动 \(result.movedMessages) 条，"
+                + "影响 \(result.affectedConversationIDs.count) 个会话")
+            await reloadConversationsAndMessages()
+        }
+        if previous != id {
+            scheduleSelfMentionBackfill()
+        }
+    }
+
+    /// 重新载入会话列表与首批消息（修复历史数据后调用）。
+    private func reloadConversationsAndMessages() async {
+        do {
+            store.conversations = try await memory.fetchConversations(limit: 300)
+        } catch {
+            log(.warning, "Database", "重新读取会话失败：\(error.localizedDescription)")
+        }
+        let recent = Array(store.conversations.prefix(Self.preloadedConversationLimit))
+        guard !recent.isEmpty else { return }
+        if let preloaded = try? await memory.fetchLatestMessages(
+            conversationIDs: recent.map(\.id),
+            perConversation: Self.preloadedMessagePageSize
+        ) {
+            store.messages = preloaded
+        }
+    }
+
+    /// Loads the message pages for conversations beyond the immediate preload window
+    /// after first paint, in small batches. Keeps behaviour identical (every
+    /// conversation still shows its newest page) without blocking launch on 300
+    /// database round trips / one huge main-actor assignment.
+    private func scheduleRemainingMessagePrefetch() {
+        let remaining = store.conversations
+            .dropFirst(Self.preloadedConversationLimit)
+            .map(\.id)
+        guard !remaining.isEmpty else { return }
+        backgroundPrefetchTask?.cancel()
+        backgroundPrefetchTask = Task { [weak self] in
+            guard let self else { return }
+            // Give the first frame + hook detection a chance to finish first.
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            var index = 0
+            while index < remaining.count, !Task.isCancelled {
+                let upper = min(index + 32, remaining.count)
+                let chunk = Array(remaining[index..<upper])
+                if let page = try? await self.memory.fetchLatestMessages(
+                    conversationIDs: chunk,
+                    perConversation: Self.preloadedMessagePageSize
+                ) {
+                    for (conversationID, messages) in page
+                    where self.store.messages[conversationID]?.isEmpty ?? true {
+                        self.store.messages[conversationID] = messages
+                    }
+                }
+                index = upper
+                try? await Task.sleep(nanoseconds: 120_000_000)
+            }
+        }
     }
 
     private func loadStats() async {
@@ -317,17 +458,25 @@ final class RuntimeCoordinator {
     func refreshStatus() async {
         hookManager.configure(wechatPath: store.settings.hook.wechatPath)
         let status = await hookManager.refresh()
-        store.hookStatus = status
-        store.gatewayConnected = status.gatewayConnected
-        store.settings.hook.didInstallGadget = status.gadgetInstalled
-        if let backup = hookManager.lastKnownBackupPath {
+        // Guard every assignment: re-assigning an equal value still invalidates
+        // `@Observable` readers (Dashboard/Settings) and causes needless layout.
+        if store.hookStatus != status { store.hookStatus = status }
+        if store.gatewayConnected != status.gatewayConnected {
+            store.gatewayConnected = status.gatewayConnected
+        }
+        if store.settings.hook.didInstallGadget != status.gadgetInstalled {
+            store.settings.hook.didInstallGadget = status.gadgetInstalled
+        }
+        if let backup = hookManager.lastKnownBackupPath,
+           store.settings.hook.lastBackupPath != backup {
             store.settings.hook.lastBackupPath = backup
         }
         // 只回写仓库自带的版本文件；运行期合并配置（Application Support/runtime）
         // 是 App 生成物，不能污染用户显式配置（否则切版本会错配）。
         if !status.versionConfigFile.isEmpty,
            let bundledDirectory = AppResources.versionConfigDirectory,
-           status.versionConfigFile.hasPrefix(bundledDirectory.path) {
+           status.versionConfigFile.hasPrefix(bundledDirectory.path),
+           store.settings.hook.versionConfigPath != status.versionConfigFile {
             store.settings.hook.versionConfigPath = status.versionConfigFile
         }
         log(.debug, "Hook", "状态 \(status.state.label)：\(status.detail)")
@@ -338,8 +487,11 @@ final class RuntimeCoordinator {
     /// 4.1.15.55 使用 R3 原生发送（构造 newsendmsg task + slot13 提交）；
     /// 4.1.12 及更早版本保持 legacy 发送路径，不做任何覆盖。
     /// 首次使用 R3 前需要在本机微信手动发一条消息以捕获 hand-off 闭包（种子）。
-    private func nativeSendConfigOverrides() -> [String: String] {
-        let installation = WeChatInstallation.inspect(path: store.settings.hook.wechatPath)
+    private func nativeSendConfigOverrides() async -> [String: String] {
+        let path = store.settings.hook.wechatPath
+        let installation = await Task.detached(priority: .userInitiated) {
+            WeChatInstallation.inspect(path: path)
+        }.value
         let is415 = installation.version == "4.1.15.55" || installation.build == "270135"
         guard is415 else { return [:] }
         if store.settings.hook.enableNativeSend {
@@ -365,8 +517,19 @@ final class RuntimeCoordinator {
         guard !store.isBotRunning, oneBotClient == nil else { return }
 
         guard let provider = store.settings.defaultProvider else { throw RuntimeError.noProvider }
-        guard aiClient.hasCredential(for: provider) else {
+        // Keychain 读取放到后台：签名变化时 macOS 可能弹授权框/阻塞调用线程，
+        // 不能让主线程陪着卡住（旧实现实测卡 8s 后误报「缺少 API Key」）。
+        let credentialState = await Task.detached(priority: .userInitiated) { [aiClient, provider] in
+            aiClient.credentialState(for: provider)
+        }.value
+        switch credentialState {
+        case .available:
+            break
+        case .missing:
             throw RuntimeError.providerNotConfigured(provider.name)
+        case .unreadable(let status):
+            log(.error, "AI", "Keychain 读取 API Key 失败（OSStatus \(status)）：app 签名变化后授权失效，需在「钥匙串访问」删除 \(AppPaths.bundleID) 条目并重新填写")
+            throw RuntimeError.providerCredentialUnreadable(provider.name, status)
         }
 
         var token = store.settings.onebot.token.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -377,7 +540,7 @@ final class RuntimeCoordinator {
         }
 
         if store.settings.hook.autoStartBridge {
-            let overrides = nativeSendConfigOverrides()
+            let overrides = await nativeSendConfigOverrides()
             do {
                 try await hookManager.startBridge(
                     host: store.settings.onebot.host,
@@ -386,6 +549,7 @@ final class RuntimeCoordinator {
                     gadgetPort: store.settings.hook.gadgetPort,
                     explicitVersionConfigPath: store.settings.hook.versionConfigPath,
                     explicitImagePath: store.settings.onebot.imagePath,
+                    selfID: selfID,
                     configOverrides: overrides
                 )
             } catch {
@@ -415,6 +579,11 @@ final class RuntimeCoordinator {
         client.onLog = { [weak self] level, message in
             Task { @MainActor [weak self] in
                 self?.log(level, "OneBot", message)
+            }
+        }
+        client.onLoginInfo = { [weak self] userID in
+            Task { @MainActor [weak self] in
+                await self?.adoptSelfID(userID)
             }
         }
         oneBotClient = client
@@ -449,37 +618,34 @@ final class RuntimeCoordinator {
         oneBotClient = nil
         startedOneBotConfiguration = nil
         inFlightConversations.removeAll()
+        clearReplyProgresses()
         await scheduler.stop()
         if store.settings.hook.autoStartBridge {
             hookManager.stopBridge()
         }
-        flushPendingLogs()
+        log(.info, "Bot", "机器人运行时已停止")
+        // Flush coalesced logs (UI + SQLite) before the runtime goes idle.
+        await LogPipeline.shared.flushNow()
         await persistStats()
         await SettingsPersistence.shared.flush()
-        log(.info, "Bot", "机器人运行时已停止")
     }
 
     // MARK: OneBot state / events
 
     private func handleOneBotState(_ state: OneBotConnectionState) {
+        // `setGatewayConnected` publishes through `HookManager.onStatusChange`, which is
+        // equality-guarded in `init`; no need to write each field separately here.
         switch state {
         case .connected:
-            store.gatewayConnected = true
             hookManager.setGatewayConnected(true)
-            store.hookStatus.gatewayConnected = true
-            store.hookStatus.state = .connected
-            store.hookStatus.detail = "已连接微信"
             log(.info, "OneBot", "WebSocket 已连接")
         case .connecting:
-            store.gatewayConnected = false
             hookManager.setGatewayConnected(false, detail: "正在连接 bridge…")
             log(.debug, "OneBot", "正在连接…")
         case .reconnecting:
-            store.gatewayConnected = false
             hookManager.setGatewayConnected(false, detail: "连接断开，自动重连中…")
             log(.warning, "OneBot", "连接断开，正在自动重连")
         case .stopped:
-            store.gatewayConnected = false
             hookManager.setGatewayConnected(false, detail: "已停止")
         }
     }
@@ -492,7 +658,10 @@ final class RuntimeCoordinator {
 
         if !event.selfID.isEmpty,
            event.selfID != event.groupID,
-           event.selfID != selfID {
+           event.selfID != selfID,
+           // 旧 bridge 的自消息可能把 self_id 写成对方 wxid；不要把它学成自己。
+           // 当前账号的权威来源是 bridge get_login_info（onLoginInfo）。
+           !store.conversations.contains(where: { $0.id == event.selfID && $0.kind == .direct }) {
             selfID = event.selfID
             try? await memory.setSetting(key: "onebot.self_id", value: selfID)
         }
@@ -510,13 +679,17 @@ final class RuntimeCoordinator {
         var list = store.messages[conversationID] ?? []
         if list.contains(where: { $0.id == chatMessage.id }) { return }
         list.append(chatMessage)
-        list.sort { $0.timestamp < $1.timestamp }
+        // Inbound events are ordered by arrival; only sort when a late/out-of-order
+        // timestamp actually requires it (the previous code sorted on every message).
+        if list.count > 1, list[list.count - 2].timestamp > chatMessage.timestamp {
+            list.sort { $0.timestamp < $1.timestamp }
+        }
         if list.count > 300 { list.removeFirst(list.count - 300) }
         store.messages[conversationID] = list
 
-        await persistConversation(conversation)
         do {
-            try await memory.upsertMessages([chatMessage])
+            // Conversation metadata + message in one SQLite transaction (was two).
+            try await memory.upsertConversationAndMessages(conversation, [chatMessage])
         } catch {
             log(.warning, "Database", "写入消息失败：\(error.localizedDescription)")
         }
@@ -530,6 +703,14 @@ final class RuntimeCoordinator {
         log(.debug, "Bot", "\(event.isSelf ? "发出" : "收到") \(conversation.kind.label)消息（\(conversation.displayTitle)）：\(preview)")
 
         guard !event.isSelf else {
+            scheduleMemoryMaintenance(conversationID: conversationID)
+            return
+        }
+        // 历史回放会把很旧的消息重新投递（例如打开聊天时加载历史），
+        // 这些消息仍入库供检索，但不应触发一次「现在」的自动回复。
+        let age = receivedAt.timeIntervalSince(event.timestamp)
+        guard age <= Self.staleReplyWindow else {
+            log(.debug, "Bot", "跳过历史消息自动回复（\(Int(age)) 秒前）：\(preview)")
             scheduleMemoryMaintenance(conversationID: conversationID)
             return
         }
@@ -560,23 +741,46 @@ final class RuntimeCoordinator {
         } else if !event.senderName.isEmpty {
             conversation.title = event.senderName
         }
-        conversation.lastMessageAt = event.timestamp
-        conversation.lastMessagePreview = String(event.plainText.prefix(80))
+        // 历史回放/补同步会带来很旧的 timestamp：不能让会话预览与排序倒退，
+        // 也不能把旧消息算成未读。只有比当前记录更新的事件才推进预览。
+        let previousLast = conversation.lastMessageAt
+        let isNewest = previousLast == nil || event.timestamp > previousLast!
+        if isNewest {
+            conversation.lastMessageAt = event.timestamp
+            conversation.lastMessagePreview = String(event.plainText.prefix(80))
+        }
         // 正在查看的会话不累计未读：打开即已读，避免切换会话后还要额外点一次。
-        if !event.isSelf && store.selectedConversationID != event.conversationID {
+        if !event.isSelf, isNewest, store.selectedConversationID != event.conversationID {
             conversation.unreadCount += 1
         }
 
         if let index = existingIndex {
-            store.conversations[index] = conversation
+            var conversations = store.conversations
+            conversations[index] = conversation
+            store.conversations = Self.ordered(conversations, moving: index)
         } else {
-            store.conversations.append(conversation)
-        }
-        store.conversations.sort {
-            if $0.isPinned != $1.isPinned { return $0.isPinned && !$1.isPinned }
-            return ($0.lastMessageAt ?? .distantPast) > ($1.lastMessageAt ?? .distantPast)
+            var conversations = store.conversations
+            conversations.append(conversation)
+            store.conversations = Self.ordered(conversations, moving: conversations.count - 1)
         }
         return conversation
+    }
+
+    /// Orders conversations by "pinned first, then newest activity" while moving only
+    /// the mutated element. Replaces a full `sort` (and its comparator churn) on every
+    /// inbound message with one array assignment.
+    private static func ordered(_ conversations: [Conversation], moving index: Int) -> [Conversation] {
+        guard conversations.indices.contains(index) else { return conversations }
+        let item = conversations[index]
+        var rest = conversations
+        rest.remove(at: index)
+        let insertion = rest.firstIndex { other in
+            if item.isPinned != other.isPinned { return item.isPinned && !other.isPinned }
+            return (item.lastMessageAt ?? .distantPast) > (other.lastMessageAt ?? .distantPast)
+        } ?? rest.count
+        guard insertion != index else { return conversations }
+        rest.insert(item, at: insertion)
+        return rest
     }
 
     private func makeChatMessage(from event: OneBotEvent) -> ChatMessage {
@@ -623,18 +827,54 @@ final class RuntimeCoordinator {
         log(.info, "Bot", "已记录机器人群昵称「\(name)」：之后纯文本 @ 也能触发回复")
     }
 
-    /// 启动时从已持久化的近 30 条消息中回填群昵称。
-    /// 这样升级后无需等待下一次结构化 @ 即可修复历史会话里的纯文本 @。
-    private func backfillSelfMentionNames() {
+    /// 启动后在后台回填群昵称：只解析启动预载窗口内的群消息（≤30 个群 × 最近 30 条），
+    /// 且在 UI 首帧之后运行，避免在主线程解析 rawJSON。升级后无需等待下一次结构化 @
+    /// 即可修复历史会话里的纯文本 @。
+    private func scheduleSelfMentionBackfill() {
         guard !selfID.isEmpty else { return }
-        let groupIDs = Set(store.conversations.filter { $0.kind == .group }.map(\.id))
-        guard !groupIDs.isEmpty else { return }
-        var learned = store.settings.bot.selfMentionNames ?? [:]
-        var changed = false
-        for conversationID in groupIDs {
-            for message in store.messages[conversationID] ?? [] {
-                guard let rawJSON = message.rawJSON,
-                      let data = rawJSON.data(using: .utf8),
+        let selfID = selfID
+        var groupPayloads: [String: [String]] = [:]
+        for conversation in store.conversations where conversation.kind == .group {
+            guard groupPayloads.count < 30 else { break }
+            let payloads = (store.messages[conversation.id] ?? [])
+                .suffix(30)
+                .compactMap(\.rawJSON)
+                .filter { $0.contains("\"at\"") && $0.contains(selfID) }
+            if !payloads.isEmpty { groupPayloads[conversation.id] = payloads }
+        }
+        guard !groupPayloads.isEmpty else { return }
+        let existing = store.settings.bot.selfMentionNames ?? [:]
+        selfMentionBackfillTask?.cancel()
+        selfMentionBackfillTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            let learned = await Task.detached(priority: .utility) {
+                Self.learnSelfMentionNames(fromJSON: groupPayloads, selfID: selfID, existing: existing)
+            }.value
+            guard let self, !learned.isEmpty else { return }
+            var names = self.store.settings.bot.selfMentionNames ?? [:]
+            var changed = 0
+            for (conversationID, name) in learned where names[conversationID] != name {
+                names[conversationID] = name
+                changed += 1
+            }
+            guard changed > 0 else { return }
+            self.store.settings.bot.selfMentionNames = names
+            self.store.persist()
+            self.log(.info, "Bot", "已从历史消息回填机器人群昵称：\(changed) 个群")
+        }
+    }
+
+    /// Pure JSON parsing for the mention-name backfill; runs on a utility thread.
+    private nonisolated static func learnSelfMentionNames(
+        fromJSON payloads: [String: [String]],
+        selfID: String,
+        existing: [String: String]
+    ) -> [String: String] {
+        var learned: [String: String] = [:]
+        for (conversationID, raws) in payloads {
+            for rawJSON in raws {
+                guard let data = rawJSON.data(using: .utf8),
                       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
                 let event = (object["data"] as? [String: Any]) ?? object
                 guard let segments = event["message"] as? [[String: Any]] else { continue }
@@ -653,16 +893,12 @@ final class RuntimeCoordinator {
                     mentions = explicit
                 }
                 guard let name = MentionText.displayName(in: text, selfID: selfID, mentions: mentions) else { continue }
-                if learned[conversationID] != name {
+                if existing[conversationID] != name {
                     learned[conversationID] = name
-                    changed = true
                 }
             }
         }
-        guard changed else { return }
-        store.settings.bot.selfMentionNames = learned
-        store.persist()
-        log(.info, "Bot", "已从历史消息回填机器人群昵称：\(learned.count) 个群")
+        return learned
     }
 
     private func markLocalEchoSent(_ event: OneBotEvent) -> Bool {
@@ -677,6 +913,120 @@ final class RuntimeCoordinator {
         let updated = list[index]
         Task { try? await self.memory.upsertMessages([updated]) }
         return true
+    }
+
+    // MARK: Reply progress (UI)
+
+    /// 每个会话当前进度的令牌：完成的「自动收起」任务只在令牌未变化时清理，
+    /// 避免把紧接着开始的新一轮回复进度误删。
+    private var replyProgressTokens: [String: UUID] = [:]
+
+    private func beginReplyProgress(conversationID: String, providerName: String?, model: String?) {
+        let now = Date()
+        replyProgressTokens[conversationID] = UUID()
+        store.replyProgress[conversationID] = ReplyProgress(
+            conversationID: conversationID,
+            stage: .generating,
+            startedAt: now,
+            stageStartedAt: now,
+            providerName: providerName,
+            model: model
+        )
+    }
+
+    private func setReplyProgressProvider(conversationID: String, provider: AIProvider) {
+        guard var progress = store.replyProgress[conversationID] else { return }
+        progress.providerName = provider.name
+        progress.model = provider.model
+        store.replyProgress[conversationID] = progress
+    }
+
+    private func updateReplyProgress(
+        conversationID: String,
+        stage: ReplyStage,
+        countdown: TimeInterval? = nil,
+        segmentIndex: Int? = nil,
+        segmentCount: Int? = nil
+    ) {
+        guard var progress = store.replyProgress[conversationID] else { return }
+        let now = Date()
+        progress.stage = stage
+        progress.stageStartedAt = now
+        if let countdown {
+            progress.countdownEnd = now.addingTimeInterval(countdown)
+            progress.countdownTotal = countdown
+        } else {
+            progress.countdownEnd = nil
+            progress.countdownTotal = nil
+        }
+        if let segmentIndex { progress.segmentIndex = segmentIndex }
+        if let segmentCount { progress.segmentCount = segmentCount }
+        progress.note = nil
+        progress.errorText = nil
+        store.replyProgress[conversationID] = progress
+    }
+
+    /// 结束当前进度。只在已有进度快照时更新：bot 停止/会话删除会先清空快照，
+    /// 此后迟到的异步回调不会把过期状态写回来。
+    private func finishReplyProgress(
+        conversationID: String,
+        stage: ReplyStage,
+        note: String? = nil,
+        errorText: String? = nil,
+        clearAfter: Duration? = nil
+    ) {
+        guard var progress = store.replyProgress[conversationID] else { return }
+        let now = Date()
+        progress.stage = stage
+        progress.stageStartedAt = now
+        progress.countdownEnd = nil
+        progress.countdownTotal = nil
+        progress.note = note
+        progress.errorText = errorText
+        store.replyProgress[conversationID] = progress
+
+        let token = replyProgressTokens[conversationID] ?? UUID()
+        replyProgressTokens[conversationID] = token
+        guard let clearAfter else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: clearAfter)
+            guard let self, self.replyProgressTokens[conversationID] == token else { return }
+            self.store.replyProgress[conversationID] = nil
+            self.replyProgressTokens[conversationID] = nil
+        }
+    }
+
+    private func completeReplyProgress(conversationID: String, note: String) {
+        finishReplyProgress(
+            conversationID: conversationID,
+            stage: .completed,
+            note: note,
+            clearAfter: .seconds(3)
+        )
+    }
+
+    private func failReplyProgress(conversationID: String, error: String) {
+        finishReplyProgress(
+            conversationID: conversationID,
+            stage: .failed,
+            errorText: error,
+            clearAfter: .seconds(60)
+        )
+    }
+
+    /// 用户点击状态条上的关闭按钮。同时失效「自动收起」任务。
+    func forgetReplyProgress(conversationID: String) {
+        replyProgressTokens[conversationID] = nil
+        if store.replyProgress[conversationID] != nil {
+            store.replyProgress[conversationID] = nil
+        }
+    }
+
+    /// bot 停止 / App 退出时清空所有进度，避免界面停留在过期的「生成中」。
+    private func clearReplyProgresses() {
+        guard !store.replyProgress.isEmpty || !replyProgressTokens.isEmpty else { return }
+        store.replyProgress.removeAll()
+        replyProgressTokens.removeAll()
     }
 
     // MARK: AI pipeline
@@ -701,20 +1051,43 @@ final class RuntimeCoordinator {
         inFlightConversations.insert(conversation.id)
         defer { inFlightConversations.remove(conversation.id) }
 
-        guard let settingsProvider = store.settings.provider(id: evaluation.providerID) else {
+        // Publish progress before any async gate so a missing provider / credential is
+        // visible in the UI as a failed step instead of silently producing no reply.
+        let settingsProvider = store.settings.provider(id: evaluation.providerID)
+        beginReplyProgress(
+            conversationID: conversation.id,
+            providerName: settingsProvider?.name,
+            model: settingsProvider?.model
+        )
+        updateReplyProgress(conversationID: conversation.id, stage: .generating)
+
+        guard let settingsProvider else {
             log(.warning, "AI", "未找到可用 AI 服务，跳过回复")
+            failReplyProgress(conversationID: conversation.id, error: "未找到可用 AI 服务")
             return
         }
-        guard aiClient.hasCredential(for: settingsProvider) else {
-            log(.warning, "AI", "「\(settingsProvider.name)」未配置 API Key，跳过回复")
+        let credentialState = aiClient.credentialState(for: settingsProvider)
+        guard credentialState == .available else {
+            let reason: String
+            if case .unreadable(let status) = credentialState {
+                reason = "「\(settingsProvider.name)」的 API Key 无法从钥匙串读取（OSStatus \(status)），"
+                    + "请在「钥匙串访问」删除 \(AppPaths.bundleID) 条目后重新填写"
+            } else {
+                reason = "「\(settingsProvider.name)」未配置 API Key"
+            }
+            log(.warning, "AI", "\(reason)，跳过回复")
+            failReplyProgress(conversationID: conversation.id, error: reason)
             return
         }
         let persona = store.settings.persona(id: evaluation.personaID)
         var provider = settingsProvider
         if let model = evaluation.model, !model.isEmpty { provider.model = model }
         if let personaModel = persona?.model, !personaModel.isEmpty { provider.model = personaModel }
+        setReplyProgressProvider(conversationID: conversation.id, provider: provider)
 
-        let history = store.messages[conversation.id] ?? []
+        // ChatEngine only reads the last `shortTermMemoryLimit` messages; pass that window
+        // instead of copying the whole (up to 300 message) history on the main actor.
+        let history = Array((store.messages[conversation.id] ?? []).suffix(ChatEngine.shortTermMemoryLimit))
         do {
             let plan = try await chatEngine.generateReply(
                 conversation: conversation,
@@ -733,6 +1106,7 @@ final class RuntimeCoordinator {
             scheduleStatsPersist()
             store.lastError = error.localizedDescription
             log(.error, "AI", "生成回复失败：\(error.localizedDescription)")
+            failReplyProgress(conversationID: conversation.id, error: error.localizedDescription)
         }
     }
 
@@ -752,31 +1126,58 @@ final class RuntimeCoordinator {
                 status: .sent
             )
             appendMessage(message)
-            await persistMessage(message)
-            if var updated = store.conversations.first(where: { $0.id == conversation.id }) {
-                updated.lastMessageAt = message.timestamp
-                updated.lastMessagePreview = String(text.prefix(80))
-                store.conversations = store.conversations.map { $0.id == updated.id ? updated : $0 }
-                await persistConversation(updated)
+            if let updatedConversation = updateConversationAfterSend(conversation: conversation, message: message) {
+                do {
+                    // Message + refreshed conversation preview in one transaction.
+                    try await memory.upsertConversationAndMessages(updatedConversation, [message])
+                } catch {
+                    log(.warning, "Database", "写入 dry-run 消息失败：\(error.localizedDescription)")
+                }
+            } else {
+                await persistMessage(message)
             }
+            completeReplyProgress(conversationID: conversation.id, note: "演练完成（未实际发送）")
             return
         }
 
         let humanize = store.settings.bot.humanize
-        var sentAny = false
+        let segmentCount = plan.segments.count
+        var sentCount = 0
         for (index, segment) in plan.segments.enumerated() {
             if humanize.enabled, index < plan.delaysMs.count, plan.delaysMs[index] > 0 {
-                log(.debug, "Humanize", "分段 \(index + 1)/\(plan.segments.count) 延迟 \(plan.delaysMs[index])ms")
+                let delaySeconds = Double(plan.delaysMs[index]) / 1000
+                updateReplyProgress(
+                    conversationID: conversation.id,
+                    stage: .waitingToSend,
+                    countdown: delaySeconds,
+                    segmentIndex: index + 1,
+                    segmentCount: segmentCount
+                )
+                log(.debug, "Humanize", "分段 \(index + 1)/\(segmentCount) 延迟 \(plan.delaysMs[index])ms")
                 try? await Task.sleep(nanoseconds: UInt64(plan.delaysMs[index]) * 1_000_000)
             }
             if humanize.enabled && humanize.typingIndicator && index == 0 {
                 log(.debug, "Humanize", "输入端「正在输入」指示由微信客户端展示，bridge 暂未暴露接口")
             }
+            updateReplyProgress(
+                conversationID: conversation.id,
+                stage: .sending,
+                segmentIndex: index + 1,
+                segmentCount: segmentCount
+            )
             let sent = await sendOutgoingText(segment, conversation: conversation)
-            sentAny = sentAny || sent
+            if sent { sentCount += 1 }
         }
 
-        guard sentAny else { return }
+        guard sentCount > 0 else {
+            failReplyProgress(conversationID: conversation.id, error: "消息发送失败，详见运行日志")
+            return
+        }
+        let note = sentCount == segmentCount
+            ? "已发送 \(sentCount) 段"
+            : "已发送 \(sentCount)/\(segmentCount) 段（部分失败）"
+        completeReplyProgress(conversationID: conversation.id, note: note)
+
         store.stats.repliedToday += 1
         store.stats.lastReplyAt = Date()
         recordReplyLatency(plan.latencyMs)
@@ -815,9 +1216,17 @@ final class RuntimeCoordinator {
             )
             message.status = .sent
             updateMessage(message)
-            await persistMessage(message)
-            updateConversationAfterSend(conversation: conversation, message: message)
-            await persistConversation(conversation)
+            let updatedConversation = updateConversationAfterSend(conversation: conversation, message: message)
+            do {
+                if let updatedConversation {
+                    // Status update + conversation preview in one transaction (was two).
+                    try await memory.upsertConversationAndMessages(updatedConversation, [message])
+                } else {
+                    try await memory.upsertMessages([message])
+                }
+            } catch {
+                log(.warning, "Database", "写入消息失败：\(error.localizedDescription)")
+            }
             let bridgeRTT = Int(Date().timeIntervalSince(sendStartedAt) * 1000)
             log(.info, "Bot", "已发送 \(conversation.kind.label)消息 → \(conversation.displayTitle)：\(trimmed.prefix(60))（bridge 往返 \(bridgeRTT)ms）")
             scheduleMemoryMaintenance(conversationID: conversation.id)
@@ -834,21 +1243,29 @@ final class RuntimeCoordinator {
         }
     }
 
-    private func updateConversationAfterSend(conversation: Conversation, message: ChatMessage) {
-        guard var updated = store.conversations.first(where: { $0.id == conversation.id }) else { return }
+    /// Refreshes the conversation list entry after a send and returns the updated value
+    /// (so the caller can persist it together with the message in one transaction).
+    @discardableResult
+    private func updateConversationAfterSend(conversation: Conversation, message: ChatMessage) -> Conversation? {
+        guard let index = store.conversations.firstIndex(where: { $0.id == conversation.id }) else { return nil }
+        var updated = store.conversations[index]
         updated.lastMessageAt = message.timestamp
         updated.lastMessagePreview = String(message.text.prefix(80))
-        store.conversations = store.conversations.map { $0.id == updated.id ? updated : $0 }
-        store.conversations.sort {
-            if $0.isPinned != $1.isPinned { return $0.isPinned && !$1.isPinned }
-            return ($0.lastMessageAt ?? .distantPast) > ($1.lastMessageAt ?? .distantPast)
-        }
+        var conversations = store.conversations
+        conversations[index] = updated
+        store.conversations = Self.ordered(conversations, moving: index)
+        return updated
     }
 
     private func appendMessage(_ message: ChatMessage) {
         var list = store.messages[message.conversationID] ?? []
-        if !list.contains(where: { $0.id == message.id }) { list.append(message) }
-        list.sort { $0.timestamp < $1.timestamp }
+        guard !list.contains(where: { $0.id == message.id }) else { return }
+        list.append(message)
+        // Only sort when an out-of-order timestamp actually arrives (echo/status updates
+        // are appended in order, so the common path avoids O(n log n) work per message).
+        if list.count > 1, list[list.count - 2].timestamp > message.timestamp {
+            list.sort { $0.timestamp < $1.timestamp }
+        }
         if list.count > 300 { list.removeFirst(list.count - 300) }
         store.messages[message.conversationID] = list
     }
@@ -1078,8 +1495,10 @@ final class RuntimeCoordinator {
         }
         store.conversations.removeAll { $0.id == id }
         store.messages[id] = nil
+        forgetReplyProgress(conversationID: id)
         if store.selectedConversationID == id { store.selectedConversationID = nil }
-        await loadLongTermMemories()
+        // Drop the conversation's memories locally instead of re-fetching all 500 rows.
+        store.longTermMemories.removeAll { $0.conversationID == id }
         log(.info, "Memory", "已删除会话 \(id)")
     }
 
@@ -1096,7 +1515,9 @@ final class RuntimeCoordinator {
     func saveLongTermMemory(_ memory: LongTermMemory) async {
         do {
             try await self.memory.upsertMemory(memory)
-            await loadLongTermMemories()
+            // Patch the observable list in place instead of re-fetching and re-sorting
+            // 500 rows on every edit (which also invalidated the whole MemoryView).
+            applyMemoryChange(memory)
             log(.info, "Memory", "已保存长期记忆：\(memory.summary.prefix(40))")
         } catch {
             log(.error, "Memory", "保存长期记忆失败：\(error.localizedDescription)")
@@ -1106,11 +1527,38 @@ final class RuntimeCoordinator {
     func deleteLongTermMemory(id: String) async {
         do {
             try await memory.deleteMemory(id: id)
-            await loadLongTermMemories()
+            store.longTermMemories.removeAll { $0.id == id }
             log(.info, "Memory", "已删除长期记忆")
         } catch {
             log(.error, "Memory", "删除长期记忆失败：\(error.localizedDescription)")
         }
+    }
+
+    /// Mirrors `MemoryStore.fetchMemories` ordering (core first, then time weight)
+    /// while touching only the changed row.
+    private func applyMemoryChange(_ memory: LongTermMemory) {
+        var updated = memory
+        if updated.conversationTitle.isEmpty, !updated.conversationID.isEmpty {
+            updated.conversationTitle = store.conversations.first { $0.id == updated.conversationID }?.title ?? ""
+        }
+        var memories = store.longTermMemories
+        if let index = memories.firstIndex(where: { $0.id == updated.id }) {
+            memories[index] = updated
+        } else {
+            memories.append(updated)
+        }
+        guard let movingIndex = memories.firstIndex(where: { $0.id == updated.id }) else {
+            store.longTermMemories = memories
+            return
+        }
+        let item = memories.remove(at: movingIndex)
+        let now = Date()
+        let insertion = memories.firstIndex { other in
+            if item.isCore != other.isCore { return item.isCore && !other.isCore }
+            return item.timeWeight(now: now) > other.timeWeight(now: now)
+        } ?? memories.count
+        memories.insert(item, at: insertion)
+        store.longTermMemories = memories
     }
 
     func setLongTermMemoryCore(_ memory: LongTermMemory, isCore: Bool) async {
@@ -1146,42 +1594,11 @@ final class RuntimeCoordinator {
 
     // MARK: Logs / stats
 
+    /// Single entry point for runtime logging. Hands the line to `LogPipeline`, which
+    /// strips ANSI codes, merges duplicates and flushes `store.logs`/SQLite in batches
+    /// (≤5 UI updates/s) instead of mutating the observable array once per line.
     func log(_ level: LogLevel, _ source: String, _ message: String) {
-        store.appendLog(level, source, message)
-        if let entry = store.logs.last {
-            pendingLogs.append(entry)
-            scheduleLogFlush()
-        }
-    }
-
-    private func scheduleLogFlush() {
-        if pendingLogs.count >= 20 {
-            flushPendingLogs()
-            return
-        }
-        guard logFlushTask == nil else { return }
-        logFlushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            guard !Task.isCancelled else { return }
-            self?.flushPendingLogs()
-        }
-    }
-
-    private func flushPendingLogs() {
-        logFlushTask?.cancel()
-        logFlushTask = nil
-        guard !pendingLogs.isEmpty else { return }
-        let batch = pendingLogs
-        pendingLogs = []
-        logWriteCount += batch.count
-        Task { [weak self] in
-            guard let self else { return }
-            try? await self.memory.appendLogs(batch)
-            if self.logWriteCount >= 100 {
-                self.logWriteCount = 0
-                try? await self.memory.pruneLogs(keep: 5000)
-            }
-        }
+        LogPipeline.shared.emit(level, source, message)
     }
 
     private func scheduleStatsPersist() {
@@ -1215,8 +1632,9 @@ final class RuntimeCoordinator {
     func shutdownImmediately() {
         oneBotClient?.stop()
         oneBotClient = nil
+        clearReplyProgresses()
         hookManager.shutdown()
-        flushPendingLogs()
+        LogPipeline.shared.flushForTermination()
         let statsSnapshot = store.stats
         Task {
             await scheduler.stop()
@@ -1241,11 +1659,17 @@ final class RuntimeCoordinator {
         return bytes.map { String(format: "%02x", $0) }.joined()
     }
 
-    static func dayKey(_ date: Date = Date()) -> String {
+    /// Cached formatter: `dayKey()` used to allocate a `DateFormatter` on every inbound
+    /// message (date rollover check), which is surprisingly expensive.
+    private static let dayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    static func dayKey(_ date: Date = Date()) -> String {
+        dayFormatter.string(from: date)
     }
 
     func currentSelfID() -> String { selfID }
@@ -1337,6 +1761,14 @@ extension AppStore {
         let coordinator = RuntimeRegistry.coordinator(for: self)
         await coordinator.bootstrapIfNeeded()
         await coordinator.sendManualMessage(conversationID: conversationID, text: text)
+    }
+
+    /// 关闭会话页的回复进度状态条（完成/失败态由用户手动收起）。
+    func dismissReplyProgress(conversationID: String) {
+        RuntimeRegistry.existing(for: self)?.forgetReplyProgress(conversationID: conversationID)
+        if replyProgress[conversationID] != nil {
+            replyProgress[conversationID] = nil
+        }
     }
 
     // MARK: API keys (Keychain)

@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 // MARK: - Types
 
@@ -94,6 +95,14 @@ enum AIError: LocalizedError, Equatable {
 
 // MARK: - Client
 
+/// AI 凭据可用性。`.unreadable` 表示 Keychain 条目存在但当前签名无权读取，
+/// 与「用户还没填 Key」是两种不同的故障，UI/日志需要分别提示。
+enum ProviderCredentialState: Sendable, Equatable {
+    case available
+    case missing
+    case unreadable(OSStatus)
+}
+
 /// OpenAI-compatible `/chat/completions` client with SSE streaming.
 ///
 /// Supports DeepSeek / OpenAI / Ollama / custom endpoints. API keys are read from
@@ -163,10 +172,31 @@ final class AIClient: @unchecked Sendable {
 
     /// Whether the provider has a usable credential. Ollama/custom may be keyless.
     func hasCredential(for provider: AIProvider) -> Bool {
-        if provider.apiKeyReference.isEmpty {
-            return provider.kind == .ollama || provider.kind == .custom
+        credentialState(for: provider) == .available
+    }
+
+    /// 凭据状态：能区分「未配置」和「Keychain 读取被拒」。
+    ///
+    /// 后者常见于 app 重新构建/重签后：ad-hoc 签名的 designated requirement 是
+    /// cdhash，Keychain 授权仍绑定旧签名，读取会返回 errSecAuthFailed /
+    /// errSecInteractionNotAllowed。旧实现把这两种情况都报成「缺少 API Key」，
+    /// 用户会误以为密钥没保存。启动时应在后台线程调用本方法，避免 Keychain
+    /// 授权弹窗把主线程卡住（曾实测 8 秒卡顿）。
+    func credentialState(for provider: AIProvider) -> ProviderCredentialState {
+        guard !provider.apiKeyReference.isEmpty else {
+            return (provider.kind == .ollama || provider.kind == .custom) ? .available : .missing
         }
-        return keychain.hasAPIKey(for: provider.apiKeyReference)
+        do {
+            guard let key = try keychain.apiKey(for: provider.apiKeyReference),
+                  !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return .missing
+            }
+            return .available
+        } catch let KeychainError.osStatus(status) {
+            return .unreadable(status)
+        } catch {
+            return .unreadable(errSecInternalError)
+        }
     }
 
     func apiKey(for provider: AIProvider) -> String? {

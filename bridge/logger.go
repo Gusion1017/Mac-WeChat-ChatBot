@@ -5,13 +5,20 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
-	
+
 	"github.com/mgutz/ansi"
 	"github.com/rs/zerolog"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
+
+// logFilePath 由 -log_file 指定。App 会传 ~/Library/Logs/WeChatAI/bridge/macos.log
+// （必须在 app bundle 之外）：旧实现固定写 ./log/macos.log，而 bridge 的 cwd 在
+// bundle 内，落盘会破坏 ad-hoc 签名，导致助手下次启动被 macOS 以
+// Launch Constraint Violation 杀掉。
+var logFilePath = "./log/macos.log"
 
 type LoggerInfo struct {
 	logger zerolog.Logger
@@ -31,25 +38,31 @@ var QQLogger = new(QQLoggerInfo)
 
 // initLogger init logger
 func initLogger() {
+	if logFilePath == "" {
+		logFilePath = "./log/macos.log"
+	}
+	if err := os.MkdirAll(filepath.Dir(logFilePath), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "创建日志目录失败:", err)
+	}
 	fileWriter := &lumberjack.Logger{
-		Filename:   "./log/macos.log",
+		Filename:   logFilePath,
 		MaxSize:    100,
 		MaxBackups: 10,
 		MaxAge:     30,
 		Compress:   false,
 	}
-	
+
 	stdoutWriter := zerolog.ConsoleWriter{
 		Out:         os.Stdout,
 		TimeFormat:  "2006-01-02 15:04:05",
 		FormatLevel: Logger.ColorFormatLevel,
 	}
-	
+
 	Logger.logger = zerolog.New(zerolog.MultiLevelWriter(fileWriter, stdoutWriter)).With().
 		Timestamp().
 		Logger()
 	QQLogger.logger = Logger.logger
-	
+
 	log.SetOutput(Logger.logger)
 	log.SetFlags(0)
 	// set log level

@@ -588,9 +588,15 @@ function attachMessageFinalizer() {
                     send({
                         type: "incoming_message",
                         payload: {
+                            // self_id 仅作为兜底；bridge 会用当前账号把它改写成
+                            // 「自己」，并结合 from/to/sender_wxid 判定 is_self。
                             self_id: to,
                             user_id: user,
                             group_id: group,
+                            from_wxid: from,
+                            to_wxid: to,
+                            sender_wxid: user,
+                            member_wxid: member,
                             sender: { user_id: user, nickname: nickname },
                             time: created * 1000,
                             post_type: "message",

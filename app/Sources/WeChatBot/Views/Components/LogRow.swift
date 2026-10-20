@@ -1,7 +1,10 @@
 import SwiftUI
 
 /// Compact monospaced log line with level, source and message.
-struct LogRow: View {
+///
+/// Equatable so a re-rendered log page can skip re-evaluating unchanged rows
+/// (used with `.equatable()`); only the stored inputs affect rendering.
+struct LogRow: View, Equatable {
     let entry: LogEntry
     var showsDate: Bool = false
 

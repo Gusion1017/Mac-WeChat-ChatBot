@@ -29,13 +29,19 @@ final class AppStore {
     var gatewayConnected = false
     var lastError: String?
 
+    /// 自动回复流水线的实时阶段快照，按会话 ID 索引（不持久化）。
+    /// 由 `RuntimeCoordinator` 在收到消息后写入，供会话页头、输入区状态条与会话列表实时展示。
+    var replyProgress: [String: ReplyProgress] = [:]
+
     init(settings: AppSettings = SettingsStore.load()) {
         self.settings = settings
         self.providers = settings.providers
         self.personas = settings.personas
         self.schedules = settings.schedules
         self.hookStatus.versionConfigFile = settings.hook.versionConfigPath
-        self.hookStatus.wechatVersion = Self.installedWeChatVersion(path: settings.hook.wechatPath) ?? ""
+        // Reading WeChat's Info.plist is disk I/O and used to run synchronously in init.
+        // It is filled in off-main by the runtime bootstrap instead (`AppStore+Runtime`),
+        // which also refreshes the full hook status shortly after.
         RuntimeBootstrap.scheduleRuntime(for: self)
     }
 
@@ -78,15 +84,38 @@ final class AppStore {
 
     // MARK: Logs (runtime methods live in AppStore+Runtime.swift)
 
+    /// Upper bound for the observable in-memory log buffer (LogsView displays this cap).
+    static let logBufferLimit = 2000
+
+    /// Coalesced, thread-safe entry point. Entries are buffered by `LogPipeline` and
+    /// appended to `logs` in batches (see `appendLogBatch`) so a chatty bridge cannot
+    /// invalidate the UI once per line. Safe to call from any actor/thread.
     func appendLog(_ level: LogLevel, _ source: String, _ message: String) {
-        logs.append(LogEntry(level: level, source: source, message: message))
-        if logs.count > 2000 { logs.removeFirst(logs.count - 2000) }
+        LogPipeline.shared.emit(level, source, message)
     }
-    func clearLogs() { logs.removeAll() }
+
+    /// Applies a batch of already-coalesced entries with a single observable mutation
+    /// and one trim pass. Called by `LogPipeline` on the main actor.
+    func appendLogBatch(_ entries: [LogEntry]) {
+        guard !entries.isEmpty else { return }
+        var updated = logs
+        updated.append(contentsOf: entries)
+        if updated.count > Self.logBufferLimit {
+            updated.removeFirst(updated.count - Self.logBufferLimit)
+        }
+        logs = updated
+    }
+
+    func clearLogs() {
+        LogPipeline.shared.clearPending()
+        logs.removeAll()
+    }
 
     // MARK: Helpers
 
-    static func installedWeChatVersion(path: String) -> String? {
+    /// Reads WeChat's bundle version. Pure file I/O with no actor state, so it can run
+    /// off the main actor (startup prewarm in `AppStore+Runtime`).
+    nonisolated static func installedWeChatVersion(path: String) -> String? {
         let info = URL(fileURLWithPath: path).appendingPathComponent("Contents/Info.plist")
         guard let data = try? Data(contentsOf: info),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]

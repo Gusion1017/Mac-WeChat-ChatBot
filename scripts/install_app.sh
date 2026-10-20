@@ -60,6 +60,8 @@ mkdir -p "${DEST_DIR}"
 rm -rf -- "${DEST}"
 /usr/bin/ditto "${SRC}" "${DEST}" || fail "复制失败：${SRC} → ${DEST}"
 /usr/bin/xattr -dr com.apple.quarantine "${DEST}" 2>/dev/null || true
+# 防御：旧版 bridge 的运行期日志目录会破坏签名。即使 dist 残留也不带进安装版。
+rm -rf -- "${DEST}/Contents/Resources/bridge/log"
 
 if (( RESIGN == 1 )); then
   say "重新 ad-hoc 签名…"

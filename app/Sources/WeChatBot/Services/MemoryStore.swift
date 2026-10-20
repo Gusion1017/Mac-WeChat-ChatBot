@@ -14,6 +14,17 @@ struct MemoryOverflow: Sendable, Equatable {
     var lastRowID: Int64
 }
 
+/// 历史自消息归位结果（一次性数据修复）。
+struct SelfRoutingRepairResult: Sendable, Equatable {
+    var movedMessages: Int = 0
+    var affectedConversationIDs: [String] = []
+    var removedSelfConversation: Bool = false
+    /// 从历史事件反推、且与传入 selfID 不一致的账号；用于自愈被旧事件污染的 selfID。
+    var inferredSelfID: String? = nil
+
+    var didChange: Bool { movedMessages > 0 || removedSelfConversation }
+}
+
 enum MemoryStoreError: LocalizedError {
     case openFailed(String)
     case sqlite(String)
@@ -301,7 +312,235 @@ actor MemoryStore {
         }
     }
 
+    /// 一次性修复旧 hook 造成的「自消息进错会话」。
+    ///
+    /// 旧 hook 对**本账号发出的私聊消息**写的是 `self_id=对方`、`user_id=自己`，
+    /// App 因此判成「对方发来的」，并按 user_id 建出一个以自己 wxid 命名的会话。
+    /// 修复规则（只动 `conversation_id == 当前账号` 的会话，幂等、可重复执行）：
+    ///   - 目标会话 = raw_json 的 `group_id`（群）或 `self_id`（私聊对方）；
+    ///   - 消息改为 outgoing / sender=自己 / status=sent，并搬到目标会话；
+    ///   - 目标会话不存在时创建（群名「群聊 …」/ filehelper → 文件传输助手）；
+    ///   - 重算目标会话的 last_message_at / preview；
+    ///   - 自己会话清空后删除（含 memories/memory_state 残留）。
+    ///
+    /// 安全阀：`selfID` 可能被旧事件污染成某个好友 wxid。这里优先从历史事件的
+    /// `self_id` 反推账号（账号会作为 self_id 出现在**多个不同发送者**的消息里，
+    /// 好友只会出现在自己发出的消息里，distinct 发送者通常只有 1 个）；
+    /// 推不出来时退回传入的 selfID。
+    func repairSelfRoutedMessages(selfID: String) throws -> SelfRoutingRepairResult {
+        let storedSelfID = selfID.trimmingCharacters(in: .whitespacesAndNewlines)
+        try ensureOpen()
+
+        let inferredSelfID = try inferAccountIDFromRawEvents()
+        let effectiveSelfID = inferredSelfID ?? storedSelfID
+        guard !effectiveSelfID.isEmpty else { return SelfRoutingRepairResult() }
+
+        struct Move {
+            var messageID: String
+            var targetID: String
+            var targetIsGroup: Bool
+            var text: String
+            var timestamp: Double
+        }
+
+        let statement = try prepare("""
+        SELECT id, raw_json, text, timestamp
+        FROM messages WHERE conversation_id = ? ORDER BY timestamp ASC;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, effectiveSelfID)
+
+        var moves: [Move] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let messageID = try text(statement, 0)
+            let raw = optionalText(statement, 1) ?? ""
+            let messageText = try text(statement, 2)
+            let timestamp = sqlite3_column_double(statement, 3)
+            guard let data = raw.data(using: .utf8),
+                  let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                continue
+            }
+            let groupID = (object["group_id"] as? String) ?? ""
+            let peerID = (object["target_id"] as? String)
+                ?? (object["self_id"] as? String)
+                ?? ""
+            let target = !groupID.isEmpty ? groupID : peerID
+            // 目标为空或就是自己（真正的「自己和自己」会话）时保持原样。
+            guard !target.isEmpty, target != effectiveSelfID else { continue }
+            moves.append(Move(
+                messageID: messageID,
+                targetID: target,
+                targetIsGroup: !groupID.isEmpty,
+                text: messageText,
+                timestamp: timestamp
+            ))
+        }
+        guard !moves.isEmpty else { return SelfRoutingRepairResult() }
+
+        var targets = Set<String>()
+        let affected = moves.map(\.targetID)
+        targets.formUnion(affected)
+
+        var removedSelfConversation = false
+        try transaction {
+            let insertConversation = try prepare("""
+            INSERT OR IGNORE INTO conversations (id, kind, title)
+            VALUES (?, ?, ?);
+            """)
+            defer { sqlite3_finalize(insertConversation) }
+
+            var seenTargets = Set<String>()
+            for move in moves where seenTargets.insert(move.targetID).inserted {
+                sqlite3_reset(insertConversation)
+                sqlite3_clear_bindings(insertConversation)
+                try bind(insertConversation, 1, move.targetID)
+                try bind(insertConversation, 2, move.targetIsGroup ? ConversationKind.group.rawValue : ConversationKind.direct.rawValue)
+                try bind(insertConversation, 3, Self.directConversationTitle(for: move.targetID, isGroup: move.targetIsGroup))
+                try stepDone(insertConversation)
+            }
+
+            let updateMessage = try prepare("""
+            UPDATE messages
+            SET conversation_id = ?, direction = ?, sender_id = ?, sender_name = ?, status = ?
+            WHERE id = ?;
+            """)
+            defer { sqlite3_finalize(updateMessage) }
+            for move in moves {
+                sqlite3_reset(updateMessage)
+                sqlite3_clear_bindings(updateMessage)
+                try bind(updateMessage, 1, move.targetID)
+                try bind(updateMessage, 2, ChatDirection.outgoing.rawValue)
+                try bind(updateMessage, 3, effectiveSelfID)
+                try bind(updateMessage, 4, "我")
+                try bind(updateMessage, 5, DeliveryStatus.sent.rawValue)
+                try bind(updateMessage, 6, move.messageID)
+                try stepDone(updateMessage)
+            }
+
+            try refreshConversationPreviewRows(conversationIDs: targets)
+            removedSelfConversation = try removeConversationIfEmpty(effectiveSelfID)
+        }
+
+        return SelfRoutingRepairResult(
+            movedMessages: moves.count,
+            affectedConversationIDs: targets.sorted(),
+            removedSelfConversation: removedSelfConversation,
+            inferredSelfID: inferredSelfID != storedSelfID ? inferredSelfID : nil
+        )
+    }
+
+    /// 从历史事件反推当前账号 wxid。
+    ///
+    /// 普通入站消息的 `self_id` 恒为当前账号，而 `user_id` 是不同好友/群成员；
+    /// 被旧 bug 误路由的自消息里 `self_id` 是收件人、`user_id` 才是账号。
+    /// 因此「作为 self_id 出现在多个不同发送者消息里」的候选就是账号；
+    /// 好友只会作为 self_id 出现在自己发出的那几条上（发送者单一）。
+    /// 置信不足时返回 nil，调用方回退到传入的 selfID、不冒险搬数据。
+    private func inferAccountIDFromRawEvents() throws -> String? {
+        let statement = try prepare("SELECT raw_json FROM messages WHERE raw_json IS NOT NULL;")
+        defer { sqlite3_finalize(statement) }
+        var counts: [String: Int] = [:]
+        var senders: [String: Set<String>] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let raw = optionalText(statement, 0),
+                  let data = raw.data(using: .utf8),
+                  let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                continue
+            }
+            let candidate = (object["self_id"] as? String) ?? ""
+            let sender = (object["user_id"] as? String)
+                ?? ((object["sender"] as? [String: Any])?["user_id"] as? String)
+                ?? ""
+            guard !candidate.isEmpty, candidate != sender else { continue }
+            counts[candidate, default: 0] += 1
+            if !sender.isEmpty { senders[candidate, default: []].insert(sender) }
+        }
+        let ranked = counts.keys.sorted { lhs, rhs in
+            let left = senders[lhs]?.count ?? 0
+            let right = senders[rhs]?.count ?? 0
+            if left != right { return left > right }
+            return (counts[lhs] ?? 0) > (counts[rhs] ?? 0)
+        }
+        guard let top = ranked.first,
+              (counts[top] ?? 0) >= 3,
+              (senders[top]?.count ?? 0) >= 2 else { return nil }
+        if ranked.count > 1 {
+            let second = ranked[1]
+            let topDistinct = senders[top]?.count ?? 0
+            let secondDistinct = senders[second]?.count ?? 0
+            if topDistinct == secondDistinct, (counts[top] ?? 0) <= (counts[second] ?? 0) {
+                return nil
+            }
+        }
+        return top
+    }
+
+    private static func directConversationTitle(for targetID: String, isGroup: Bool) -> String {
+        if isGroup { return "群聊 \(targetID)" }
+        if targetID == "filehelper" { return "文件传输助手" }
+        return targetID
+    }
+
+    /// Assumes an open database and an active transaction.
+    private func refreshConversationPreviewRows(conversationIDs: Set<String>) throws {
+        guard !conversationIDs.isEmpty else { return }
+        let select = try prepare("""
+        SELECT text, timestamp, kind FROM messages
+        WHERE conversation_id = ? ORDER BY timestamp DESC LIMIT 1;
+        """)
+        defer { sqlite3_finalize(select) }
+        let update = try prepare("""
+        UPDATE conversations SET last_message_at = ?, last_message_preview = ? WHERE id = ?;
+        """)
+        defer { sqlite3_finalize(update) }
+        for id in conversationIDs {
+            sqlite3_reset(select)
+            sqlite3_clear_bindings(select)
+            try bind(select, 1, id)
+            guard sqlite3_step(select) == SQLITE_ROW else { continue }
+            let previewText = try text(select, 0)
+            let timestamp = sqlite3_column_double(select, 1)
+            let kind = try text(select, 2)
+            sqlite3_reset(update)
+            sqlite3_clear_bindings(update)
+            let preview = previewText.isEmpty ? "[\(kind)]" : String(previewText.prefix(80))
+            try bind(update, 1, timestamp)
+            try bind(update, 2, preview)
+            try bind(update, 3, id)
+            try stepDone(update)
+        }
+    }
+
+    /// Assumes an open database and an active transaction.
+    /// Returns true when the conversation row was removed.
+    @discardableResult
+    private func removeConversationIfEmpty(_ conversationID: String) throws -> Bool {
+        let count = try prepare("SELECT COUNT(*) FROM messages WHERE conversation_id = ?;")
+        defer { sqlite3_finalize(count) }
+        try bind(count, 1, conversationID)
+        guard sqlite3_step(count) == SQLITE_ROW, int(count, 0) == 0 else { return false }
+        for sql in [
+            "DELETE FROM conversations WHERE id = ?;",
+            "DELETE FROM memories WHERE conversation_id = ?;",
+            "DELETE FROM memory_state WHERE conversation_id = ?;"
+        ] {
+            let delete = try prepare(sql)
+            defer { sqlite3_finalize(delete) }
+            try bind(delete, 1, conversationID)
+            try stepDone(delete)
+        }
+        return true
+    }
+
     private func executeConversationUpsert(_ conversations: [Conversation]) throws {
+        try transaction {
+            try upsertConversationRows(conversations)
+        }
+    }
+
+    /// Assumes an open database and an active transaction.
+    private func upsertConversationRows(_ conversations: [Conversation]) throws {
+        guard !conversations.isEmpty else { return }
         let sql = """
         INSERT INTO conversations (
             id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
@@ -323,29 +562,27 @@ actor MemoryStore {
             note = excluded.note,
             working_hours = excluded.working_hours;
         """
-        try transaction {
-            let statement = try prepare(sql)
-            defer { sqlite3_finalize(statement) }
-            for conversation in conversations {
-                sqlite3_reset(statement)
-                sqlite3_clear_bindings(statement)
-                try bind(statement, 1, conversation.id)
-                try bind(statement, 2, conversation.kind.rawValue)
-                try bind(statement, 3, conversation.title)
-                try bind(statement, 4, conversation.subtitle)
-                try bind(statement, 5, Int32(conversation.unreadCount))
-                try bind(statement, 6, conversation.lastMessageAt?.timeIntervalSince1970)
-                try bind(statement, 7, conversation.lastMessagePreview)
-                try bind(statement, 8, Int32(conversation.aiEnabled ? 1 : 0))
-                try bind(statement, 9, conversation.providerID)
-                try bind(statement, 10, conversation.model)
-                try bind(statement, 11, conversation.personaID)
-                try bind(statement, 12, Int32(conversation.isPinned ? 1 : 0))
-                try bind(statement, 13, Int32(conversation.isMuted ? 1 : 0))
-                try bind(statement, 14, conversation.note)
-                try bind(statement, 15, encodeWorkingHours(conversation.workingHours))
-                try stepDone(statement)
-            }
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        for conversation in conversations {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+            try bind(statement, 1, conversation.id)
+            try bind(statement, 2, conversation.kind.rawValue)
+            try bind(statement, 3, conversation.title)
+            try bind(statement, 4, conversation.subtitle)
+            try bind(statement, 5, Int32(conversation.unreadCount))
+            try bind(statement, 6, conversation.lastMessageAt?.timeIntervalSince1970)
+            try bind(statement, 7, conversation.lastMessagePreview)
+            try bind(statement, 8, Int32(conversation.aiEnabled ? 1 : 0))
+            try bind(statement, 9, conversation.providerID)
+            try bind(statement, 10, conversation.model)
+            try bind(statement, 11, conversation.personaID)
+            try bind(statement, 12, Int32(conversation.isPinned ? 1 : 0))
+            try bind(statement, 13, Int32(conversation.isMuted ? 1 : 0))
+            try bind(statement, 14, conversation.note)
+            try bind(statement, 15, encodeWorkingHours(conversation.workingHours))
+            try stepDone(statement)
         }
     }
 
@@ -385,6 +622,24 @@ actor MemoryStore {
     func upsertMessages(_ messages: [ChatMessage]) throws {
         guard !messages.isEmpty else { return }
         try ensureOpen()
+        try transaction {
+            try upsertMessageRows(messages)
+        }
+    }
+
+    /// Persists one event atomically: conversation metadata + message(s) in a single
+    /// transaction instead of two round trips (one fsync/commit per inbound message).
+    func upsertConversationAndMessages(_ conversation: Conversation, _ messages: [ChatMessage]) throws {
+        try ensureOpen()
+        try transaction {
+            try upsertConversationRows([conversation])
+            try upsertMessageRows(messages)
+        }
+    }
+
+    /// Assumes an open database and an active transaction.
+    private func upsertMessageRows(_ messages: [ChatMessage]) throws {
+        guard !messages.isEmpty else { return }
         let sql = """
         INSERT INTO messages (
             id, conversation_id, sender_id, sender_name, direction, kind, text,
@@ -404,28 +659,70 @@ actor MemoryStore {
             reply_to_id = excluded.reply_to_id,
             raw_json = excluded.raw_json;
         """
-        try transaction {
-            let statement = try prepare(sql)
-            defer { sqlite3_finalize(statement) }
-            for message in messages {
-                sqlite3_reset(statement)
-                sqlite3_clear_bindings(statement)
-                try bind(statement, 1, message.id)
-                try bind(statement, 2, message.conversationID)
-                try bind(statement, 3, message.senderID)
-                try bind(statement, 4, message.senderName)
-                try bind(statement, 5, message.direction.rawValue)
-                try bind(statement, 6, message.kind.rawValue)
-                try bind(statement, 7, message.text)
-                try bind(statement, 8, message.mediaPath)
-                try bind(statement, 9, message.mediaURL)
-                try bind(statement, 10, message.timestamp.timeIntervalSince1970)
-                try bind(statement, 11, message.status.rawValue)
-                try bind(statement, 12, message.replyToID)
-                try bind(statement, 13, message.rawJSON)
-                try stepDone(statement)
-            }
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        for message in messages {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+            try bind(statement, 1, message.id)
+            try bind(statement, 2, message.conversationID)
+            try bind(statement, 3, message.senderID)
+            try bind(statement, 4, message.senderName)
+            try bind(statement, 5, message.direction.rawValue)
+            try bind(statement, 6, message.kind.rawValue)
+            try bind(statement, 7, message.text)
+            try bind(statement, 8, message.mediaPath)
+            try bind(statement, 9, message.mediaURL)
+            try bind(statement, 10, message.timestamp.timeIntervalSince1970)
+            try bind(statement, 11, message.status.rawValue)
+            try bind(statement, 12, message.replyToID)
+            try bind(statement, 13, message.rawJSON)
+            try stepDone(statement)
         }
+    }
+
+    /// Latest page for many conversations in **one** SQL query (startup preload).
+    ///
+    /// Uses the existing `(conversation_id, timestamp DESC)` index: one indexed lookup
+    /// per conversation finds the page cutoff, the outer scan then returns only the
+    /// newest `limit` rows per conversation. Replaces the previous N+1 pattern
+    /// (one `fetchMessages` per conversation).
+    func fetchLatestMessages(conversationIDs: [String], perConversation limit: Int = 30) throws -> [String: [ChatMessage]] {
+        let ids = Array(conversationIDs.prefix(500))
+        guard !ids.isEmpty else { return [:] }
+        try ensureOpen()
+        let boundedLimit = max(1, min(limit, 500))
+        let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        let sql = """
+        SELECT m.id, m.conversation_id, m.sender_id, m.sender_name, m.direction, m.kind, m.text,
+               m.media_path, m.media_url, m.timestamp, m.status, m.reply_to_id, m.raw_json
+        FROM messages m
+        WHERE m.conversation_id IN (\(placeholders))
+          AND m.timestamp >= COALESCE((
+              SELECT m2.timestamp FROM messages m2
+              WHERE m2.conversation_id = m.conversation_id
+              ORDER BY m2.timestamp DESC LIMIT 1 OFFSET ?
+          ), -1.0e18)
+        ORDER BY m.conversation_id ASC, m.timestamp ASC;
+        """
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        for (index, id) in ids.enumerated() {
+            try bind(statement, Int32(index + 1), id)
+        }
+        try bind(statement, Int32(ids.count + 1), Int32(boundedLimit - 1))
+        var grouped: [String: [ChatMessage]] = [:]
+        grouped.reserveCapacity(ids.count)
+        for id in ids { grouped[id] = [] }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let message = try decodeMessage(statement)
+            grouped[message.conversationID, default: []].append(message)
+        }
+        // Equal timestamps at the cutoff can return a few extra rows; keep the newest page.
+        for (id, list) in grouped where list.count > boundedLimit {
+            grouped[id] = Array(list.suffix(boundedLimit))
+        }
+        return grouped
     }
 
     /// Page of messages in chronological order (oldest → newest inside the page).
@@ -677,7 +974,8 @@ actor MemoryStore {
         }
     }
 
-    /// 提示词用：核心记忆 + 当前会话记忆 + 全局记忆，按核心优先、时间权重降序。
+    /// 提示词用：当前会话记忆 + 全局记忆，按核心优先、手写次之、时间权重降序。
+    /// 核心记忆同样遵守作用域：其他会话的核心记忆不会注入本会话。
     func fetchMemoriesForPrompt(conversationID: String, limit: Int = 6, now: Date = Date()) throws -> [LongTermMemory] {
         try ensureOpen()
         let statement = try prepare("""
@@ -685,7 +983,7 @@ actor MemoryStore {
                m.base_weight, m.created_at, m.updated_at, m.last_accessed_at,
                m.source_count, m.source, m.access_count
         FROM memories m LEFT JOIN conversations c ON c.id = m.conversation_id
-        WHERE m.is_core = 1 OR m.conversation_id = ? OR m.conversation_id = ''
+        WHERE m.conversation_id = ? OR m.conversation_id = ''
         ORDER BY m.is_core DESC, m.updated_at DESC LIMIT 200;
         """)
         defer { sqlite3_finalize(statement) }
@@ -696,6 +994,8 @@ actor MemoryStore {
         }
         candidates.sort {
             if $0.isCore != $1.isCore { return $0.isCore && !$1.isCore }
+            let lManual = $0.source == "manual", rManual = $1.source == "manual"
+            if lManual != rManual { return lManual }
             let l = $0.timeWeight(now: now), r = $1.timeWeight(now: now)
             if abs(l - r) > 0.000001 { return l > r }
             return $0.updatedAt > $1.updatedAt
@@ -737,6 +1037,27 @@ actor MemoryStore {
         FROM memories m LEFT JOIN conversations c ON c.id = m.conversation_id
         WHERE m.conversation_id = ? AND m.source = 'summary' AND m.is_core = 0
         ORDER BY m.updated_at DESC, m.created_at DESC;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, conversationID)
+        var result: [LongTermMemory] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(try decodeMemory(statement))
+        }
+        return result
+    }
+
+    /// 同一会话的用户手写记忆（非核心），按更新时间降序。
+    /// 自动总结会把它们作为权威参考传入合并提示，但不覆盖手写内容。
+    func manualMemories(conversationID: String) throws -> [LongTermMemory] {
+        try ensureOpen()
+        let statement = try prepare("""
+        SELECT m.id, m.conversation_id, COALESCE(c.title, ''), m.summary, m.is_core,
+               m.base_weight, m.created_at, m.updated_at, m.last_accessed_at,
+               m.source_count, m.source, m.access_count
+        FROM memories m LEFT JOIN conversations c ON c.id = m.conversation_id
+        WHERE m.conversation_id = ? AND m.source = 'manual' AND m.is_core = 0
+        ORDER BY m.updated_at DESC;
         """)
         defer { sqlite3_finalize(statement) }
         try bind(statement, 1, conversationID)

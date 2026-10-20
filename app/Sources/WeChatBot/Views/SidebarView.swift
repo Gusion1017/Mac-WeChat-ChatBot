@@ -113,6 +113,14 @@ struct SidebarView: View {
     private func sidebarItem(_ item: SidebarItem) -> some View {
         let isSelected = store.sidebarSelection == item
         return Button {
+            if item == .conversations, isSelected {
+                // 会话页内再次点击「会话」：收起当前打开的对话（列表保持可见）。
+                // 已没有打开对话时保持当前页面，不做额外动作。
+                if store.selectedConversationID != nil {
+                    store.selectedConversationID = nil
+                }
+                return
+            }
             store.sidebarSelection = item
         } label: {
             HStack(spacing: 9) {
@@ -147,12 +155,29 @@ struct SidebarView: View {
                         .strokeBorder(Color.accentColor.opacity(0.18), lineWidth: 1)
                 }
             }
+            // Scoped to the row highlight only: color-only animation, no layout change.
+            .animation(reduceMotion ? nil : .smooth(duration: 0.14), value: isSelected)
         }
         .buttonStyle(.plain)
         .onHover { hoveredItem = $0 ? item : (hoveredItem == item ? nil : hoveredItem) }
-        .help("\(item.title)（\(item.shortcutLabel)）")
+        .help(helpText(for: item, isSelected: isSelected))
         .accessibilityLabel(item.title)
+        .accessibilityHint(hintText(for: item, isSelected: isSelected))
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+
+    private func helpText(for item: SidebarItem, isSelected: Bool) -> String {
+        if item == .conversations, isSelected, store.selectedConversationID != nil {
+            return "再次点击收起当前对话（\(item.shortcutLabel)）"
+        }
+        return "\(item.title)（\(item.shortcutLabel)）"
+    }
+
+    private func hintText(for item: SidebarItem, isSelected: Bool) -> String {
+        guard item == .conversations, isSelected, store.selectedConversationID != nil else {
+            return ""
+        }
+        return "收起当前对话"
     }
 
     private func itemBackground(_ item: SidebarItem, isSelected: Bool) -> Color {

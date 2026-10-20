@@ -15,13 +15,22 @@ enum AppPaths {
     static var configFile: URL { supportDirectory.appendingPathComponent("config.json") }
     static var databaseFile: URL { supportDirectory.appendingPathComponent("chatbot.sqlite") }
     static var logsDirectory: URL { supportDirectory.appendingPathComponent("logs", isDirectory: true) }
+    /// bridge 日志必须写在 app bundle 之外：写入 `Contents/Resources/bridge/log`
+    /// 会破坏 ad-hoc 签名，导致下次启动被 macOS 以 Launch Constraint Violation 杀掉。
+    /// 与 CrashReporter 的崩溃/面包屑保持同一目录（`~/Library/Logs/WeChatAI`）。
+    static var bridgeLogDirectory: URL {
+        let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library")
+        return library.appendingPathComponent("Logs/WeChatAI/bridge", isDirectory: true)
+    }
+    static var bridgeLogFile: URL { bridgeLogDirectory.appendingPathComponent("macos.log") }
     static var backupsDirectory: URL { supportDirectory.appendingPathComponent("backups", isDirectory: true) }
     static var mediaDirectory: URL { supportDirectory.appendingPathComponent("media", isDirectory: true) }
     /// 运行期生成的 Hook 配置（含 4.1.15.55 R3 发送开关），不写仓库资源。
     static var runtimeDirectory: URL { supportDirectory.appendingPathComponent("runtime", isDirectory: true) }
 
     static func ensureDirectories() {
-        for url in [supportDirectory, logsDirectory, backupsDirectory, mediaDirectory, runtimeDirectory] {
+        for url in [supportDirectory, logsDirectory, bridgeLogDirectory, backupsDirectory, mediaDirectory, runtimeDirectory] {
             try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         }
     }

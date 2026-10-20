@@ -898,20 +898,7 @@ struct SettingsView: View {
             }
 
             SettingsSection(title: "维护") {
-                SettingsRow(
-                    title: "日志缓冲",
-                    subtitle: "内存中最多保留 2000 条运行日志",
-                    symbol: "text.alignleft",
-                    tint: Theme.info
-                ) {
-                    Button("清空日志") {
-                        store.clearLogs()
-                        toast.show("日志已清空", tone: .info, symbol: "trash")
-                    }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
-                    .disabled(store.logs.isEmpty)
-                }
+                LogBufferMaintenanceRow()
             }
         }
     }
@@ -1363,5 +1350,31 @@ private struct TechLinkRow: View {
         suffix.font = .caption
         path.append(suffix)
         return path
+    }
+}
+
+// MARK: - Log buffer maintenance
+
+/// 维护区的“清空日志”行独立成子视图：只有它观察 `store.logs`，日志高频追加时
+/// 不会让整个设置页（大量玻璃卡片）随每条日志重新求值。
+private struct LogBufferMaintenanceRow: View {
+    @Environment(AppStore.self) private var store
+    @Environment(ToastCenter.self) private var toast
+
+    var body: some View {
+        SettingsRow(
+            title: "日志缓冲",
+            subtitle: "内存中最多保留 2000 条运行日志",
+            symbol: "text.alignleft",
+            tint: Theme.info
+        ) {
+            Button("清空日志") {
+                store.clearLogs()
+                toast.show("日志已清空", tone: .info, symbol: "trash")
+            }
+            .buttonStyle(.glass)
+            .controlSize(.small)
+            .disabled(store.logs.isEmpty)
+        }
     }
 }

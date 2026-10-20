@@ -17,6 +17,9 @@ var (
 	device      frida.DeviceInt
 	taskId      = int64(0x20000000)
 	myWechatId  = ""
+	// selfIDFlag 来自 -self_id：App 知道当前账号时优先使用，避免多账号目录下
+	// 从 image_path 推导出错误账号（曾导致自消息方向判断失效）。
+	selfIDFlag = ""
 
 	// 全局共享的header字段，启动时初始化一次，两个protobuf共用
 	globalSessionId   = uint32(rand.Int63n(4000000000) + 100000000)
@@ -59,6 +62,17 @@ type WechatMessage struct {
 	// 反序列化再序列化时会被静默丢弃（@ 唤醒依赖 mentions）。
 	Mentions []string `json:"mentions,omitempty"`
 	MsgType  int      `json:"msg_type,omitempty"`
+	// IsSelf 由 bridge 依据 from/to/sender_wxid 与当前账号判定后写入：
+	// true = 这是本账号自己发出的消息（可能是手机同步/历史回放，或 App 发送后的 echo）。
+	// App 用该字段决定消息方向与会话归属，避免把私聊自消息塞进「自己」的会话。
+	// 这些字段必须显式声明，否则 HandleMsg 反序列化再序列化时会静默丢弃。
+	IsSelf     bool   `json:"is_self,omitempty"`
+	FromWXID   string `json:"from_wxid,omitempty"`
+	ToWXID     string `json:"to_wxid,omitempty"`
+	SenderWXID string `json:"sender_wxid,omitempty"`
+	// TargetID 是会话目标：私聊=对方 wxid，群聊=群 ID。自消息的 sender 仍是
+	// 自己，单靠 user_id 无法确定会话，App 需要用 target_id 归位。
+	TargetID string `json:"target_id,omitempty"`
 }
 
 type Sender struct {

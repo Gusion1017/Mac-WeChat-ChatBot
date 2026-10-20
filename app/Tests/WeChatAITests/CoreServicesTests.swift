@@ -225,60 +225,63 @@ final class CoreServicesTests: XCTestCase {
         try await store.upsertMessages(makeMessages(0..<12))
 
         // 默认 minOverflow = 1：窗口外有 2 条就会报告（手动/兼容行为）。
-        let first = try await store.pendingMemoryOverflow(conversationID: "c1", keep: 10)
-        XCTAssertEqual(first?.messages.map(\.id), ["m0", "m1"])
-        XCTAssertNotNil(first?.lastRowID)
+        let compat = try await store.pendingMemoryOverflow(conversationID: "c1", keep: 10)
+        XCTAssertEqual(compat?.messages.map(\.id), ["m0", "m1"])
+        XCTAssertNotNil(compat?.lastRowID)
 
-        // 未攒够批量阈值时返回 nil（12 条不总结）。
+        // 12 条时窗口外只有 2 条，不足默认批量阈值 8 条，不总结。
         let belowThreshold = try await store.pendingMemoryOverflow(
             conversationID: "c1",
             keep: 10,
-            minOverflow: 20,
+            minOverflow: 8,
             maxMessages: 40
         )
         XCTAssertNil(belowThreshold)
 
-        // 30 条时一次返回 20 条（m0...m19）。
-        try await store.upsertMessages(makeMessages(12..<30))
-        let batch = try await store.pendingMemoryOverflow(
+        // 18 条时窗口外 8 条，一次返回 m0...m7。
+        try await store.upsertMessages(makeMessages(12..<18))
+        let firstBatch = try await store.pendingMemoryOverflow(
             conversationID: "c1",
             keep: 10,
-            minOverflow: 20,
+            minOverflow: 8,
             maxMessages: 40
         )
-        XCTAssertEqual(batch?.messages.count, 20)
-        XCTAssertEqual(batch?.messages.first?.id, "m0")
-        XCTAssertEqual(batch?.messages.last?.id, "m19")
-        try await store.markMemorySummarized(conversationID: "c1", throughRowID: batch?.lastRowID ?? 0)
+        XCTAssertEqual(firstBatch?.messages.count, 8)
+        XCTAssertEqual(firstBatch?.messages.first?.id, "m0")
+        XCTAssertEqual(firstBatch?.messages.last?.id, "m7")
+        try await store.markMemorySummarized(conversationID: "c1", throughRowID: firstBatch?.lastRowID ?? 0)
         let afterFirstBatch = try await store.pendingMemoryOverflow(
             conversationID: "c1",
             keep: 10,
-            minOverflow: 20,
+            minOverflow: 8,
             maxMessages: 40
         )
-        XCTAssertNil(afterFirstBatch)
+        XCTAssertNil(afterFirstBatch, "游标推进后不应重复总结")
 
-        // 50 条时再返回下一批 20 条（m20...m39），游标继续前移。
-        try await store.upsertMessages(makeMessages(30..<50))
+        // 26 条时再返回下一批 8 条（m8...m15）。
+        try await store.upsertMessages(makeMessages(18..<26))
         let second = try await store.pendingMemoryOverflow(
             conversationID: "c1",
             keep: 10,
-            minOverflow: 20,
+            minOverflow: 8,
             maxMessages: 40
         )
-        XCTAssertEqual(second?.messages.count, 20)
-        XCTAssertEqual(second?.messages.first?.id, "m20")
-        XCTAssertEqual(second?.messages.last?.id, "m39")
+        XCTAssertEqual(second?.messages.count, 8)
+        XCTAssertEqual(second?.messages.first?.id, "m8")
+        XCTAssertEqual(second?.messages.last?.id, "m15")
+        try await store.markMemorySummarized(conversationID: "c1", throughRowID: second?.lastRowID ?? 0)
 
-        // 单批最多 maxMessages 条：70 条时窗口外共 50 条，但只取 40 条。
-        try await store.upsertMessages(makeMessages(50..<70))
+        // 单批最多 maxMessages 条：70 条时窗口外待总结消息更多，但只取 40 条。
+        try await store.upsertMessages(makeMessages(26..<70))
         let capped = try await store.pendingMemoryOverflow(
             conversationID: "c1",
             keep: 10,
-            minOverflow: 20,
+            minOverflow: 8,
             maxMessages: 40
         )
         XCTAssertEqual(capped?.messages.count, 40, "单批上限 maxOverflowBatch")
+        XCTAssertEqual(capped?.messages.first?.id, "m16")
+        XCTAssertEqual(capped?.messages.last?.id, "m55")
     }
 
     func testChatEngineShortTermWindowIsTenMessages() async throws {
@@ -375,7 +378,7 @@ final class CoreServicesTests: XCTestCase {
                       "没有人格时应回退到内置默认提示词")
     }
 
-    func testSummarizeOverflowBatchesTwentyMessagesAndKeepsOneAutoMemory() async throws {
+    func testSummarizeOverflowBatchesEightMessagesAndKeepsOneAutoMemory() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("wechatai-summary-\(UUID().uuidString)", isDirectory: true)
         let store = MemoryStore(databaseURL: directory.appendingPathComponent("chatbot.sqlite"))
@@ -401,9 +404,10 @@ final class CoreServicesTests: XCTestCase {
             }
         }
         XCTAssertEqual(ChatEngine.shortTermMemoryLimit, 10)
-        XCTAssertEqual(ChatEngine.overflowBatchThreshold, 20)
+        XCTAssertEqual(ChatEngine.overflowBatchThreshold, 8)
         XCTAssertEqual(ChatEngine.maxOverflowBatch, 40)
         XCTAssertEqual(ChatEngine.summaryCharacterLimit, 600)
+        XCTAssertEqual(ChatEngine.summaryBulletLimit, 5)
 
         let engine = ChatEngine(memory: store, aiClient: AIClient())
         try await store.upsertMessages(makeMessages(0..<12))
@@ -412,51 +416,262 @@ final class CoreServicesTests: XCTestCase {
             provider: nil,
             settings: .default
         )
-        XCTAssertEqual(firstCount, 0, "12 条未攒够 20 条，不应总结")
+        XCTAssertEqual(firstCount, 0, "12 条时窗口外只有 2 条，不应总结")
         var memories = try await store.fetchMemories()
         XCTAssertTrue(memories.isEmpty, "未达阈值时不应创建长期记忆")
 
-        // 30 条：一次总结最早的 20 条。
-        try await store.upsertMessages(makeMessages(12..<30))
+        // 18 条：窗口外 8 条，一次总结最早的 8 条。
+        try await store.upsertMessages(makeMessages(12..<18))
         let secondCount = await engine.summarizeOverflow(
             conversation: conversation,
             provider: nil,
             settings: .default
         )
-        XCTAssertEqual(secondCount, 20, "30 条时一次总结 20 条")
+        XCTAssertEqual(secondCount, 8, "18 条时应总结窗口外的 8 条")
         memories = try await store.fetchMemories()
         XCTAssertEqual(memories.count, 1)
         XCTAssertEqual(memories[0].source, "summary")
-        XCTAssertEqual(memories[0].sourceCount, 20)
+        XCTAssertEqual(memories[0].sourceCount, 8)
         XCTAssertTrue(memories[0].summary.contains("消息 0"))
-        XCTAssertTrue(memories[0].summary.contains("消息 19"))
+        XCTAssertTrue(memories[0].summary.contains("消息 7"))
         XCTAssertLessThanOrEqual(memories[0].summary.count, ChatEngine.summaryCharacterLimit)
         var autos = try await store.autoMemories(conversationID: "c1")
         XCTAssertEqual(autos.count, 1)
         let pendingAfterFirst = try await store.pendingMemoryOverflow(
             conversationID: "c1",
             keep: 10,
-            minOverflow: 20,
+            minOverflow: 8,
             maxMessages: 40
         )
         XCTAssertNil(pendingAfterFirst, "总结后剩余 10 条在短期窗口内")
 
-        // 50 条：再总结下一批 20 条，自动记忆仍是一条。
-        try await store.upsertMessages(makeMessages(30..<50))
+        // 26 条：再总结下一批 8 条，自动记忆仍是一条。
+        try await store.upsertMessages(makeMessages(18..<26))
         let thirdCount = await engine.summarizeOverflow(
             conversation: conversation,
             provider: nil,
             settings: .default
         )
-        XCTAssertEqual(thirdCount, 20, "50 条时再总结 20 条")
+        XCTAssertEqual(thirdCount, 8, "26 条时再总结 8 条")
         memories = try await store.fetchMemories()
         XCTAssertEqual(memories.count, 1, "自动总结应滚动更新同一条长期记忆")
-        XCTAssertEqual(memories[0].sourceCount, 40)
-        XCTAssertTrue(memories[0].summary.contains("消息 20"))
-        XCTAssertTrue(memories[0].summary.contains("消息 39"))
+        XCTAssertEqual(memories[0].sourceCount, 16)
+        XCTAssertTrue(memories[0].summary.contains("消息 8"))
+        XCTAssertTrue(memories[0].summary.contains("消息 15"))
         XCTAssertLessThanOrEqual(memories[0].summary.count, ChatEngine.summaryCharacterLimit)
         autos = try await store.autoMemories(conversationID: "c1")
         XCTAssertEqual(autos.count, 1)
+    }
+
+    func testCoreMemoryAndManualMemoryFollowConversationScope() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechatai-scope-\(UUID().uuidString)", isDirectory: true)
+        let store = MemoryStore(databaseURL: directory.appendingPathComponent("chatbot.sqlite"))
+        try await store.open()
+        defer {
+            Task { await store.close() }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try await store.upsertConversation(Conversation(id: "c1", kind: .direct, title: "小林"))
+        try await store.upsertConversation(Conversation(id: "c2", kind: .direct, title: "阿强"))
+        let now = Date()
+        let globalCore = LongTermMemory(
+            conversationID: "",
+            summary: "全局核心：用户叫小林",
+            isCore: true,
+            updatedAt: now.addingTimeInterval(-3 * 86_400)
+        )
+        let c1Core = LongTermMemory(
+            conversationID: "c1",
+            summary: "c1 核心：周五讨论旅行",
+            isCore: true,
+            updatedAt: now.addingTimeInterval(-86_400)
+        )
+        let c2Core = LongTermMemory(
+            conversationID: "c2",
+            summary: "c2 核心：阿强喜欢健身",
+            isCore: true,
+            updatedAt: now.addingTimeInterval(-86_400)
+        )
+        let c1Manual = LongTermMemory(
+            conversationID: "c1",
+            summary: "c1 手写：用户喜欢猫",
+            updatedAt: now.addingTimeInterval(-2 * 86_400),
+            source: "manual"
+        )
+        let c1Auto = LongTermMemory(
+            conversationID: "c1",
+            summary: "c1 自动：周末去杭州",
+            updatedAt: now.addingTimeInterval(-2 * 86_400)
+        )
+        for memory in [globalCore, c1Core, c2Core, c1Manual, c1Auto] {
+            try await store.upsertMemory(memory)
+        }
+
+        let promptC1 = try await store.fetchMemoriesForPrompt(conversationID: "c1", limit: 6, now: now)
+        XCTAssertEqual(
+            Set(promptC1.map(\.summary)),
+            Set(["全局核心：用户叫小林", "c1 核心：周五讨论旅行",
+                 "c1 手写：用户喜欢猫", "c1 自动：周末去杭州"]),
+            "只应注入本会话与全局记忆，其他会话核心不串入"
+        )
+        XCTAssertEqual(promptC1.first?.summary, "c1 核心：周五讨论旅行", "核心优先，且越近权重越高")
+        XCTAssertEqual(promptC1[1].summary, "全局核心：用户叫小林")
+        XCTAssertEqual(promptC1[2].source, "manual", "手写记忆优先于自动总结")
+
+        let promptC2 = try await store.fetchMemoriesForPrompt(conversationID: "c2", limit: 6, now: now)
+        XCTAssertEqual(
+            Set(promptC2.map(\.summary)),
+            Set(["全局核心：用户叫小林", "c2 核心：阿强喜欢健身"])
+        )
+        XCTAssertFalse(promptC2.contains { $0.summary.contains("c1") })
+    }
+
+    func testGroupPromptLabelsSpeakersAndDirectKeepsPlainText() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechatai-speaker-\(UUID().uuidString)", isDirectory: true)
+        let store = MemoryStore(databaseURL: directory.appendingPathComponent("chatbot.sqlite"))
+        try await store.open()
+        defer {
+            Task { await store.close() }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let settings = AppSettings.default
+        let group = Conversation(id: "g1", kind: .group, title: "群聊")
+        let direct = Conversation(id: "c1", kind: .direct, title: "私聊")
+        let now = Date()
+        let history = [
+            ChatMessage(id: "h1", conversationID: "g1", senderID: "wxid_a", senderName: "wxid_a",
+                        direction: .incoming, text: "早上好", timestamp: now),
+            ChatMessage(id: "h2", conversationID: "g1", senderID: "self", senderName: "我",
+                        direction: .outgoing, text: "早呀", timestamp: now.addingTimeInterval(1)),
+            ChatMessage(id: "h3", conversationID: "g1", senderID: "wxid_b", senderName: "",
+                        direction: .incoming, text: "在吗", timestamp: now.addingTimeInterval(2))
+        ]
+        let incoming = ChatMessage(id: "h4", conversationID: "g1", senderID: "wxid_c", senderName: "wxid_c",
+                                   direction: .incoming, text: "最新消息", timestamp: now.addingTimeInterval(3))
+        let engine = ChatEngine(memory: store, aiClient: AIClient())
+
+        let groupMessages = engine.buildMessages(
+            conversation: group, incoming: incoming, settings: settings,
+            persona: nil, history: history, memoryNotes: nil
+        )
+        let groupSystem = groupMessages.first?.content ?? ""
+        XCTAssertTrue(groupSystem.contains("群聊消息格式"), "群聊应说明发言人标注规则")
+        let groupBody = groupMessages.dropFirst().map(\.content).joined(separator: "\n")
+        XCTAssertTrue(groupBody.contains("wxid_a：早上好"))
+        XCTAssertTrue(groupBody.contains("wxid_b：在吗"), "senderName 为空时回退 senderID")
+        XCTAssertTrue(groupBody.contains("wxid_c：最新消息"))
+        XCTAssertFalse(groupBody.contains("wxid_a：早呀"), "机器人自己的消息不加发言人前缀")
+
+        let directMessages = engine.buildMessages(
+            conversation: direct, incoming: incoming, settings: settings,
+            persona: nil, history: history, memoryNotes: nil
+        )
+        let directSystem = directMessages.first?.content ?? ""
+        XCTAssertFalse(directSystem.contains("群聊消息格式"), "私聊不应加群聊发言人说明")
+        let directBody = directMessages.dropFirst().map(\.content).joined(separator: "\n")
+        XCTAssertTrue(directBody.contains("早上好"))
+        XCTAssertFalse(directBody.contains("wxid_a：早上好"), "私聊保持原文，减少提示词噪声")
+    }
+
+    func testEarlierRecallStaysInCurrentConversation() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechatai-recall-\(UUID().uuidString)", isDirectory: true)
+        let store = MemoryStore(databaseURL: directory.appendingPathComponent("chatbot.sqlite"))
+        try await store.open()
+        defer {
+            Task { await store.close() }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let conversation = Conversation(id: "c1", kind: .direct, title: "小林")
+        let now = Date()
+        try await store.upsertMessages([
+            ChatMessage(id: "old1", conversationID: "c1", senderID: "wxid_a", senderName: "wxid_a",
+                        direction: .incoming, text: "去杭州玩", timestamp: now.addingTimeInterval(-3_600)),
+            ChatMessage(id: "other1", conversationID: "c2", senderID: "wxid_b", senderName: "wxid_b",
+                        direction: .incoming, text: "去杭州玩（其他会话）", timestamp: now.addingTimeInterval(-1_800)),
+            ChatMessage(id: "recent1", conversationID: "c1", senderID: "wxid_a", senderName: "wxid_a",
+                        direction: .incoming, text: "去杭州玩（窗口内）", timestamp: now.addingTimeInterval(-10))
+        ])
+        let recent = ChatMessage(id: "recent1", conversationID: "c1", senderID: "wxid_a", senderName: "wxid_a",
+                                 direction: .incoming, text: "去杭州玩（窗口内）",
+                                 timestamp: now.addingTimeInterval(-10))
+        var history = (0..<9).map { index in
+            ChatMessage(id: "h\(index)", conversationID: "c1", senderID: "wxid_a", senderName: "wxid_a",
+                        direction: index.isMultiple(of: 2) ? .incoming : .outgoing,
+                        text: "窗口消息 \(index)",
+                        timestamp: now.addingTimeInterval(Double(-9 + index)))
+        }
+        history.append(recent)
+        let incoming = ChatMessage(id: "in", conversationID: "c1", senderID: "wxid_a", senderName: "wxid_a",
+                                   direction: .incoming, text: "去杭州玩", timestamp: now.addingTimeInterval(-5))
+        let engine = ChatEngine(memory: store, aiClient: AIClient())
+
+        let recall = await engine.recallEarlierMessages(
+            conversation: conversation,
+            incoming: incoming,
+            history: history
+        )
+        XCTAssertNotNil(recall)
+        XCTAssertTrue(recall?.contains("本会话较早的相关片段") ?? false)
+        XCTAssertTrue(recall?.contains("对方：去杭州玩") ?? false, "私聊召回统一标「对方」")
+        XCTAssertFalse(recall?.contains("其他会话") ?? true, "不得召回其他会话的原文")
+        XCTAssertFalse(recall?.contains("窗口内") ?? true, "短期窗口内的消息不重复召回")
+    }
+
+    func testSummarizeOverflowKeepsManualMemoryAuthoritative() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechatai-manual-\(UUID().uuidString)", isDirectory: true)
+        let store = MemoryStore(databaseURL: directory.appendingPathComponent("chatbot.sqlite"))
+        try await store.open()
+        defer {
+            Task { await store.close() }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let conversation = Conversation(id: "c1", kind: .direct, title: "测试")
+        try await store.upsertConversation(conversation)
+        let manual = LongTermMemory(
+            conversationID: "c1",
+            summary: "手写：用户叫小林，喜欢猫",
+            updatedAt: Date().addingTimeInterval(-86_400),
+            source: "manual"
+        )
+        try await store.upsertMemory(manual)
+        let now = Date()
+        try await store.upsertMessages((0..<18).map { index in
+            ChatMessage(
+                id: "m\(index)",
+                conversationID: "c1",
+                senderID: index.isMultiple(of: 2) ? "u1" : "self",
+                senderName: index.isMultiple(of: 2) ? "用户" : "我",
+                direction: index.isMultiple(of: 2) ? .incoming : .outgoing,
+                text: "消息 \(index)",
+                timestamp: now.addingTimeInterval(Double(index))
+            )
+        })
+        let engine = ChatEngine(memory: store, aiClient: AIClient())
+        let count = await engine.summarizeOverflow(
+            conversation: conversation,
+            provider: nil,
+            settings: .default
+        )
+        XCTAssertEqual(count, 8)
+
+        let manuals = try await store.manualMemories(conversationID: "c1")
+        XCTAssertEqual(manuals.map(\.summary), ["手写：用户叫小林，喜欢猫"], "手写记忆不应被自动总结覆盖")
+        let all = try await store.fetchMemories()
+        XCTAssertEqual(all.count, 2)
+        guard let auto = all.first(where: { $0.source == "summary" }) else {
+            return XCTFail("应生成一条自动滚动记忆")
+        }
+        XCTAssertEqual(auto.sourceCount, 8)
+        XCTAssertTrue(auto.summary.contains("消息 0"))
+        XCTAssertTrue(auto.summary.contains("消息 7"))
+
+        let prompt = try await store.fetchMemoriesForPrompt(conversationID: "c1")
+        XCTAssertTrue(prompt.contains { $0.source == "manual" })
+        XCTAssertTrue(prompt.contains { $0.source == "summary" })
     }
 
     func testSummarizeOverflowMergesDuplicateAutoMemories() async throws {
@@ -493,8 +708,8 @@ final class CoreServicesTests: XCTestCase {
         XCTAssertEqual(before.count, 2)
         XCTAssertEqual(before.first?.summary, "用户住在杭州", "autoMemories 按 updated_at 降序")
 
-        // 攒够 20 条后触发总结：先合并历史多条，再滚动合并本批。
-        try await store.upsertMessages((0..<30).map { index in
+        // 窗口外攒够 8 条后触发总结：先合并历史多条，再滚动合并本批。
+        try await store.upsertMessages((0..<18).map { index in
             ChatMessage(
                 id: "m\(index)",
                 conversationID: "c1",
@@ -511,14 +726,15 @@ final class CoreServicesTests: XCTestCase {
             provider: nil,
             settings: .default
         )
-        XCTAssertEqual(count, 20)
+        XCTAssertEqual(count, 8)
 
         let after = try await store.autoMemories(conversationID: "c1")
         XCTAssertEqual(after.count, 1, "同一会话只保留一条自动记忆")
-        XCTAssertEqual(after[0].sourceCount, 5 + 7 + 20, "合并时累加 sourceCount")
+        XCTAssertEqual(after[0].sourceCount, 5 + 7 + 8, "合并时累加 sourceCount")
         XCTAssertTrue(after[0].summary.contains("猫"))
         XCTAssertTrue(after[0].summary.contains("杭州"))
         XCTAssertTrue(after[0].summary.contains("消息 0"))
+        XCTAssertTrue(after[0].summary.contains("消息 7"))
         let allMemories = try await store.fetchMemories()
         XCTAssertEqual(allMemories.count, 1, "重复的自动记忆应被删除")
     }
@@ -1302,5 +1518,44 @@ final class CoreServicesTests: XCTestCase {
         // 兼容包装事件 {"data": {...}}。
         let wrapped = "{\"data\":\(eventJSON(at: "wxid_bot"))}"
         XCTAssertTrue(engine.evaluate(context(rawJSON: wrapped)).shouldReply)
+    }
+
+    // MARK: Reply pipeline progress
+
+    func testReplyProgressCountdownClampsAndFormats() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        var progress = ReplyProgress(
+            conversationID: "c1",
+            stage: .waitingToSend,
+            startedAt: start,
+            stageStartedAt: start,
+            countdownEnd: start.addingTimeInterval(3),
+            countdownTotal: 5,
+            providerName: "DeepSeek",
+            model: "deepseek-chat",
+            segmentIndex: 1,
+            segmentCount: 2
+        )
+
+        // 倒计时按截止时间计算，剩余比例用于收缩进度条。
+        XCTAssertEqual(progress.remainingSeconds(at: start) ?? -1, 3, accuracy: 0.0001)
+        XCTAssertEqual(progress.countdownFraction(at: start) ?? -1, 0.4, accuracy: 0.0001)
+        XCTAssertEqual(progress.remainingSeconds(at: start.addingTimeInterval(4)) ?? -1, 0, accuracy: 0.0001)
+        XCTAssertEqual(progress.countdownFraction(at: start.addingTimeInterval(4)) ?? -1, 1, accuracy: 0.0001)
+
+        // 未知/已结束倒计时不会产生负值。
+        progress.countdownEnd = nil
+        progress.countdownTotal = nil
+        XCTAssertNil(progress.remainingSeconds(at: start))
+        XCTAssertNil(progress.countdownFraction(at: start))
+
+        XCTAssertEqual(UIFormat.liveSeconds(6.24), "6.2 秒")
+        XCTAssertEqual(UIFormat.liveSeconds(65), "1 分 05 秒")
+        XCTAssertEqual(UIFormat.liveSeconds(-1), "0.0 秒")
+
+        XCTAssertTrue(ReplyStage.generating.isActive)
+        XCTAssertTrue(ReplyStage.waitingToSend.needsTicking)
+        XCTAssertFalse(ReplyStage.failed.isActive)
+        XCTAssertEqual(ReplyStage.completed.label, "回复已发送")
     }
 }

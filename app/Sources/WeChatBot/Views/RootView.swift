@@ -3,7 +3,6 @@ import SwiftUI
 /// Root window: custom glass sidebar plus the routed detail page.
 struct RootView: View {
     @Environment(AppStore.self) private var store
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
 
     var body: some View {
@@ -31,7 +30,13 @@ struct RootView: View {
             }
         }
         .toastOverlay()
-        .animation(reduceMotion ? nil : .smooth(duration: 0.18), value: store.sidebarSelection)
+        // NOTE: intentionally no global `.animation(value: sidebarSelection)` here.
+        // Animating the whole NavigationSplitView made every page switch an animated
+        // AppKit layout pass; when the incoming page contains lazy containers the lazy
+        // prefetch re-dirties layout from inside that pass (see crash:
+        // NSHostingView.layout -> Update.dispatchActions -> LazyLayoutViewCache.signalPrefetch
+        // -> setNeedsUpdate -> setNeedsUpdateConstraints). The sidebar animates its own
+        // selection highlight locally instead, so navigation no longer animates page layout.
     }
 
     private var preferredScheme: ColorScheme? {

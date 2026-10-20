@@ -51,47 +51,51 @@ struct DashboardView: View {
             }
 
             SectionCard(title: "快捷操作", subtitle: "常用动作一步直达", symbol: "bolt.fill") {
-                LazyVGrid(
-                    columns: Array(repeating: GridItem(.flexible(), spacing: 9), count: 3),
-                    spacing: 9
-                ) {
-                    QuickActionButton(
-                        title: "安装 Hook",
-                        symbol: "wrench.and.screwdriver.fill",
-                        tint: Theme.warning,
-                        isBusy: isInstallingHook,
-                        isEnabled: !store.hookStatus.gadgetInstalled
-                    ) {
-                        showHookConfirm = true
+                // Non-lazy fixed grid: three equal-width columns, two rows. A LazyVGrid
+                // here only added LazyLayoutViewCache prefetch churn during layout for a
+                // six-item grid that always fits on screen.
+                VStack(spacing: 9) {
+                    HStack(spacing: 9) {
+                        QuickActionButton(
+                            title: "安装 Hook",
+                            symbol: "wrench.and.screwdriver.fill",
+                            tint: Theme.warning,
+                            isBusy: isInstallingHook,
+                            isEnabled: !store.hookStatus.gadgetInstalled
+                        ) {
+                            showHookConfirm = true
+                        }
+                        QuickActionButton(
+                            title: "测试 AI",
+                            symbol: "bolt.horizontal",
+                            tint: Theme.info,
+                            isBusy: isTestingAI,
+                            isEnabled: store.defaultProvider != nil
+                        ) {
+                            testAI()
+                        }
+                        QuickActionButton(title: "设置", symbol: "gearshape.fill", tint: Theme.violet) {
+                            store.sidebarSelection = .settings
+                        }
                     }
-                    QuickActionButton(
-                        title: "测试 AI",
-                        symbol: "bolt.horizontal",
-                        tint: Theme.info,
-                        isBusy: isTestingAI,
-                        isEnabled: store.defaultProvider != nil
-                    ) {
-                        testAI()
-                    }
-                    QuickActionButton(title: "设置", symbol: "gearshape.fill", tint: Theme.violet) {
-                        store.sidebarSelection = .settings
-                    }
-                    QuickActionButton(title: "首次向导", symbol: "sparkles.rectangle.stack", tint: Theme.accent) {
-                        store.isOnboardingPresented = true
-                    }
-                    QuickActionButton(title: "查看日志", symbol: "text.alignleft", tint: Theme.info) {
-                        store.sidebarSelection = .logs
-                    }
-                    QuickActionButton(title: "记忆库", symbol: "brain", tint: Theme.violet) {
-                        store.sidebarSelection = .memory
+                    HStack(spacing: 9) {
+                        QuickActionButton(title: "首次向导", symbol: "sparkles.rectangle.stack", tint: Theme.accent) {
+                            store.isOnboardingPresented = true
+                        }
+                        QuickActionButton(title: "查看日志", symbol: "text.alignleft", tint: Theme.info) {
+                            store.sidebarSelection = .logs
+                        }
+                        QuickActionButton(title: "记忆库", symbol: "brain", tint: Theme.violet) {
+                            store.sidebarSelection = .memory
+                        }
                     }
                 }
             }
 
             HStack(alignment: .top, spacing: 16) {
-                recentLogsCard
+                DashboardRecentLogsCard()
                     .frame(maxWidth: .infinity)
-                recentConversationsCard
+                DashboardRecentConversationsCard()
                     .frame(maxWidth: .infinity)
             }
 
@@ -123,11 +127,10 @@ struct DashboardView: View {
 
     // MARK: Status
 
+    /// Fixed three-column row (non-lazy). LazyVGrid was unnecessary here and is a known
+    /// source of layout-prefetch feedback while the rest of the page is invalidating.
     private var statusGrid: some View {
-        LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3),
-            spacing: 12
-        ) {
+        HStack(alignment: .center, spacing: 12) {
             StatusCard(
                 title: "微信",
                 value: store.hookStatus.wechatVersion.isEmpty ? "未检测" : "微信 \(store.hookStatus.wechatVersion)",
@@ -205,127 +208,11 @@ struct DashboardView: View {
 
     // MARK: Metrics
 
+    /// Metrics are isolated in their own view: `store.stats` changes on every message,
+    /// but only the four tiles need to re-render — not the status cards, quick actions,
+    /// notices and recent-activity cards on the rest of the dashboard.
     private var metricsGrid: some View {
-        LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4),
-            spacing: 10
-        ) {
-            MetricTile(
-                title: "今日收到",
-                value: "\(store.stats.receivedToday)",
-                unit: "条",
-                symbol: "arrow.down.message.fill",
-                tint: Theme.info,
-                detail: "实时统计"
-            )
-            MetricTile(
-                title: "今日回复",
-                value: "\(store.stats.repliedToday)",
-                unit: "条",
-                symbol: "arrow.up.message.fill",
-                tint: Theme.accent,
-                detail: store.stats.lastReplyAt.map { "最近 \(UIFormat.relative($0))" } ?? "尚未回复"
-            )
-            MetricTile(
-                title: "失败",
-                value: "\(store.stats.failedToday)",
-                unit: "次",
-                symbol: "exclamationmark.triangle.fill",
-                tint: store.stats.failedToday > 0 ? Theme.warning : .secondary,
-                detail: store.stats.failedToday > 0 ? "检查日志与 Hook 状态" : "运行正常"
-            )
-            MetricTile(
-                title: "AI 平均延迟",
-                value: UIFormat.duration(milliseconds: store.stats.aiLatencyAverageMs),
-                symbol: "timer",
-                tint: Theme.violet,
-                detail: store.stats.startedAt.map { "启动于 \(UIFormat.relative($0))" } ?? "未启动"
-            )
-        }
-    }
-
-    // MARK: Recent activity
-
-    private var recentLogsCard: some View {
-        SectionCard(title: "最近活动", subtitle: "最新的运行日志", symbol: "text.alignleft", tint: Theme.info) {
-            HStack {
-                Spacer()
-                Button("全部日志") { store.sidebarSelection = .logs }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                    .foregroundStyle(Theme.info)
-            }
-            .padding(.top, -8)
-            VStack(alignment: .leading, spacing: 0) {
-                let entries = Array(store.logs.suffix(7))
-                if entries.isEmpty {
-                    Text("暂无日志，启动机器人后这里会显示实时活动。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 14)
-                } else {
-                    ForEach(entries) { entry in
-                        LogRow(entry: entry)
-                        if entry.id != entries.last?.id {
-                            Divider().opacity(0.35)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private var recentConversationsCard: some View {
-        SectionCard(title: "最近会话", subtitle: "点击继续查看", symbol: "bubble.left.and.bubble.right.fill", tint: Theme.accent) {
-            HStack {
-                Spacer()
-                Button("全部会话") { store.sidebarSelection = .conversations }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                    .foregroundStyle(Theme.accent)
-            }
-            .padding(.top, -8)
-            VStack(alignment: .leading, spacing: 2) {
-                let recent = Array(store.conversations.sorted { ($0.lastMessageAt ?? .distantPast) > ($1.lastMessageAt ?? .distantPast) }.prefix(5))
-                if recent.isEmpty {
-                    Text("暂无会话，连接微信后会自动同步。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 14)
-                } else {
-                    ForEach(recent) { conversation in
-                        Button {
-                            store.selectedConversationID = conversation.id
-                            store.sidebarSelection = .conversations
-                        } label: {
-                            HStack(spacing: 8) {
-                                AvatarView(title: conversation.displayTitle, kind: conversation.kind, size: 26)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(conversation.displayTitle)
-                                        .font(.caption.weight(.medium))
-                                        .lineLimit(1)
-                                    Text(conversation.lastMessagePreview.isEmpty ? "暂无消息" : conversation.lastMessagePreview)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                }
-                                Spacer(minLength: 4)
-                                if let date = conversation.lastMessageAt {
-                                    Text(UIFormat.relativeShort(date))
-                                        .font(.system(size: 9))
-                                        .foregroundStyle(.tertiary)
-                                }
-                            }
-                            .padding(.vertical, 4)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-        }
+        DashboardMetricsRow()
     }
 
     // MARK: Actions
@@ -415,5 +302,169 @@ struct DashboardView: View {
         }
         let date = Date().formatted(.dateTime.month().day().weekday(.wide))
         return "\(greeting) · \(date)"
+    }
+}
+
+// MARK: - Recent activity cards
+
+/// "最近活动" card isolated into its own view so the 3-10 log lines/second that the
+/// runtime appends on the MainActor invalidate *only this card* instead of the whole
+/// dashboard (which contains four `.glassEffect` surfaces, two grids and metrics).
+///
+/// The rows are sampled from the store on a low-frequency timer; a high-rate log
+/// stream therefore never rebuilds the dashboard's layout each frame.
+private struct DashboardRecentLogsCard: View {
+    @Environment(AppStore.self) private var store
+    @State private var entries: [LogEntry] = []
+
+    var body: some View {
+        SectionCard(title: "最近活动", subtitle: "最新的运行日志", symbol: "text.alignleft", tint: Theme.info) {
+            HStack {
+                Spacer()
+                Button("全部日志") { store.sidebarSelection = .logs }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(Theme.info)
+            }
+            .padding(.top, -8)
+            VStack(alignment: .leading, spacing: 0) {
+                if entries.isEmpty {
+                    Text("暂无日志，启动机器人后这里会显示实时活动。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 14)
+                } else {
+                    ForEach(entries) { entry in
+                        LogRow(entry: entry)
+                        if entry.id != entries.last?.id {
+                            Divider().opacity(0.35)
+                        }
+                    }
+                }
+            }
+        }
+        .task { await refreshLoop() }
+    }
+
+    private func refreshLoop() async {
+        refresh()
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(750))
+            if Task.isCancelled { return }
+            refresh()
+        }
+    }
+
+    @MainActor
+    private func refresh() {
+        entries = Array(store.logs.suffix(7))
+    }
+}
+
+/// "最近会话" card in its own view: message arrivals mutate `store.conversations`,
+/// but only this card re-renders, not the rest of the dashboard.
+private struct DashboardRecentConversationsCard: View {
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        SectionCard(title: "最近会话", subtitle: "点击继续查看", symbol: "bubble.left.and.bubble.right.fill", tint: Theme.accent) {
+            HStack {
+                Spacer()
+                Button("全部会话") { store.sidebarSelection = .conversations }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(Theme.accent)
+            }
+            .padding(.top, -8)
+            VStack(alignment: .leading, spacing: 2) {
+                let recent = recentConversations
+                if recent.isEmpty {
+                    Text("暂无会话，连接微信后会自动同步。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 14)
+                } else {
+                    ForEach(recent) { conversation in
+                        Button {
+                            store.selectedConversationID = conversation.id
+                            store.sidebarSelection = .conversations
+                        } label: {
+                            HStack(spacing: 8) {
+                                AvatarView(title: conversation.displayTitle, kind: conversation.kind, size: 26)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(conversation.displayTitle)
+                                        .font(.caption.weight(.medium))
+                                        .lineLimit(1)
+                                    Text(conversation.lastMessagePreview.isEmpty ? "暂无消息" : conversation.lastMessagePreview)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer(minLength: 4)
+                                if let date = conversation.lastMessageAt {
+                                    Text(UIFormat.relativeShort(date))
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private var recentConversations: [Conversation] {
+        Array(
+            store.conversations
+                .sorted { ($0.lastMessageAt ?? .distantPast) > ($1.lastMessageAt ?? .distantPast) }
+                .prefix(5)
+        )
+    }
+}
+
+/// Isolated metrics row (see `metricsGrid`), non-lazy equal-width layout.
+private struct DashboardMetricsRow: View {
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            MetricTile(
+                title: "今日收到",
+                value: "\(store.stats.receivedToday)",
+                unit: "条",
+                symbol: "arrow.down.message.fill",
+                tint: Theme.info,
+                detail: "实时统计"
+            )
+            MetricTile(
+                title: "今日回复",
+                value: "\(store.stats.repliedToday)",
+                unit: "条",
+                symbol: "arrow.up.message.fill",
+                tint: Theme.accent,
+                detail: store.stats.lastReplyAt.map { "最近 \(UIFormat.relative($0))" } ?? "尚未回复"
+            )
+            MetricTile(
+                title: "失败",
+                value: "\(store.stats.failedToday)",
+                unit: "次",
+                symbol: "exclamationmark.triangle.fill",
+                tint: store.stats.failedToday > 0 ? Theme.warning : .secondary,
+                detail: store.stats.failedToday > 0 ? "检查日志与 Hook 状态" : "运行正常"
+            )
+            MetricTile(
+                title: "AI 平均延迟",
+                value: UIFormat.duration(milliseconds: store.stats.aiLatencyAverageMs),
+                symbol: "timer",
+                tint: Theme.violet,
+                detail: store.stats.startedAt.map { "启动于 \(UIFormat.relative($0))" } ?? "未启动"
+            )
+        }
     }
 }
