@@ -1,0 +1,35 @@
+# Third-party notices
+
+This project is a personal-use derivative of open-source WeChat hook projects.
+It is distributed under **GPL-3.0** (see `LICENSE`). The app communicates with
+official WeChat locally through Frida Gadget; no Tencent source code is included.
+
+## Hook / bridge / protocol
+
+- **yincongcyincong/weixin-macos** — https://github.com/yincongcyincong/weixin-macos
+  Frida hooks, OneBot bridge, version address tables. License: GPL-3.0.
+- **xiaoguiwucan/wechat-mac-hook** and **wechat-mac-hook-classic** —
+  https://github.com/xiaoguiwucan/wechat-mac-hook
+  macOS 4.x OneBot integration, gadget install approach, operations docs.
+  License: GPL-3.0.
+- **addrfind** (from weixin-macos) — cross-version address locator. GPL-3.0.
+
+## Runtime components bundled or invoked
+
+- **Frida / frida-gadget** — https://frida.re, https://github.com/frida/frida
+  Runtime instrumentation. License: LGPL-2.1 (frida-core / gadget).
+- **frida-go** — https://github.com/frida/frida-go, LGPL-2.1.
+- **gorilla/websocket** — BSD-3-Clause.
+- **zerolog** — MIT.
+- **google/uuid** — BSD-3-Clause.
+- **go-silk** — see upstream.
+- **protobuf-go** — BSD-3-Clause.
+- **lumberjack** — MIT.
+
+## Apple
+
+- SF Symbols are used through SwiftUI; they are subject to Apple's license terms.
+- The app is not affiliated with or endorsed by Tencent or Apple.
+
+If you redistribute this project or a binary, comply with GPL-3.0 and keep this
+notice plus the corresponding source available.

@@ -1,0 +1,1211 @@
+import Foundation
+import SQLite3
+
+// MARK: - Types
+
+struct MemorySearchHit: Sendable, Hashable {
+    var message: ChatMessage
+    var conversationTitle: String
+}
+
+/// 短期窗口溢出的一批消息；`lastRowID` 用于推进总结游标。
+struct MemoryOverflow: Sendable, Equatable {
+    var messages: [ChatMessage]
+    var lastRowID: Int64
+}
+
+enum MemoryStoreError: LocalizedError {
+    case openFailed(String)
+    case sqlite(String)
+    case notOpen
+
+    var errorDescription: String? {
+        switch self {
+        case .openFailed(let message): return "数据库打开失败：\(message)"
+        case .sqlite(let message): return "数据库错误：\(message)"
+        case .notOpen: return "数据库尚未打开"
+        }
+    }
+}
+
+// MARK: - MemoryStore
+
+/// SQLite-backed persistence for conversations / messages / logs / schedules / kv settings.
+///
+/// Concurrency model:
+/// - This is an `actor`; every statement executes serially inside the actor.
+/// - `SQLITE_OPEN_FULLMUTEX` is still requested as a belt-and-braces measure.
+/// - Callers on the main actor must `await` these methods; the UI never blocks on IO.
+/// - WAL mode + `synchronous=NORMAL` give cheap durable writes.
+actor MemoryStore {
+    static let shared = MemoryStore()
+
+    private let databaseURL: URL
+    private var db: OpaquePointer?
+    private var isOpen = false
+    private(set) var openedAt: Date?
+
+    nonisolated var path: String { databaseURL.path }
+
+    init(databaseURL: URL = AppPaths.databaseFile) {
+        self.databaseURL = databaseURL
+    }
+
+    deinit {
+        if let db {
+            sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil)
+            sqlite3_close_v2(db)
+        }
+    }
+
+    // MARK: Lifecycle
+
+    func open() throws {
+        guard !isOpen else { return }
+        try FileManager.default.createDirectory(
+            at: databaseURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        var handle: OpaquePointer?
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        let status = sqlite3_open_v2(databaseURL.path, &handle, flags, nil)
+        guard status == SQLITE_OK, let handle else {
+            let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite3_open_v2 code \(status)"
+            if let handle { sqlite3_close_v2(handle) }
+            throw MemoryStoreError.openFailed(message)
+        }
+        db = handle
+
+        do {
+            try execute("PRAGMA journal_mode=WAL;")
+            try execute("PRAGMA synchronous=NORMAL;")
+            try execute("PRAGMA foreign_keys=ON;")
+            try execute("PRAGMA busy_timeout=3000;")
+            try migrate()
+        } catch {
+            sqlite3_close_v2(handle)
+            db = nil
+            throw error
+        }
+        isOpen = true
+        openedAt = Date()
+    }
+
+    /// Closes the handle after a WAL checkpoint. Safe to call multiple times.
+    func close() {
+        guard let db else { return }
+        sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_TRUNCATE, nil, nil)
+        sqlite3_close_v2(db)
+        self.db = nil
+        isOpen = false
+        openedAt = nil
+    }
+
+    private func migrate() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            subtitle TEXT,
+            unread_count INTEGER NOT NULL DEFAULT 0,
+            last_message_at REAL,
+            last_message_preview TEXT NOT NULL DEFAULT '',
+            ai_enabled INTEGER NOT NULL DEFAULT 1,
+            provider_id TEXT,
+            model TEXT,
+            persona_id TEXT,
+            is_pinned INTEGER NOT NULL DEFAULT 0,
+            is_muted INTEGER NOT NULL DEFAULT 0,
+            note TEXT NOT NULL DEFAULT '',
+            working_hours TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_conversations_last_message
+            ON conversations (is_pinned DESC, last_message_at DESC);
+
+        CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY NOT NULL,
+            conversation_id TEXT NOT NULL,
+            sender_id TEXT NOT NULL DEFAULT '',
+            sender_name TEXT NOT NULL DEFAULT '',
+            direction TEXT NOT NULL DEFAULT 'incoming',
+            kind TEXT NOT NULL DEFAULT 'text',
+            text TEXT NOT NULL DEFAULT '',
+            media_path TEXT,
+            media_url TEXT,
+            timestamp REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'received',
+            reply_to_id TEXT,
+            raw_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_messages_conversation_time
+            ON messages (conversation_id, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_messages_time ON messages (timestamp DESC);
+
+        CREATE TABLE IF NOT EXISTS logs (
+            id TEXT PRIMARY KEY NOT NULL,
+            date REAL NOT NULL,
+            level TEXT NOT NULL,
+            source TEXT NOT NULL,
+            message TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_logs_date ON logs (date DESC);
+
+        CREATE TABLE IF NOT EXISTS schedules (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            conversation_id TEXT NOT NULL DEFAULT '',
+            conversation_title TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL DEFAULT 'outgoing',
+            content TEXT NOT NULL DEFAULT '',
+            repeat_rule TEXT NOT NULL DEFAULT 'daily',
+            fire_at REAL NOT NULL,
+            weekdays TEXT NOT NULL DEFAULT '',
+            last_fired_at REAL,
+            next_fire_at REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_schedules_next ON schedules (enabled, next_fire_at);
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY NOT NULL,
+            value TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS memories (
+            id TEXT PRIMARY KEY NOT NULL,
+            conversation_id TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL,
+            is_core INTEGER NOT NULL DEFAULT 0,
+            base_weight REAL NOT NULL DEFAULT 1.0,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            last_accessed_at REAL,
+            source_count INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'summary',
+            access_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_memories_conversation
+            ON memories (conversation_id, is_core DESC, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_memories_core
+            ON memories (is_core DESC, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS memory_state (
+            conversation_id TEXT PRIMARY KEY NOT NULL,
+            last_summarized_rowid INTEGER NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL
+        );
+        """)
+
+        // v3: per-conversation working hours stored as nullable JSON
+        // (NULL means “follow the global bot setting”).
+        if try !columnExists(in: "conversations", column: "working_hours") {
+            try execute("ALTER TABLE conversations ADD COLUMN working_hours TEXT;")
+        }
+
+        let version = try userVersion()
+        if version < 2 {
+            // 已有历史消息不批量补总结（避免升级时产生大量 AI 调用）；
+            // 从当前最新 rowid 开始只总结升级后的新消息。
+            try execute("""
+            INSERT OR IGNORE INTO memory_state (conversation_id, last_summarized_rowid, updated_at)
+            SELECT c.id,
+                   COALESCE((SELECT MAX(m.rowid) FROM messages m WHERE m.conversation_id = c.id), 0),
+                   CAST(strftime('%s','now') AS REAL)
+            FROM conversations c;
+            """)
+            try execute("PRAGMA user_version=2;")
+        }
+
+        // v4: 长期记忆记录提示词召回次数（使用强化）。旧库用列探测补列，
+        // 新建库已在上面的 CREATE TABLE 中带有该列。
+        if try !columnExists(in: "memories", column: "access_count") {
+            try execute("ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;")
+        }
+        if version < 4 {
+            try execute("PRAGMA user_version=4;")
+        }
+    }
+
+    // MARK: - Conversations
+
+    func upsertConversation(_ conversation: Conversation) throws {
+        try ensureOpen()
+        try executeConversationUpsert([conversation])
+    }
+
+    func upsertConversations(_ conversations: [Conversation]) throws {
+        guard !conversations.isEmpty else { return }
+        try ensureOpen()
+        try executeConversationUpsert(conversations)
+    }
+
+    /// Newest activity first. Pinned conversations float to the top.
+    func fetchConversations(limit: Int = 200, offset: Int = 0) throws -> [Conversation] {
+        try ensureOpen()
+        let sql = """
+        SELECT id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
+               ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours
+        FROM conversations
+        ORDER BY is_pinned DESC, COALESCE(last_message_at, 0) DESC
+        LIMIT ? OFFSET ?;
+        """
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, Int32(max(1, limit)))
+        try bind(statement, 2, Int32(max(0, offset)))
+        var result: [Conversation] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(try decodeConversation(statement))
+        }
+        return result
+    }
+
+    func conversation(id: String) throws -> Conversation? {
+        try ensureOpen()
+        let statement = try prepare("""
+        SELECT id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
+               ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours
+        FROM conversations WHERE id = ? LIMIT 1;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, id)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return try decodeConversation(statement)
+    }
+
+    func deleteConversation(id: String) throws {
+        try ensureOpen()
+        try transaction {
+            let deleteMessages = try prepare("DELETE FROM messages WHERE conversation_id = ?;")
+            defer { sqlite3_finalize(deleteMessages) }
+            try bind(deleteMessages, 1, id)
+            try stepDone(deleteMessages)
+
+            let deleteConversation = try prepare("DELETE FROM conversations WHERE id = ?;")
+            defer { sqlite3_finalize(deleteConversation) }
+            try bind(deleteConversation, 1, id)
+            try stepDone(deleteConversation)
+
+            let deleteMemories = try prepare("DELETE FROM memories WHERE conversation_id = ?;")
+            defer { sqlite3_finalize(deleteMemories) }
+            try bind(deleteMemories, 1, id)
+            try stepDone(deleteMemories)
+
+            let deleteState = try prepare("DELETE FROM memory_state WHERE conversation_id = ?;")
+            defer { sqlite3_finalize(deleteState) }
+            try bind(deleteState, 1, id)
+            try stepDone(deleteState)
+        }
+    }
+
+    private func executeConversationUpsert(_ conversations: [Conversation]) throws {
+        let sql = """
+        INSERT INTO conversations (
+            id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
+            ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            kind = excluded.kind,
+            title = excluded.title,
+            subtitle = excluded.subtitle,
+            unread_count = excluded.unread_count,
+            last_message_at = excluded.last_message_at,
+            last_message_preview = excluded.last_message_preview,
+            ai_enabled = excluded.ai_enabled,
+            provider_id = excluded.provider_id,
+            model = excluded.model,
+            persona_id = excluded.persona_id,
+            is_pinned = excluded.is_pinned,
+            is_muted = excluded.is_muted,
+            note = excluded.note,
+            working_hours = excluded.working_hours;
+        """
+        try transaction {
+            let statement = try prepare(sql)
+            defer { sqlite3_finalize(statement) }
+            for conversation in conversations {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                try bind(statement, 1, conversation.id)
+                try bind(statement, 2, conversation.kind.rawValue)
+                try bind(statement, 3, conversation.title)
+                try bind(statement, 4, conversation.subtitle)
+                try bind(statement, 5, Int32(conversation.unreadCount))
+                try bind(statement, 6, conversation.lastMessageAt?.timeIntervalSince1970)
+                try bind(statement, 7, conversation.lastMessagePreview)
+                try bind(statement, 8, Int32(conversation.aiEnabled ? 1 : 0))
+                try bind(statement, 9, conversation.providerID)
+                try bind(statement, 10, conversation.model)
+                try bind(statement, 11, conversation.personaID)
+                try bind(statement, 12, Int32(conversation.isPinned ? 1 : 0))
+                try bind(statement, 13, Int32(conversation.isMuted ? 1 : 0))
+                try bind(statement, 14, conversation.note)
+                try bind(statement, 15, encodeWorkingHours(conversation.workingHours))
+                try stepDone(statement)
+            }
+        }
+    }
+
+    private func decodeConversation(_ statement: OpaquePointer?) throws -> Conversation {
+        Conversation(
+            id: try text(statement, 0),
+            kind: ConversationKind(rawValue: try text(statement, 1)) ?? .direct,
+            title: try text(statement, 2),
+            subtitle: optionalText(statement, 3),
+            unreadCount: Int(int(statement, 4)),
+            lastMessageAt: optionalDate(statement, 5),
+            lastMessagePreview: try text(statement, 6),
+            aiEnabled: int(statement, 7) != 0,
+            providerID: optionalText(statement, 8),
+            model: optionalText(statement, 9),
+            personaID: optionalText(statement, 10),
+            isPinned: int(statement, 11) != 0,
+            isMuted: int(statement, 12) != 0,
+            note: try text(statement, 13),
+            workingHours: decodeWorkingHours(optionalText(statement, 14))
+        )
+    }
+
+    private func encodeWorkingHours(_ hours: WorkingHours?) -> String? {
+        guard let hours, let data = try? JSONEncoder().encode(hours) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func decodeWorkingHours(_ text: String?) -> WorkingHours? {
+        guard let text, let data = text.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(WorkingHours.self, from: data)
+    }
+
+    // MARK: - Messages
+
+    /// Batched insert/upsert. Used for inbound events and outbound status updates.
+    func upsertMessages(_ messages: [ChatMessage]) throws {
+        guard !messages.isEmpty else { return }
+        try ensureOpen()
+        let sql = """
+        INSERT INTO messages (
+            id, conversation_id, sender_id, sender_name, direction, kind, text,
+            media_path, media_url, timestamp, status, reply_to_id, raw_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            conversation_id = excluded.conversation_id,
+            sender_id = excluded.sender_id,
+            sender_name = excluded.sender_name,
+            direction = excluded.direction,
+            kind = excluded.kind,
+            text = excluded.text,
+            media_path = excluded.media_path,
+            media_url = excluded.media_url,
+            timestamp = excluded.timestamp,
+            status = excluded.status,
+            reply_to_id = excluded.reply_to_id,
+            raw_json = excluded.raw_json;
+        """
+        try transaction {
+            let statement = try prepare(sql)
+            defer { sqlite3_finalize(statement) }
+            for message in messages {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                try bind(statement, 1, message.id)
+                try bind(statement, 2, message.conversationID)
+                try bind(statement, 3, message.senderID)
+                try bind(statement, 4, message.senderName)
+                try bind(statement, 5, message.direction.rawValue)
+                try bind(statement, 6, message.kind.rawValue)
+                try bind(statement, 7, message.text)
+                try bind(statement, 8, message.mediaPath)
+                try bind(statement, 9, message.mediaURL)
+                try bind(statement, 10, message.timestamp.timeIntervalSince1970)
+                try bind(statement, 11, message.status.rawValue)
+                try bind(statement, 12, message.replyToID)
+                try bind(statement, 13, message.rawJSON)
+                try stepDone(statement)
+            }
+        }
+    }
+
+    /// Page of messages in chronological order (oldest → newest inside the page).
+    /// Pass `before` to walk backwards through history.
+    func fetchMessages(conversationID: String, limit: Int = 50, before: Date? = nil) throws -> [ChatMessage] {
+        try ensureOpen()
+        let boundedLimit = Int32(max(1, min(limit, 500)))
+        let sql: String
+        var bindBefore = false
+        if before != nil {
+            sql = """
+            SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
+                   media_path, media_url, timestamp, status, reply_to_id, raw_json
+            FROM messages WHERE conversation_id = ? AND timestamp < ?
+            ORDER BY timestamp DESC LIMIT ?;
+            """
+            bindBefore = true
+        } else {
+            sql = """
+            SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
+                   media_path, media_url, timestamp, status, reply_to_id, raw_json
+            FROM messages WHERE conversation_id = ?
+            ORDER BY timestamp DESC LIMIT ?;
+            """
+        }
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, conversationID)
+        if bindBefore, let before {
+            try bind(statement, 2, before.timeIntervalSince1970)
+            try bind(statement, 3, boundedLimit)
+        } else {
+            try bind(statement, 2, boundedLimit)
+        }
+        var rows: [ChatMessage] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            rows.append(try decodeMessage(statement))
+        }
+        return Array(rows.reversed())
+    }
+
+    func message(id: String) throws -> ChatMessage? {
+        try ensureOpen()
+        let statement = try prepare("""
+        SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
+               media_path, media_url, timestamp, status, reply_to_id, raw_json
+        FROM messages WHERE id = ? LIMIT 1;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, id)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return try decodeMessage(statement)
+    }
+
+    /// Full-text-ish search over message text. Newest first.
+    func searchMessages(query: String, limit: Int = 100) throws -> [MemorySearchHit] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        try ensureOpen()
+        let escaped = trimmed
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+        let statement = try prepare("""
+        SELECT m.id, m.conversation_id, m.sender_id, m.sender_name, m.direction, m.kind, m.text,
+               m.media_path, m.media_url, m.timestamp, m.status, m.reply_to_id, m.raw_json,
+               COALESCE(c.title, '')
+        FROM messages m
+        LEFT JOIN conversations c ON c.id = m.conversation_id
+        WHERE m.text LIKE ? ESCAPE '\\'
+        ORDER BY m.timestamp DESC
+        LIMIT ?;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, "%\(escaped)%")
+        try bind(statement, 2, Int32(max(1, limit)))
+        var hits: [MemorySearchHit] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let message = try decodeMessage(statement)
+            let title = optionalText(statement, 13) ?? ""
+            hits.append(MemorySearchHit(message: message, conversationTitle: title))
+        }
+        return hits
+    }
+
+    func messageCount(conversationID: String? = nil) throws -> Int {
+        try ensureOpen()
+        let sql = conversationID == nil
+            ? "SELECT COUNT(*) FROM messages;"
+            : "SELECT COUNT(*) FROM messages WHERE conversation_id = ?;"
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        if let conversationID { try bind(statement, 1, conversationID) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(int(statement, 0))
+    }
+
+    private func decodeMessage(_ statement: OpaquePointer?) throws -> ChatMessage {
+        ChatMessage(
+            id: try text(statement, 0),
+            conversationID: try text(statement, 1),
+            senderID: try text(statement, 2),
+            senderName: try text(statement, 3),
+            direction: ChatDirection(rawValue: try text(statement, 4)) ?? .incoming,
+            kind: MessageKind(rawValue: try text(statement, 5)) ?? .text,
+            text: try text(statement, 6),
+            mediaPath: optionalText(statement, 7),
+            mediaURL: optionalText(statement, 8),
+            timestamp: date(statement, 9),
+            status: DeliveryStatus(rawValue: try text(statement, 10)) ?? .received,
+            replyToID: optionalText(statement, 11),
+            rawJSON: optionalText(statement, 12)
+        )
+    }
+
+    /// Deletes one message and refreshes the owning conversation's preview lazily via
+    /// `refreshConversationPreview` from the runtime.
+    func deleteMessage(id: String) throws {
+        try ensureOpen()
+        let statement = try prepare("DELETE FROM messages WHERE id = ?;")
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, id)
+        try stepDone(statement)
+    }
+
+    /// Deletes all messages of one conversation and resets its preview fields.
+    func clearMessages(conversationID: String) throws {
+        try ensureOpen()
+        try transaction {
+            let delete = try prepare("DELETE FROM messages WHERE conversation_id = ?;")
+            defer { sqlite3_finalize(delete) }
+            try bind(delete, 1, conversationID)
+            try stepDone(delete)
+
+            let reset = try prepare("""
+            UPDATE conversations
+            SET last_message_at = NULL, last_message_preview = '', unread_count = 0
+            WHERE id = ?;
+            """)
+            defer { sqlite3_finalize(reset) }
+            try bind(reset, 1, conversationID)
+            try stepDone(reset)
+
+            let resetState = try prepare("DELETE FROM memory_state WHERE conversation_id = ?;")
+            defer { sqlite3_finalize(resetState) }
+            try bind(resetState, 1, conversationID)
+            try stepDone(resetState)
+        }
+    }
+
+    /// Deletes every message and resets conversation previews.
+    func clearAllMessages() throws {
+        try ensureOpen()
+        try transaction {
+            try execute("DELETE FROM messages;")
+            try execute("""
+            UPDATE conversations
+            SET last_message_at = NULL, last_message_preview = '', unread_count = 0;
+            """)
+            try execute("DELETE FROM memory_state;")
+        }
+    }
+
+    /// Total number of conversations (diagnostics / stats).
+    func conversationCount() throws -> Int {
+        try ensureOpen()
+        let statement = try prepare("SELECT COUNT(*) FROM conversations;")
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(int(statement, 0))
+    }
+
+    // MARK: - Long-term memories
+
+    func upsertMemory(_ memory: LongTermMemory) throws {
+        try ensureOpen()
+        let statement = try prepare("""
+        INSERT INTO memories (
+            id, conversation_id, summary, is_core, base_weight,
+            created_at, updated_at, last_accessed_at, source_count, source, access_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            conversation_id = excluded.conversation_id,
+            summary = excluded.summary,
+            is_core = excluded.is_core,
+            base_weight = excluded.base_weight,
+            updated_at = excluded.updated_at,
+            last_accessed_at = excluded.last_accessed_at,
+            source_count = excluded.source_count,
+            source = excluded.source,
+            access_count = excluded.access_count;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, memory.id)
+        try bind(statement, 2, memory.conversationID)
+        try bind(statement, 3, memory.summary)
+        try bind(statement, 4, Int32(memory.isCore ? 1 : 0))
+        try bind(statement, 5, memory.baseWeight)
+        try bind(statement, 6, memory.createdAt.timeIntervalSince1970)
+        try bind(statement, 7, memory.updatedAt.timeIntervalSince1970)
+        try bind(statement, 8, memory.lastAccessedAt?.timeIntervalSince1970)
+        try bind(statement, 9, Int32(memory.sourceCount))
+        try bind(statement, 10, memory.source)
+        try bind(statement, 11, Int32(memory.accessCount))
+        try stepDone(statement)
+    }
+
+    func fetchMemories(limit: Int = 500, search: String? = nil) throws -> [LongTermMemory] {
+        try ensureOpen()
+        let keyword = (search ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let sql: String
+        if keyword.isEmpty {
+            sql = """
+            SELECT m.id, m.conversation_id, COALESCE(c.title, ''), m.summary, m.is_core,
+                   m.base_weight, m.created_at, m.updated_at, m.last_accessed_at,
+                   m.source_count, m.source, m.access_count
+            FROM memories m LEFT JOIN conversations c ON c.id = m.conversation_id
+            ORDER BY m.is_core DESC, m.updated_at DESC LIMIT ?;
+            """
+        } else {
+            sql = """
+            SELECT m.id, m.conversation_id, COALESCE(c.title, ''), m.summary, m.is_core,
+                   m.base_weight, m.created_at, m.updated_at, m.last_accessed_at,
+                   m.source_count, m.source, m.access_count
+            FROM memories m LEFT JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.summary LIKE ? ESCAPE '\\'
+            ORDER BY m.is_core DESC, m.updated_at DESC LIMIT ?;
+            """
+        }
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        if keyword.isEmpty {
+            try bind(statement, 1, Int32(max(1, limit)))
+        } else {
+            let escaped = keyword
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "%", with: "\\%")
+                .replacingOccurrences(of: "_", with: "\\_")
+            try bind(statement, 1, "%\(escaped)%")
+            try bind(statement, 2, Int32(max(1, limit)))
+        }
+        var result: [LongTermMemory] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(try decodeMemory(statement))
+        }
+        return result.sorted {
+            if $0.isCore != $1.isCore { return $0.isCore && !$1.isCore }
+            return $0.timeWeight() > $1.timeWeight()
+        }
+    }
+
+    /// 提示词用：核心记忆 + 当前会话记忆 + 全局记忆，按核心优先、时间权重降序。
+    func fetchMemoriesForPrompt(conversationID: String, limit: Int = 6, now: Date = Date()) throws -> [LongTermMemory] {
+        try ensureOpen()
+        let statement = try prepare("""
+        SELECT m.id, m.conversation_id, COALESCE(c.title, ''), m.summary, m.is_core,
+               m.base_weight, m.created_at, m.updated_at, m.last_accessed_at,
+               m.source_count, m.source, m.access_count
+        FROM memories m LEFT JOIN conversations c ON c.id = m.conversation_id
+        WHERE m.is_core = 1 OR m.conversation_id = ? OR m.conversation_id = ''
+        ORDER BY m.is_core DESC, m.updated_at DESC LIMIT 200;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, conversationID)
+        var candidates: [LongTermMemory] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            candidates.append(try decodeMemory(statement))
+        }
+        candidates.sort {
+            if $0.isCore != $1.isCore { return $0.isCore && !$1.isCore }
+            let l = $0.timeWeight(now: now), r = $1.timeWeight(now: now)
+            if abs(l - r) > 0.000001 { return l > r }
+            return $0.updatedAt > $1.updatedAt
+        }
+        var result: [LongTermMemory] = []
+        var seen = Set<String>()
+        for memory in candidates where !memory.summary.isEmpty {
+            if seen.insert(memory.summary).inserted { result.append(memory) }
+            if result.count >= limit { break }
+        }
+        return result
+    }
+
+    /// 同一会话最新一条自动滚动总结（`source = summary` 且非核心）。
+    func latestAutoMemory(conversationID: String) throws -> LongTermMemory? {
+        try ensureOpen()
+        let statement = try prepare("""
+        SELECT m.id, m.conversation_id, COALESCE(c.title, ''), m.summary, m.is_core,
+               m.base_weight, m.created_at, m.updated_at, m.last_accessed_at,
+               m.source_count, m.source, m.access_count
+        FROM memories m LEFT JOIN conversations c ON c.id = m.conversation_id
+        WHERE m.conversation_id = ? AND m.source = 'summary' AND m.is_core = 0
+        ORDER BY m.updated_at DESC LIMIT 1;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, conversationID)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return try decodeMemory(statement)
+    }
+
+    /// 同一会话的全部自动滚动总结，按 `updated_at` 降序。
+    /// 正常情况下只有一条；历史版本可能留下多条，由 ChatEngine 合并清理。
+    func autoMemories(conversationID: String) throws -> [LongTermMemory] {
+        try ensureOpen()
+        let statement = try prepare("""
+        SELECT m.id, m.conversation_id, COALESCE(c.title, ''), m.summary, m.is_core,
+               m.base_weight, m.created_at, m.updated_at, m.last_accessed_at,
+               m.source_count, m.source, m.access_count
+        FROM memories m LEFT JOIN conversations c ON c.id = m.conversation_id
+        WHERE m.conversation_id = ? AND m.source = 'summary' AND m.is_core = 0
+        ORDER BY m.updated_at DESC, m.created_at DESC;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, conversationID)
+        var result: [LongTermMemory] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(try decodeMemory(statement))
+        }
+        return result
+    }
+
+    /// 记录记忆被提示词召回：`access_count + 1` 并刷新 `last_accessed_at`。
+    /// 只影响使用强化与衰减锚点，不修改摘要或 `updated_at`。
+    func recordMemoryAccess(ids: [String], at date: Date = Date()) throws {
+        guard !ids.isEmpty else { return }
+        try ensureOpen()
+        let statement = try prepare("""
+        UPDATE memories
+        SET access_count = access_count + 1, last_accessed_at = ?
+        WHERE id = ?;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try transaction {
+            for id in ids {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                try bind(statement, 1, date.timeIntervalSince1970)
+                try bind(statement, 2, id)
+                try stepDone(statement)
+            }
+        }
+    }
+
+    func deleteMemory(id: String) throws {
+        try ensureOpen()
+        let statement = try prepare("DELETE FROM memories WHERE id = ?;")
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, id)
+        try stepDone(statement)
+    }
+
+    func memoryCount(conversationID: String? = nil) throws -> Int {
+        try ensureOpen()
+        let sql = conversationID == nil
+            ? "SELECT COUNT(*) FROM memories;"
+            : "SELECT COUNT(*) FROM memories WHERE conversation_id = ?;"
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        if let conversationID { try bind(statement, 1, conversationID) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(int(statement, 0))
+    }
+
+    /// 保留最近 `keep` 条消息；返回更早、尚未总结的一批消息。
+    ///
+    /// - Parameters:
+    ///   - keep: 短期窗口保留的消息条数（默认 10）。
+    ///   - minOverflow: 游标与 cutoff 之间未总结消息数低于该值时返回 nil，
+    ///     用于“攒够一批再总结”，避免每条新消息都触发一次 AI 调用。
+    ///   - maxMessages: 单批最多总结的消息条数，多出的部分留在下一批。
+    func pendingMemoryOverflow(
+        conversationID: String,
+        keep: Int = 10,
+        minOverflow: Int = 1,
+        maxMessages: Int = 20
+    ) throws -> MemoryOverflow? {
+        try ensureOpen()
+        let total = try messageCount(conversationID: conversationID)
+        guard total > keep else { return nil }
+
+        let cutoffStatement = try prepare("""
+        SELECT rowid FROM messages WHERE conversation_id = ?
+        ORDER BY rowid ASC LIMIT 1 OFFSET ?;
+        """)
+        defer { sqlite3_finalize(cutoffStatement) }
+        try bind(cutoffStatement, 1, conversationID)
+        try bind(cutoffStatement, 2, Int32(max(0, total - keep)))
+        guard sqlite3_step(cutoffStatement) == SQLITE_ROW else { return nil }
+        let cutoffRowID = sqlite3_column_int64(cutoffStatement, 0)
+
+        let cursorStatement = try prepare("SELECT last_summarized_rowid FROM memory_state WHERE conversation_id = ? LIMIT 1;")
+        defer { sqlite3_finalize(cursorStatement) }
+        try bind(cursorStatement, 1, conversationID)
+        let cursor: Int64 = sqlite3_step(cursorStatement) == SQLITE_ROW ? sqlite3_column_int64(cursorStatement, 0) : 0
+        guard cursor < cutoffRowID else { return nil }
+
+        // 游标与 cutoff 之间未总结的消息总数（不受 maxMessages 限制），
+        // 用于判断是否攒够一批。
+        let countStatement = try prepare("""
+        SELECT COUNT(*) FROM messages
+        WHERE conversation_id = ? AND rowid > ? AND rowid < ?;
+        """)
+        defer { sqlite3_finalize(countStatement) }
+        try bind(countStatement, 1, conversationID)
+        try bind(countStatement, 2, cursor)
+        try bind(countStatement, 3, cutoffRowID)
+        guard sqlite3_step(countStatement) == SQLITE_ROW else { return nil }
+        let pendingCount = Int(sqlite3_column_int64(countStatement, 0))
+        guard pendingCount >= max(1, minOverflow) else { return nil }
+
+        let statement = try prepare("""
+        SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
+               media_path, media_url, timestamp, status, reply_to_id, raw_json, rowid
+        FROM messages
+        WHERE conversation_id = ? AND rowid > ? AND rowid < ?
+        ORDER BY rowid ASC LIMIT ?;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, conversationID)
+        try bind(statement, 2, cursor)
+        try bind(statement, 3, cutoffRowID)
+        try bind(statement, 4, Int32(max(1, maxMessages)))
+
+        var messages: [ChatMessage] = []
+        var lastRowID: Int64 = cursor
+        while sqlite3_step(statement) == SQLITE_ROW {
+            messages.append(try decodeMessage(statement))
+            lastRowID = sqlite3_column_int64(statement, 13)
+        }
+        guard !messages.isEmpty else { return nil }
+        return MemoryOverflow(messages: messages, lastRowID: lastRowID)
+    }
+
+    func markMemorySummarized(conversationID: String, throughRowID: Int64) throws {
+        try ensureOpen()
+        let statement = try prepare("""
+        INSERT INTO memory_state (conversation_id, last_summarized_rowid, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(conversation_id) DO UPDATE SET
+            last_summarized_rowid = excluded.last_summarized_rowid,
+            updated_at = excluded.updated_at;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, conversationID)
+        try bind(statement, 2, throughRowID)
+        try bind(statement, 3, Date().timeIntervalSince1970)
+        try stepDone(statement)
+    }
+
+    func resetMemoryState(conversationID: String) throws {
+        try ensureOpen()
+        let statement = try prepare("DELETE FROM memory_state WHERE conversation_id = ?;")
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, conversationID)
+        try stepDone(statement)
+    }
+
+    private func decodeMemory(_ statement: OpaquePointer?) throws -> LongTermMemory {
+        LongTermMemory(
+            id: try text(statement, 0),
+            conversationID: try text(statement, 1),
+            conversationTitle: try text(statement, 2),
+            summary: try text(statement, 3),
+            isCore: int(statement, 4) != 0,
+            baseWeight: sqlite3_column_double(statement, 5),
+            createdAt: date(statement, 6),
+            updatedAt: date(statement, 7),
+            lastAccessedAt: optionalDate(statement, 8),
+            sourceCount: Int(int(statement, 9)),
+            accessCount: Int(int(statement, 11)),
+            source: try text(statement, 10)
+        )
+    }
+
+    // MARK: - Logs
+
+    func appendLogs(_ entries: [LogEntry]) throws {
+        guard !entries.isEmpty else { return }
+        try ensureOpen()
+        let sql = "INSERT OR REPLACE INTO logs (id, date, level, source, message) VALUES (?, ?, ?, ?, ?);"
+        try transaction {
+            let statement = try prepare(sql)
+            defer { sqlite3_finalize(statement) }
+            for entry in entries {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                try bind(statement, 1, entry.id)
+                try bind(statement, 2, entry.date.timeIntervalSince1970)
+                try bind(statement, 3, entry.level.rawValue)
+                try bind(statement, 4, entry.source)
+                try bind(statement, 5, entry.message)
+                try stepDone(statement)
+            }
+        }
+    }
+
+    /// Newest first. `level` filters to that severity and above.
+    func fetchLogs(limit: Int = 500, minimumLevel: LogLevel? = nil) throws -> [LogEntry] {
+        try ensureOpen()
+        let allowedLevels = LogLevel.allCases
+            .filter { level in
+                guard let minimumLevel else { return true }
+                return level.severityRank >= minimumLevel.severityRank
+            }
+            .map(\.rawValue)
+        let placeholders = Array(repeating: "?", count: allowedLevels.count).joined(separator: ",")
+        let sql = """
+        SELECT id, date, level, source, message FROM logs
+        WHERE level IN (\(placeholders))
+        ORDER BY date DESC LIMIT ?;
+        """
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        for (index, level) in allowedLevels.enumerated() {
+            try bind(statement, Int32(index + 1), level)
+        }
+        try bind(statement, Int32(allowedLevels.count + 1), Int32(max(1, limit)))
+        var result: [LogEntry] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result.append(LogEntry(
+                id: try text(statement, 0),
+                date: date(statement, 1),
+                level: LogLevel(rawValue: try text(statement, 2)) ?? .info,
+                source: try text(statement, 3),
+                message: try text(statement, 4)
+            ))
+        }
+        return result
+    }
+
+    /// Ring-buffer behaviour on disk: keeps only the newest `keep` rows.
+    func pruneLogs(keep: Int = 5000) throws {
+        try ensureOpen()
+        let statement = try prepare("""
+        DELETE FROM logs WHERE id NOT IN (
+            SELECT id FROM logs ORDER BY date DESC LIMIT ?
+        );
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, Int32(max(1, keep)))
+        try stepDone(statement)
+    }
+
+    // MARK: - Schedules
+
+    func replaceSchedules(_ schedules: [ScheduledTask]) throws {
+        try ensureOpen()
+        try transaction {
+            try execute("DELETE FROM schedules;")
+            let sql = """
+            INSERT OR REPLACE INTO schedules (
+                id, name, enabled, conversation_id, conversation_title, kind, content,
+                repeat_rule, fire_at, weekdays, last_fired_at, next_fire_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
+            let statement = try prepare(sql)
+            defer { sqlite3_finalize(statement) }
+            for task in schedules {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                try bind(statement, 1, task.id)
+                try bind(statement, 2, task.name)
+                try bind(statement, 3, Int32(task.enabled ? 1 : 0))
+                try bind(statement, 4, task.conversationID)
+                try bind(statement, 5, task.conversationTitle)
+                try bind(statement, 6, task.kind.rawValue)
+                try bind(statement, 7, task.content)
+                try bind(statement, 8, task.repeatRule.rawValue)
+                try bind(statement, 9, task.fireAt.timeIntervalSince1970)
+                try bind(statement, 10, task.weekdays.map(String.init).joined(separator: ","))
+                try bind(statement, 11, task.lastFiredAt?.timeIntervalSince1970)
+                try bind(statement, 12, task.nextFireAt?.timeIntervalSince1970)
+                try stepDone(statement)
+            }
+        }
+    }
+
+    func fetchSchedules() throws -> [ScheduledTask] {
+        try ensureOpen()
+        let statement = try prepare("""
+        SELECT id, name, enabled, conversation_id, conversation_title, kind, content,
+               repeat_rule, fire_at, weekdays, last_fired_at, next_fire_at
+        FROM schedules ORDER BY COALESCE(next_fire_at, fire_at) ASC;
+        """)
+        defer { sqlite3_finalize(statement) }
+        var result: [ScheduledTask] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let weekdays = try text(statement, 9)
+                .split(separator: ",")
+                .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            result.append(ScheduledTask(
+                id: try text(statement, 0),
+                name: try text(statement, 1),
+                enabled: int(statement, 2) != 0,
+                conversationID: try text(statement, 3),
+                conversationTitle: try text(statement, 4),
+                kind: ChatDirection(rawValue: try text(statement, 5)) ?? .outgoing,
+                content: try text(statement, 6),
+                repeatRule: ScheduleRepeat(rawValue: try text(statement, 7)) ?? .daily,
+                fireAt: date(statement, 8),
+                weekdays: weekdays,
+                lastFiredAt: optionalDate(statement, 10),
+                nextFireAt: optionalDate(statement, 11)
+            ))
+        }
+        return result
+    }
+
+    // MARK: - Key/value settings
+
+    func setSetting(key: String, value: String) throws {
+        try ensureOpen()
+        let statement = try prepare("""
+        INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, key)
+        try bind(statement, 2, value)
+        try bind(statement, 3, Date().timeIntervalSince1970)
+        try stepDone(statement)
+    }
+
+    func setting(key: String) throws -> String? {
+        try ensureOpen()
+        let statement = try prepare("SELECT value FROM settings WHERE key = ? LIMIT 1;")
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, key)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return optionalText(statement, 0)
+    }
+
+    func removeSetting(key: String) throws {
+        try ensureOpen()
+        let statement = try prepare("DELETE FROM settings WHERE key = ?;")
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, key)
+        try stepDone(statement)
+    }
+
+    func allSettings() throws -> [String: String] {
+        try ensureOpen()
+        let statement = try prepare("SELECT key, value FROM settings;")
+        defer { sqlite3_finalize(statement) }
+        var result: [String: String] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            result[try text(statement, 0)] = try text(statement, 1)
+        }
+        return result
+    }
+
+    // MARK: - SQLite helpers
+
+    private func ensureOpen() throws {
+        if !isOpen { try open() }
+        guard db != nil else { throw MemoryStoreError.notOpen }
+    }
+
+    private func userVersion() throws -> Int32 {
+        let statement = try prepare("PRAGMA user_version;")
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return sqlite3_column_int(statement, 0)
+    }
+
+    private func execute(_ sql: String) throws {
+        guard let db else { throw MemoryStoreError.notOpen }
+        var errorPointer: UnsafeMutablePointer<CChar>?
+        let status = sqlite3_exec(db, sql, nil, nil, &errorPointer)
+        if status != SQLITE_OK {
+            let message = errorPointer.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(db))
+            sqlite3_free(errorPointer)
+            throw MemoryStoreError.sqlite(message)
+        }
+    }
+
+    private func prepare(_ sql: String) throws -> OpaquePointer? {
+        guard let db else { throw MemoryStoreError.notOpen }
+        var statement: OpaquePointer?
+        let status = sqlite3_prepare_v2(db, sql, -1, &statement, nil)
+        guard status == SQLITE_OK else {
+            throw MemoryStoreError.sqlite(String(cString: sqlite3_errmsg(db)))
+        }
+        return statement
+    }
+
+    private func transaction(_ body: () throws -> Void) throws {
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            try body()
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+    }
+
+    private func stepDone(_ statement: OpaquePointer?) throws {
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            guard let db else { throw MemoryStoreError.notOpen }
+            throw MemoryStoreError.sqlite(String(cString: sqlite3_errmsg(db)))
+        }
+    }
+
+    private func bind(_ statement: OpaquePointer?, _ index: Int32, _ value: String?) throws {
+        let status: Int32
+        if let value {
+            status = sqlite3_bind_text(statement, index, value, -1, SQLITE_TRANSIENT)
+        } else {
+            status = sqlite3_bind_null(statement, index)
+        }
+        try checkBind(status)
+    }
+
+    private func bind(_ statement: OpaquePointer?, _ index: Int32, _ value: Double?) throws {
+        let status = value.map { sqlite3_bind_double(statement, index, $0) } ?? sqlite3_bind_null(statement, index)
+        try checkBind(status)
+    }
+
+    private func bind(_ statement: OpaquePointer?, _ index: Int32, _ value: Int32) throws {
+        try checkBind(sqlite3_bind_int(statement, index, value))
+    }
+
+    private func bind(_ statement: OpaquePointer?, _ index: Int32, _ value: Int64) throws {
+        try checkBind(sqlite3_bind_int64(statement, index, value))
+    }
+
+    private func checkBind(_ status: Int32) throws {
+        guard status == SQLITE_OK else {
+            guard let db else { throw MemoryStoreError.notOpen }
+            throw MemoryStoreError.sqlite("bind failed: \(String(cString: sqlite3_errmsg(db)))")
+        }
+    }
+
+    private func text(_ statement: OpaquePointer?, _ column: Int32) throws -> String {
+        optionalText(statement, column) ?? ""
+    }
+
+    /// Idempotent column check used by `ALTER TABLE` migrations.
+    private func columnExists(in table: String, column: String) throws -> Bool {
+        let statement = try prepare("PRAGMA table_info(\(table));")
+        defer { sqlite3_finalize(statement) }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if optionalText(statement, 1) == column { return true }
+        }
+        return false
+    }
+
+    private func optionalText(_ statement: OpaquePointer?, _ column: Int32) -> String? {
+        guard sqlite3_column_type(statement, column) != SQLITE_NULL,
+              let pointer = sqlite3_column_text(statement, column) else { return nil }
+        return String(cString: pointer)
+    }
+
+    private func int(_ statement: OpaquePointer?, _ column: Int32) -> Int32 {
+        sqlite3_column_int(statement, column)
+    }
+
+    private func date(_ statement: OpaquePointer?, _ column: Int32) -> Date {
+        Date(timeIntervalSince1970: sqlite3_column_double(statement, column))
+    }
+
+    private func optionalDate(_ statement: OpaquePointer?, _ column: Int32) -> Date? {
+        guard sqlite3_column_type(statement, column) != SQLITE_NULL else { return nil }
+        return date(statement, column)
+    }
+}
+
+// MARK: - Helpers
+
+private extension LogLevel {
+    var severityRank: Int {
+        switch self {
+        case .debug: 0
+        case .info: 1
+        case .warning: 2
+        case .error: 3
+        }
+    }
+}
+
+/// SQLite's `SQLITE_TRANSIENT` sentinel: tells SQLite to copy bound text immediately.
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

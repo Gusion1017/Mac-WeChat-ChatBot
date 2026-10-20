@@ -1,0 +1,32 @@
+# Git 属性：统一换行、标记二进制与生成代码
+# 文档：https://git-scm.com/docs/gitattributes
+
+# 文本文件按 LF 规范化（仓库内统一为 LF）
+* text=auto eol=lf
+
+# Shell 与构建入口
+*.sh text eol=lf
+Makefile text eol=lf linguist-language=Makefile
+Makefile.* text eol=lf linguist-language=Makefile
+
+# 二进制：不参与 diff/merge，也不做换行转换
+*.png binary
+*.icns binary
+*.jpg binary
+*.dylib binary
+*.sqlite binary
+*.sqlite-* binary
+*.zip binary
+*.dmg binary
+*.pdf binary
+
+# 文档截图：显式声明为二进制，避免被当成文本
+docs/images/*.png binary
+
+# 生成代码：GitHub 折叠 diff 与语言统计
+bridge/proto/** linguist-generated=true
+*.pb.go linguist-generated=true
+
+# 本项目自有的 Hook 脚本（非第三方 vendored，保留在语言统计中）
+hook/script.js linguist-vendored=false
+bridge/script.js linguist-vendored=false

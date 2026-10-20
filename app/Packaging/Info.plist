@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh-Hans</string>
+    <key>CFBundleDisplayName</key>
+    <string>微信 AI 助手</string>
+    <key>CFBundleExecutable</key>
+    <string>WeChatAI</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.gusionw.wechatai</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>WeChat AI</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.social-networking</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <!--
+      The bundle launches as a menu-bar agent. ActivationPolicyController switches to
+      .regular at launch only when the persisted "显示 Dock 图标" setting is on.
+      Keeping LSUIElement here prevents AppKit/LaunchServices from resetting a
+      menu-bar-only app back to .regular when it is activated via the menu bar.
+    -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>WeChat AI ChatBot · 个人使用 · 基于 GPL-3.0 开源方案</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>用于退出并重启微信以完成 Frida 注入与恢复。</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+    <key>LSEnvironment</key>
+    <dict>
+        <key>WECHATAI_BUNDLE_ID</key>
+        <string>com.gusionw.wechatai</string>
+    </dict>
+</dict>
+</plist>

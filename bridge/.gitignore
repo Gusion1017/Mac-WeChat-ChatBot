@@ -1,0 +1,6 @@
+# 构建产物与运行时文件（源码请全部保留）
+/onebot
+/onebot.dSYM/
+/log/
+*.test
+.DS_Store

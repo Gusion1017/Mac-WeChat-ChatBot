@@ -1,0 +1,247 @@
+import AppKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+/// 运行日志：实时流、级别/来源过滤、暂停、清空与导出。
+struct LogsView: View {
+    @Environment(AppStore.self) private var store
+    @Environment(ToastCenter.self) private var toast
+
+    @State private var levels: Set<LogLevel> = Set(LogLevel.allCases)
+    @State private var sourceFilter: String?
+    @State private var search = ""
+    @State private var isPaused = false
+    @State private var pausedSnapshot: [LogEntry] = []
+    @State private var autoFollow = true
+    @State private var showClearConfirm = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            GlassToolbar(title: "运行日志", subtitle: subtitle) {
+                Button {
+                    togglePause()
+                } label: {
+                    Label(isPaused ? "继续" : "暂停", systemImage: isPaused ? "play.fill" : "pause.fill")
+                }
+                .buttonStyle(.glass)
+
+                Button {
+                    exportLogs()
+                } label: {
+                    Label("导出", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.glass)
+                .disabled(displayLogs.isEmpty)
+
+                Button {
+                    showClearConfirm = true
+                } label: {
+                    Label("清空", systemImage: "trash")
+                }
+                .buttonStyle(.glass)
+                .disabled(store.logs.isEmpty)
+            }
+
+            filterBar
+
+            Divider().opacity(0.5)
+
+            logList
+        }
+        .background(PageBackground())
+        .sheet(isPresented: $showClearConfirm) {
+            ConfirmSheet(
+                title: "清空运行日志",
+                message: "将清空 App 内存中的日志缓冲（最多 2000 条）。已落盘的日志文件不受影响。",
+                details: ["清空后无法恢复。", "如需保留，请先使用「导出」保存日志文件。"],
+                confirmTitle: "清空",
+                cancelTitle: "取消"
+            ) {
+                store.clearLogs()
+                toast.show("运行日志已清空", tone: .info, symbol: "trash")
+            }
+        }
+    }
+
+    // MARK: Filter bar
+
+    private var filterBar: some View {
+        VStack(spacing: 7) {
+            HStack(spacing: 6) {
+                FilterChip(
+                    title: "全部",
+                    count: store.logs.count,
+                    isSelected: levels.count == LogLevel.allCases.count
+                ) {
+                    levels = Set(LogLevel.allCases)
+                }
+                ForEach(LogLevel.allCases) { level in
+                    FilterChip(
+                        title: level.label,
+                        symbol: levelSymbol(level),
+                        count: count(for: level),
+                        isSelected: levels.contains(level),
+                        tint: level.color
+                    ) {
+                        toggleLevel(level)
+                    }
+                }
+                Spacer(minLength: 8)
+                SearchField(text: $search, placeholder: "搜索日志内容或来源")
+                    .frame(width: 220)
+            }
+
+            HStack(spacing: 8) {
+                Picker("来源", selection: $sourceFilter) {
+                    Text("全部来源").tag(String?.none)
+                    ForEach(sources, id: \.self) { source in
+                        Text(source).tag(Optional(source))
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 160)
+
+                Toggle("自动滚动", isOn: $autoFollow)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .font(.caption2)
+                    .help("新日志到达时自动滚动到底部")
+
+                Spacer()
+
+                HStack(spacing: 5) {
+                    StatusDot(
+                        color: isPaused ? Theme.warning : Theme.success,
+                        size: 6,
+                        pulsing: !isPaused
+                    )
+                    Text(isPaused ? "已暂停 · 显示暂停时的快照" : "实时更新")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("\(displayLogs.count) / \(store.logs.count) 条")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, Theme.pagePadding)
+        .padding(.vertical, 9)
+        .background(.ultraThinMaterial)
+    }
+
+    // MARK: List
+
+    private var logList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if displayLogs.isEmpty {
+                        EmptyState(
+                            symbol: "text.alignleft",
+                            title: store.logs.isEmpty ? "暂无日志" : "没有匹配的日志",
+                            message: store.logs.isEmpty
+                                ? "启动机器人或安装 Hook 后，运行日志会实时显示在这里。"
+                                : "尝试调整级别、来源或搜索条件。"
+                        )
+                    } else {
+                        ForEach(displayLogs) { entry in
+                            LogRow(entry: entry)
+                            Divider().opacity(0.25)
+                        }
+                    }
+                    Color.clear
+                        .frame(height: 1)
+                        .id("logs-bottom")
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+            }
+            .scrollIndicators(.automatic)
+            .onChange(of: filteredCount) { _, _ in
+                guard autoFollow, !isPaused else { return }
+                proxy.scrollTo("logs-bottom", anchor: .bottom)
+            }
+        }
+        .background(.regularMaterial)
+        .padding(Theme.pagePadding)
+    }
+
+    // MARK: Derived
+
+    private var subtitle: String {
+        "\(store.logs.count) 条缓冲 · 上限 2000 条 · \(isPaused ? "已暂停" : "实时")"
+    }
+
+    private var sources: [String] {
+        Array(Set(store.logs.map(\.source))).sorted()
+    }
+
+    private var displayLogs: [LogEntry] {
+        let base = isPaused ? pausedSnapshot : store.logs
+        let keyword = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return base.filter { entry in
+            guard levels.contains(entry.level) else { return false }
+            if let sourceFilter, entry.source != sourceFilter { return false }
+            if !keyword.isEmpty {
+                guard entry.message.localizedCaseInsensitiveContains(keyword)
+                    || entry.source.localizedCaseInsensitiveContains(keyword)
+                else { return false }
+            }
+            return true
+        }
+    }
+
+    private var filteredCount: Int {
+        displayLogs.count
+    }
+
+    private func count(for level: LogLevel) -> Int {
+        store.logs.filter { $0.level == level }.count
+    }
+
+    private func levelSymbol(_ level: LogLevel) -> String {
+        switch level {
+        case .debug: "ladybug"
+        case .info: "info.circle"
+        case .warning: "exclamationmark.triangle"
+        case .error: "xmark.octagon"
+        }
+    }
+
+    // MARK: Actions
+
+    private func toggleLevel(_ level: LogLevel) {
+        if levels.contains(level) {
+            levels.remove(level)
+        } else {
+            levels.insert(level)
+        }
+    }
+
+    private func togglePause() {
+        if isPaused {
+            isPaused = false
+        } else {
+            pausedSnapshot = store.logs
+            isPaused = true
+        }
+    }
+
+    private func exportLogs() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText, .log]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "wechatai-\(UIFormat.fileDate.string(from: Date())).log"
+        panel.title = "导出运行日志"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let text = displayLogs.map(UIFormat.logLine).joined(separator: "\n")
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            toast.show("日志已导出到 \(url.lastPathComponent)", tone: .success, symbol: "square.and.arrow.up")
+        } catch {
+            toast.show("导出失败：\(error.localizedDescription)", tone: .error)
+        }
+    }
+}

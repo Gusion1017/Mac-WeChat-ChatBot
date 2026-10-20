@@ -1,0 +1,79 @@
+NOTICE — bridge/ 第三方来源与许可证说明
+================================================
+
+本目录是 WeChat AI ChatBot 项目的 macOS OneBot 桥接，属于上游
+onebot 的 GPL-3.0 衍生/复用构建。完整许可证见同目录 LICENSE
+（GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007）。
+
+上游项目
+--------
+项目：  https://github.com/yincongcyincong/weixin-macos
+子目录：onebot/
+提交：  f222f37321f66d3a199cb3c7642f77f7504d85da
+日期：  2026-09-28
+作者：  yincongcyincong
+许可：  GPL-3.0（见 LICENSE，Copyright (C) 2026 yincongcyincong）
+
+本目录中与上游 onebot/ 完全一致、未修改的文件
+------------------------------------------------
+main.go
+http.go
+websocket.go
+worker.go
+msg.go
+param.go
+protobuf_handler.go
+text_builder.go
+img_builder.go
+upload_builder.go
+upload_app_builder.go
+voice_builder.go
+video_builder.go
+file_builder.go
+reply_builder.go
+resp_parser.go
+utils.go
+logger.go
+go.mod
+go.sum
+proto/（*.go、*.proto）
+utils_test.go
+protobuf_dump_test.go
+UPSTREAM_README.md（上游 onebot/readme.md）
+Makefile.upstream（上游 onebot/Makefile，仅作参考，不参与构建）
+
+已修改/衍生文件
+--------------
+script.js
+  以上游 onebot/script.js 为基础，同步了本仓库 hook/script.js 的 WeChat
+  4.1.15 ABI 适配（req2bufLayout、autoBuffer 预写注入、HOOK_DEBUG 诊断等）。
+  该文件不是上游原版，修改来自 Hook 移植工作（hook-port/Lead）；
+  GPL-3.0 同样适用于这些修改。SHA256（2026-10-19 最终同步）：
+  7dd68dff738c2dcc313ced584aee99d43fc2c89dfac92cad1ed42dccd8be943f
+
+本项目新增文件（非上游代码）
+----------------------------
+NOTICE            本说明
+.gitignore        构建产物忽略规则
+http_auth_test.go 无 Gadget 场景下验证 HTTP 鉴权、参数校验与 /ws 动作的
+                  httptest 测试（不启动真实端口、不连接 Frida）
+
+除 script.js 外，本项目不修改上游 Go 源码；其余差异仅在构建参数、附加脚本与文档。
+
+注意：`bridge/script.js` 必须与最终的 `hook/script.js` 保持同步（bridge 只读取
+自己目录下的副本）。若 hook/script.js 后续再修改，请重新复制并更新本 NOTICE
+中的 SHA256 与修改说明。
+
+构建依赖与再分发
+----------------
+- frida-core-devkit 17.8.0 (macos-arm64)，来源：
+  https://github.com/frida/frida/releases/download/17.8.0/frida-core-devkit-17.8.0-macos-arm64.tar.xz
+  Frida 使用 wxWindows Library Licence 3.1（GNU Library GPL v2 加静态链接
+  例外，允许以二进制形式再分发）。onebot 将 libfrida-core.a 静态链接进
+  可执行文件；该许可证的例外条款允许此做法。上层分发仍需遵守 GPL-3.0。
+- Go 1.25.14（BSD-3-Clause）仅用于构建，不随产物分发。
+- Go module 依赖见 go.mod/go.sum，各自保留其原始许可证（MIT/BSD/
+  Apache-2.0/ISC 等）。
+
+再分发 onebot 二进制时，请同时提供本目录源码（GPL-3.0 的要求），并保留
+本 NOTICE 与 LICENSE。

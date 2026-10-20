@@ -1,0 +1,694 @@
+import SwiftUI
+
+/// 机器人：总开关、dry-run、私聊/群聊策略、白/黑名单、频率、工作时段与拟人化。
+struct BotView: View {
+    @Environment(AppStore.self) private var store
+    @Environment(ToastCenter.self) private var toast
+
+    @State private var newKeyword = ""
+
+    var body: some View {
+        ScrollingPage(title: "机器人", subtitle: subtitle) {
+            Button("保存设置") {
+                store.persist()
+                toast.show("机器人设置已保存", tone: .success)
+            }
+            .buttonStyle(.glass)
+            Button {
+                toggleBot()
+            } label: {
+                Label(store.isBotRunning ? "停止" : "启动", systemImage: store.isBotRunning ? "stop.fill" : "play.fill")
+            }
+            .buttonStyle(.glassProminent)
+            .tint(store.isBotRunning ? Theme.danger : Theme.accent)
+        } content: {
+            heroCard
+            replyStrategyCard
+            allowListCard
+            limitsCard
+            workingHoursCard
+            humanizeCard
+            defaultPersonaCard
+        }
+        .onDisappear { store.persist() }
+    }
+
+    // MARK: Hero
+
+    private var heroCard: some View {
+        GlassCard(tint: store.isBotRunning ? Theme.accent : Color.secondary) {
+            HStack(alignment: .center, spacing: 15) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: store.isBotRunning
+                                    ? [Theme.accent, Theme.accentStrong]
+                                    : [Color.secondary.opacity(0.5), Color.secondary.opacity(0.28)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 52, height: 52)
+                    Image(systemName: store.isBotRunning ? "bolt.fill" : "bolt.slash.fill")
+                        .font(.system(size: 21, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                .shadow(color: store.isBotRunning ? Theme.accent.opacity(0.3) : .clear, radius: 7, y: 3)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 7) {
+                        Text(store.isBotRunning ? "机器人运行中" : "机器人已停止")
+                            .font(.title3.weight(.semibold))
+                        PillLabel(
+                            text: store.settings.bot.dryRun ? "演练模式" : "真实发送",
+                            color: store.settings.bot.dryRun ? Theme.warning : Theme.success,
+                            symbol: store.settings.bot.dryRun ? "eye" : "paperplane.fill"
+                        )
+                        if !store.settings.bot.enabled {
+                            PillLabel(text: "配置已停用", color: .secondary)
+                        }
+                    }
+                    Text(store.isBotRunning
+                         ? "正在监听微信消息；符合触发条件时会按人设与上下文自动回复。可在页面顶部停止机器人。"
+                         : "启动后连接本地 OneBot 服务，开始接收并自动回复微信消息。可在页面顶部启动机器人。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 4) {
+                    HStack(spacing: 5) {
+                        StatusDot(
+                            color: store.gatewayConnected ? Theme.success : .secondary,
+                            size: 6,
+                            pulsing: store.gatewayConnected
+                        )
+                        Text(store.gatewayConnected ? "OneBot 已连接" : "OneBot 未连接")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(store.hookStatus.state.label)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+    }
+
+    // MARK: Reply strategy
+
+    private var replyStrategyCard: some View {
+        SectionCard(
+            title: "回复策略",
+            subtitle: "何时回复、回复谁",
+            symbol: "arrowshape.turn.up.left.fill",
+            tint: Theme.info
+        ) {
+            VStack(spacing: 0) {
+                SettingsRow(
+                    title: "演练模式",
+                    subtitle: "只生成回复并写入日志，不真正发送到微信",
+                    symbol: "eye",
+                    tint: Theme.warning
+                ) {
+                    Toggle("演练模式", isOn: bind(\.bot.dryRun))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "私聊自动回复",
+                    subtitle: "开启后所有私聊都会自动回复",
+                    symbol: "person.fill",
+                    tint: Theme.accent
+                ) {
+                    Toggle("私聊自动回复", isOn: bind(\.bot.replyToDirect))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "群聊触发方式",
+                    subtitle: "可多选；「所有消息」与其他方式互斥",
+                    symbol: "person.3.fill",
+                    tint: Theme.violet
+                ) {
+                    HStack(spacing: 6) {
+                        ForEach(TriggerMode.groupOptions) { mode in
+                            FilterChip(
+                                title: mode.groupLabel,
+                                isSelected: selectedGroupTriggers.contains(mode),
+                                tint: mode == .always ? Theme.warning : Theme.violet
+                            ) {
+                                toggleGroupTrigger(mode)
+                            }
+                        }
+                    }
+                }
+                SettingsDivider()
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Text("群聊关键词")
+                            .font(.callout)
+                        Spacer()
+                        Text(groupKeywordEnabled ? "已启用「关键词」触发" : "勾选「关键词」后生效")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    FlowLayout(spacing: 5, lineSpacing: 5) {
+                        ForEach(store.settings.bot.keywords, id: \.self) { keyword in
+                            TagChip(title: keyword, tint: Theme.info) {
+                                removeKeyword(keyword)
+                            }
+                        }
+                    }
+                    HStack(spacing: 6) {
+                        TextField("添加关键词，例如 AI", text: $newKeyword)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { addKeyword() }
+                            .frame(maxWidth: 220)
+                        Button("添加", action: addKeyword)
+                            .buttonStyle(.glass)
+                            .controlSize(.small)
+                            .disabled(newKeyword.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+
+                SettingsDivider()
+                SettingsRow(
+                    title: "忽略自己发送的消息",
+                    subtitle: "防止机器人回复自己，建议保持开启",
+                    symbol: "person.crop.circle.badge.xmark",
+                    tint: .secondary
+                ) {
+                    Toggle("忽略自己发送的消息", isOn: bind(\.bot.ignoreSelf))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "忽略公众号消息",
+                    subtitle: "公众号推送不进入自动回复流程",
+                    symbol: "megaphone.fill",
+                    tint: .secondary
+                ) {
+                    Toggle("忽略公众号消息", isOn: bind(\.bot.ignoreOfficialAccounts))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+            }
+        }
+    }
+
+    // MARK: Allow / deny lists
+
+    private var allowListCard: some View {
+        SectionCard(
+            title: "白名单 / 黑名单",
+            subtitle: "统一填写会话 ID 或用户 wxid；白名单为空表示全部允许，黑名单优先",
+            symbol: "checklist",
+            tint: Theme.warning
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                IDListEditor(
+                    title: "白名单",
+                    subtitle: "只自动回复这些会话或发送者；留空表示全部允许。",
+                    placeholder: "会话 ID 或用户 wxid",
+                    items: whitelistBinding,
+                    suggestions: conversationSuggestions
+                )
+                Divider().opacity(0.5)
+                IDListEditor(
+                    title: "黑名单",
+                    subtitle: "这些会话或发送者永不自动回复，优先级高于白名单。",
+                    placeholder: "会话 ID 或用户 wxid",
+                    items: blacklistBinding,
+                    suggestions: conversationSuggestions
+                )
+
+                if !conflictingIDs.isEmpty {
+                    InlineNotice(
+                        kind: .warning,
+                        title: "白名单与黑名单存在重叠",
+                        message: "以下 ID 同时出现在两个列表中，黑名单将生效：\(conflictingIDs.joined(separator: "、"))"
+                    )
+                }
+            }
+        }
+    }
+
+    private var conversationSuggestions: [(id: String, label: String)] {
+        store.conversations.map { ($0.id, $0.displayTitle) }
+    }
+
+    private var whitelistBinding: Binding<[String]> {
+        Binding(
+            get: { store.settings.bot.effectiveWhitelist },
+            set: { value in
+                store.settings.bot.whitelistEntries = value
+                store.persist()
+            }
+        )
+    }
+
+    private var blacklistBinding: Binding<[String]> {
+        Binding(
+            get: { store.settings.bot.effectiveBlacklist },
+            set: { value in
+                store.settings.bot.blacklistEntries = value
+                store.persist()
+            }
+        )
+    }
+
+    private var conflictingIDs: [String] {
+        let bot = store.settings.bot
+        return Set(bot.effectiveWhitelist).intersection(Set(bot.effectiveBlacklist)).sorted()
+    }
+
+    // MARK: Limits
+
+    private var limitsCard: some View {
+        SectionCard(
+            title: "频率与上下文",
+            subtitle: "防止刷屏与 API 过载",
+            symbol: "gauge.with.dots.needle.33percent",
+            tint: Theme.violet
+        ) {
+            VStack(alignment: .leading, spacing: 13) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text("每条回复冷却")
+                            .font(.callout)
+                        Spacer()
+                        Text(String(format: "%.0f 秒", store.settings.bot.cooldownSeconds))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: bind(\.bot.cooldownSeconds), in: 0...60, step: 1)
+                        .tint(Theme.accent)
+                        .accessibilityLabel("每条回复冷却时间")
+                        .accessibilityValue("\(Int(store.settings.bot.cooldownSeconds)) 秒")
+                }
+
+                HStack(spacing: 22) {
+                    Stepper(
+                        "每分钟最多 \(store.settings.bot.maxRepliesPerMinute) 条回复",
+                        value: bind(\.bot.maxRepliesPerMinute),
+                        in: 1...60
+                    )
+                    .font(.callout)
+                    Stepper(
+                        "临时记忆最多 \(store.settings.bot.maxContextMessages) 条 · 累计 \(ChatEngine.overflowBatchThreshold) 条旧消息后批量总结",
+                        value: bind(\.bot.maxContextMessages),
+                        in: 2...ChatEngine.shortTermMemoryLimit
+                    )
+                    .font(.callout)
+                }
+            }
+        }
+    }
+
+    // MARK: Working hours
+
+    private var workingHoursCard: some View {
+        SectionCard(
+            title: "工作时间",
+            subtitle: "非工作时段不自动回复",
+            symbol: "clock",
+            tint: Theme.warning
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("启用工作时间限制", isOn: bind(\.bot.workingHours.enabled))
+                    .toggleStyle(.switch)
+                    .font(.callout)
+
+                Text("这是全局默认时段；可在「会话」页为单个会话设置独立时段或取消限制。")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+
+                HStack(spacing: 5) {
+                    ForEach(UIFormat.weekdayOptions, id: \.value) { option in
+                        FilterChip(
+                            title: option.label,
+                            isSelected: store.settings.bot.workingHours.weekdays.contains(option.value),
+                            tint: Theme.warning
+                        ) {
+                            toggleWeekday(option.value)
+                        }
+                    }
+                    Spacer()
+                }
+                .disabled(!store.settings.bot.workingHours.enabled)
+                .opacity(store.settings.bot.workingHours.enabled ? 1 : 0.5)
+
+                HStack(spacing: 16) {
+                    DatePicker(
+                        "开始",
+                        selection: timeBinding(\.bot.workingHours.startMinute),
+                        displayedComponents: .hourAndMinute
+                    )
+                    DatePicker(
+                        "结束",
+                        selection: timeBinding(\.bot.workingHours.endMinute),
+                        displayedComponents: .hourAndMinute
+                    )
+                    Spacer()
+                    Text("跨夜时段会自动识别")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .disabled(!store.settings.bot.workingHours.enabled)
+                .opacity(store.settings.bot.workingHours.enabled ? 1 : 0.5)
+            }
+        }
+    }
+
+    // MARK: Humanize
+
+    private var humanizeCard: some View {
+        SectionCard(
+            title: "拟人化",
+            subtitle: "延迟与分段发送，让回复更像真人",
+            symbol: "person.wave.2.fill",
+            tint: Theme.accent
+        ) {
+            VStack(alignment: .leading, spacing: 13) {
+                Toggle("启用拟人化（输入延迟 / 分段）", isOn: bind(\.bot.humanize.enabled))
+                    .toggleStyle(.switch)
+                    .font(.callout)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text("随机延迟范围")
+                            .font(.callout)
+                        Spacer()
+                        Text(String(format: "%.1f – %.1f 秒",
+                                    Double(store.settings.bot.humanize.minDelayMs) / 1000,
+                                    Double(store.settings.bot.humanize.maxDelayMs) / 1000))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 10) {
+                        Slider(value: minDelayBinding, in: 0...5000, step: 100)
+                            .tint(Theme.accent)
+                            .accessibilityLabel("最小回复延迟")
+                        Slider(value: maxDelayBinding, in: 0...8000, step: 100)
+                            .tint(Theme.accent)
+                            .accessibilityLabel("最大回复延迟")
+                    }
+                }
+
+                HStack(spacing: 18) {
+                    Toggle("拆分为多条消息", isOn: bind(\.bot.humanize.splitMessages))
+                        .toggleStyle(.switch)
+                    Stepper(
+                        "最多 \(store.settings.bot.humanize.maxSegments) 段",
+                        value: bind(\.bot.humanize.maxSegments),
+                        in: 1...10
+                    )
+                    Toggle("显示输入中状态", isOn: bind(\.bot.humanize.typingIndicator))
+                        .toggleStyle(.switch)
+                }
+                .font(.callout)
+                .disabled(!store.settings.bot.humanize.enabled)
+                .opacity(store.settings.bot.humanize.enabled ? 1 : 0.55)
+            }
+        }
+    }
+
+    // MARK: Default persona
+
+    private var defaultPersonaCard: some View {
+        SectionCard(
+            title: "默认人格",
+            subtitle: "会话没有单独指定时使用；提示词在「人格设定」中编辑",
+            symbol: "quote.bubble",
+            tint: Theme.violet
+        ) {
+            HStack(spacing: 18) {
+                Picker("默认人格", selection: bind(\.bot.defaultPersonaID)) {
+                    Text("跟随全局").tag(String?.none)
+                    ForEach(store.personas) { persona in
+                        Text(persona.name).tag(Optional(persona.id))
+                    }
+                }
+                .frame(maxWidth: 260)
+
+                Text("默认通道在「AI 模型 → 全局请求」设置")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    // MARK: Bindings
+
+    private func bind<T>(_ keyPath: WritableKeyPath<AppSettings, T>) -> Binding<T> {
+        Binding(
+            get: { store.settings[keyPath: keyPath] },
+            set: { newValue in
+                store.settings[keyPath: keyPath] = newValue
+                store.persist()
+            }
+        )
+    }
+
+    private var minDelayBinding: Binding<Double> {
+        Binding(
+            get: { Double(store.settings.bot.humanize.minDelayMs) },
+            set: { value in
+                let v = Int(value)
+                store.settings.bot.humanize.minDelayMs = v
+                if store.settings.bot.humanize.maxDelayMs < v {
+                    store.settings.bot.humanize.maxDelayMs = v
+                }
+                store.persist()
+            }
+        )
+    }
+
+    private var maxDelayBinding: Binding<Double> {
+        Binding(
+            get: { Double(store.settings.bot.humanize.maxDelayMs) },
+            set: { value in
+                let v = Int(value)
+                store.settings.bot.humanize.maxDelayMs = v
+                if store.settings.bot.humanize.minDelayMs > v {
+                    store.settings.bot.humanize.minDelayMs = v
+                }
+                store.persist()
+            }
+        )
+    }
+
+    private func timeBinding(_ keyPath: WritableKeyPath<AppSettings, Int>) -> Binding<Date> {
+        Binding(
+            get: {
+                let minutes = store.settings[keyPath: keyPath]
+                return Calendar.current.date(
+                    bySettingHour: minutes / 60,
+                    minute: minutes % 60,
+                    second: 0,
+                    of: Date()
+                ) ?? Date()
+            },
+            set: { date in
+                let components = Calendar.current.dateComponents([.hour, .minute], from: date)
+                store.settings[keyPath: keyPath] = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+                store.persist()
+            }
+        )
+    }
+
+    // MARK: Group triggers
+
+    private var selectedGroupTriggers: Set<TriggerMode> {
+        Set(store.settings.bot.effectiveGroupTriggers)
+    }
+
+    private var groupKeywordEnabled: Bool {
+        selectedGroupTriggers.contains(.keyword)
+    }
+
+    /// 「所有消息」独占，其余多选；始终至少保留一种触发方式。
+    private func toggleGroupTrigger(_ mode: TriggerMode) {
+        var selected = selectedGroupTriggers
+        if mode == .always {
+            selected = [.always]
+        } else {
+            selected.remove(.always)
+            if selected.contains(mode) {
+                guard selected.count > 1 else { return }
+                selected.remove(mode)
+            } else {
+                selected.insert(mode)
+            }
+        }
+        let ordered = TriggerMode.groupOptions.filter { selected.contains($0) }
+        store.settings.bot.groupTriggers = ordered
+        // 同步旧字段，供历史版本/外部读取。
+        store.settings.bot.groupTrigger = ordered.first ?? .mention
+        store.persist()
+    }
+
+    // MARK: Actions
+
+    private var subtitle: String {
+        let state = store.isBotRunning ? "运行中" : "已停止"
+        let mode = store.settings.bot.dryRun ? "演练模式" : "真实发送"
+        let gateway = store.gatewayConnected ? "OneBot 已连接" : "OneBot 未连接"
+        return "\(state) · \(mode) · \(gateway)"
+    }
+
+    private func toggleWeekday(_ weekday: Int) {
+        var days = store.settings.bot.workingHours.weekdays
+        if days.contains(weekday) {
+            days.remove(weekday)
+        } else {
+            days.insert(weekday)
+        }
+        store.settings.bot.workingHours.weekdays = days
+        store.persist()
+    }
+
+    private func addKeyword() {
+        let keyword = newKeyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !keyword.isEmpty else { return }
+        guard !store.settings.bot.keywords.contains(where: { $0.caseInsensitiveCompare(keyword) == .orderedSame }) else {
+            newKeyword = ""
+            return
+        }
+        store.settings.bot.keywords.append(keyword)
+        newKeyword = ""
+        store.persist()
+    }
+
+    private func removeKeyword(_ keyword: String) {
+        store.settings.bot.keywords.removeAll { $0 == keyword }
+        store.persist()
+    }
+
+    private func toggleBot() {
+        Task {
+            if store.isBotRunning {
+                await store.stopBot()
+                toast.show("机器人已停止", tone: .info)
+            } else {
+                await store.startBot()
+                toast.show(store.isBotRunning ? "机器人已启动" : "启动请求已提交", tone: store.isBotRunning ? .success : .warning)
+            }
+        }
+    }
+}
+
+// MARK: - ID list editor
+
+/// Editable list of wxid / conversation IDs rendered as removable chips.
+private struct IDListEditor: View {
+    let title: String
+    var subtitle: String?
+    let placeholder: String
+    @Binding var items: [String]
+    var suggestions: [(id: String, label: String)] = []
+
+    @State private var newValue = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.callout.weight(.medium))
+                Spacer()
+                if !suggestions.isEmpty {
+                    Menu("从会话选择") {
+                        ForEach(suggestions, id: \.id) { suggestion in
+                            Button {
+                                add(suggestion.id)
+                            } label: {
+                                if items.contains(suggestion.id) {
+                                    Label(suggestion.label, systemImage: "checkmark")
+                                } else {
+                                    Text(suggestion.label)
+                                }
+                            }
+                            .disabled(items.contains(suggestion.id))
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .font(.caption)
+                }
+            }
+
+            if let subtitle {
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if items.isEmpty {
+                Text("未限制")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.04), in: Capsule())
+            } else {
+                FlowLayout(spacing: 5, lineSpacing: 5) {
+                    ForEach(items, id: \.self) { item in
+                        TagChip(title: displayName(item), tint: Theme.warning) {
+                            remove(item)
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 6) {
+                TextField(placeholder, text: $newValue)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.caption, design: .monospaced))
+                    .onSubmit { add(newValue) }
+                    .frame(maxWidth: 260)
+                Button("添加") {
+                    add(newValue)
+                }
+                .buttonStyle(.glass)
+                .controlSize(.small)
+                .disabled(newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func displayName(_ id: String) -> String {
+        if let suggestion = suggestions.first(where: { $0.id == id }) {
+            return suggestion.label
+        }
+        return id
+    }
+
+    private func add(_ raw: String) {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !items.contains(value) else {
+            newValue = ""
+            return
+        }
+        items.append(value)
+        newValue = ""
+    }
+
+    private func remove(_ value: String) {
+        items.removeAll { $0 == value }
+    }
+}

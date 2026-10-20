@@ -1,0 +1,59 @@
+# macOS / 编辑器
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+*.xcuserstate
+
+# 日志与运行数据
+*.log
+log/
+bridge/log/
+*.dmg
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# SwiftPM 构建缓存
+app/.build
+app/.build-*
+app/.swiftpm
+
+# 构建产物 / 运行时依赖
+bridge/onebot
+bridge/onebot.dSYM/
+hook/gadget/FridaGadget.dylib
+dist/
+*.dSYM/
+
+# 本地研究与版本 checkout
+_research/
+/versions/
+
+# GitHub 分享 / 编辑器与本地文件
+# 注：.DS_Store、*.log、*.dmg、.vscode/、.idea/、app/.build*、app/.swiftpm 已在上方覆盖
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.claude/
+.cursor/
+.fleet/
+DerivedData/
+*.xcarchive
+*.xcresult
+.swiftpm/
+*.orig
+*.rej
+*.bak
+.history/
+._*
+Icon?
+*.zip
+
+# 本地截图：不随仓库发布（真机截图请放 _research/，已忽略）
+docs/images/
