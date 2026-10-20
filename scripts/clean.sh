@@ -6,7 +6,7 @@
 #
 # 用法：
 #   bash scripts/clean.sh                  # 预览将删除的内容
-#   bash scripts/clean.sh --yes            # 清理缓存与产物（保留 dist/）
+#   bash scripts/clean.sh --yes            # 清理缓存与产物（含 dist/）
 #   bash scripts/clean.sh --yes --keep-dist
 #   bash scripts/clean.sh --yes --all      # 额外删除 Frida Gadget（需重新下载）
 #
@@ -35,7 +35,7 @@ usage() {
   -h, --help       显示本帮助
 
 清理范围：app/.build*、app/.swiftpm、bridge/onebot、dist/、log/、bridge/log/、
-仓库内的 .DS_Store。重新构建见 README「快速开始」。
+仓库内的 .DS_Store 与 __pycache__。重新构建见 README「快速开始」。
 EOF
 }
 
@@ -102,6 +102,14 @@ while IFS= read -r path; do
   DS_COUNT=$((DS_COUNT + 1))
 done < <(find "${ROOT_DIR}" -name .DS_Store -type f -not -path "${ROOT_DIR}/.git/*" 2>/dev/null || true)
 
+# __pycache__（tools / devtools / scripts 下的 Python 字节码缓存）
+PY_CACHES=()
+PY_COUNT=0
+while IFS= read -r path; do
+  PY_CACHES[PY_COUNT]="${path}"
+  PY_COUNT=$((PY_COUNT + 1))
+done < <(find "${ROOT_DIR}" -type d -name __pycache__ -not -path "${ROOT_DIR}/.git/*" 2>/dev/null || true)
+
 # ---------- 汇总 ----------
 
 total_kb=0
@@ -118,6 +126,9 @@ fi
 if (( DS_COUNT > 0 )); then
   detail+="$(printf '  %-44s %s\n' ".DS_Store ×${DS_COUNT}" "少量")"$'\n'
 fi
+if (( PY_COUNT > 0 )); then
+  detail+="$(printf '  %-44s %s\n' "__pycache__ ×${PY_COUNT}" "少量")"$'\n'
+fi
 
 human_total="$(awk -v kb="${total_kb}" 'BEGIN {
   split("B KB MB GB TB", unit, " ");
@@ -126,12 +137,12 @@ human_total="$(awk -v kb="${total_kb}" 'BEGIN {
   printf "%.1f %s", value, unit[i]
 }')"
 
-if (( TARGET_COUNT == 0 && DS_COUNT == 0 )); then
+if (( TARGET_COUNT == 0 && DS_COUNT == 0 && PY_COUNT == 0 )); then
   say "✅ 没有需要清理的内容（已保持干净）。"
   exit 0
 fi
 
-say "清理范围（${TARGET_COUNT} 个项目录/文件 + ${DS_COUNT} 个 .DS_Store）："
+say "清理范围（${TARGET_COUNT} 个项目录/文件 + ${DS_COUNT} 个 .DS_Store + ${PY_COUNT} 个 __pycache__）："
 printf '%s' "${detail}"
 say "预计回收：${human_total}"
 
@@ -156,6 +167,13 @@ if (( DS_COUNT > 0 )); then
     rm -f -- "${path}"
   done
   say "  ✔ 已删除 ${DS_COUNT} 个 .DS_Store"
+fi
+
+if (( PY_COUNT > 0 )); then
+  for path in "${PY_CACHES[@]}"; do
+    rm -rf -- "${path}"
+  done
+  say "  ✔ 已删除 ${PY_COUNT} 个 __pycache__"
 fi
 
 say ""

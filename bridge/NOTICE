@@ -16,12 +16,10 @@ onebot 的 GPL-3.0 衍生/复用构建。完整许可证见同目录 LICENSE
 
 本目录中与上游 onebot/ 完全一致、未修改的文件
 ------------------------------------------------
-main.go
 http.go
 websocket.go
 worker.go
 msg.go
-param.go
 protobuf_handler.go
 text_builder.go
 img_builder.go
@@ -33,7 +31,6 @@ file_builder.go
 reply_builder.go
 resp_parser.go
 utils.go
-logger.go
 go.mod
 go.sum
 proto/（*.go、*.proto）
@@ -46,23 +43,43 @@ Makefile.upstream（上游 onebot/Makefile，仅作参考，不参与构建）
 --------------
 script.js
   以上游 onebot/script.js 为基础，同步了本仓库 hook/script.js 的 WeChat
-  4.1.15 ABI 适配（req2bufLayout、autoBuffer 预写注入、HOOK_DEBUG 诊断等）。
-  该文件不是上游原版，修改来自 Hook 移植工作（hook-port/Lead）；
-  GPL-3.0 同样适用于这些修改。SHA256（2026-10-19 最终同步）：
-  7dd68dff738c2dcc313ced584aee99d43fc2c89dfac92cad1ed42dccd8be943f
+  4.1.12 / 4.1.15 ABI 适配（req2bufLayout、autoBuffer 预写注入、消息 finalizer
+  接收、R3 原生发送等）。该文件不是上游原版，修改来自 Hook 移植工作；
+  GPL-3.0 同样适用于这些修改。
+  维护方式：`hook/script.js` 是唯一事实来源，修改后运行
+  `bash scripts/sync_hook_script.sh` 覆盖本文件，并用
+  `bash scripts/sync_hook_script.sh --check` 校验；不要把哈希写死在文档里。
+
+main.go
+  新增 `-self_id`（App 传入当前账号，优先于 image_path 推导）与
+  `-log_file`（日志外置到 `~/Library/Logs/WeChatAI/bridge/macos.log`，
+  避免写入 app bundle 破坏 ad-hoc 签名）。其余启动流程与上游一致。
+
+logger.go
+  日志文件路径改为由 `-log_file` 指定，并在启动时创建所在目录。
+
+param.go
+  为 `WechatMessage` 增加 `is_self` / `from_wxid` / `to_wxid` / `sender_wxid` /
+  `target_id` 字段（自消息方向与会话归属）；同时接收 `-self_id` 覆盖值。
+
+incoming.go
+  4.1.15 Message finalizer 入站事件归一化：把 `hook/script.js` 上报的
+  `incoming_message` 转换成 OneBot 事件并推送到 HTTP/WS。
 
 本项目新增文件（非上游代码）
 ----------------------------
-NOTICE            本说明
-.gitignore        构建产物忽略规则
-http_auth_test.go 无 Gadget 场景下验证 HTTP 鉴权、参数校验与 /ws 动作的
-                  httptest 测试（不启动真实端口、不连接 Frida）
+NOTICE                    本说明
+.gitignore                构建产物忽略规则
+http_auth_test.go         无 Gadget 场景下验证 HTTP 鉴权、参数校验与 /ws 动作的
+                          httptest 测试（不启动真实端口、不连接 Frida）
+incoming_msg_test.go      `HandleMsg` 序列化保留 mentions / 自消息字段的回归测试
+incoming_normalize_test.go 入站事件归一化（自消息、群聊、@、非法帧）单元测试
+r3seed.go                 R3 发送句柄（newsendmsg hand-off 闭包 clone）按微信
+                          PID 持久化，bridge/App 重启后可恢复
 
-除 script.js 外，本项目不修改上游 Go 源码；其余差异仅在构建参数、附加脚本与文档。
-
-注意：`bridge/script.js` 必须与最终的 `hook/script.js` 保持同步（bridge 只读取
-自己目录下的副本）。若 hook/script.js 后续再修改，请重新复制并更新本 NOTICE
-中的 SHA256 与修改说明。
+注意：`bridge/script.js` 必须与 `hook/script.js` 保持同步（bridge 只读取自己
+目录下的副本）。修改 Hook 脚本后请运行 `bash scripts/sync_hook_script.sh`，
+`scripts/check.sh` 会在不一致时失败。
 
 构建依赖与再分发
 ----------------
