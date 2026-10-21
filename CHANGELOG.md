@@ -58,7 +58,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - **脚本**：`fetch_gadget.sh` 对 Frida Gadget 17.8.0 校验压缩包与 dylib 的 SHA256；
   `clean.sh` 修正 `dist/` 保留语义并新增 `__pycache__` 清理；Go/Hook 构建产物一致性检查
   统一到 `scripts/check.sh`；`check.sh` 兼容 macOS 自带 bash 3.2（空数组在 `set -u` 下
-  不再报 unbound variable）。
+  不再报 unbound variable）；`sync_hook_script.sh` 在 Linux 上回退 `sha256sum`，便于 CI 校验。
 - **发布准备**：清理构建产物、运行日志与 `.DS_Store`；新增发布前检查清单（见
   [`README.md`](README.md)「清理、打包与分享」）；文档中的测试数字统一为
   **Swift 126 项 / Go 60 项**；`docs/README.md` 增加开发手册、AI 代理指南与

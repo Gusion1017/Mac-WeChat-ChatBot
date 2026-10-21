@@ -43,8 +43,20 @@ done
 [[ -f "${SRC}" ]] || { echo "❌ 缺少 ${SRC}（唯一事实来源）" >&2; exit 1; }
 [[ -f "${DST}" ]] || { echo "❌ 缺少 ${DST}（bridge 运行时副本）" >&2; exit 1; }
 
-src_sha="$(shasum -a 256 "${SRC}" | awk '{print $1}')"
-dst_sha="$(shasum -a 256 "${DST}" | awk '{print $1}')"
+# macOS 自带 shasum；Linux CI 上回退到 sha256sum。
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    echo "❌ 缺少 shasum 或 sha256sum，无法校验脚本副本" >&2
+    exit 1
+  fi
+}
+
+src_sha="$(sha256_file "${SRC}")"
+dst_sha="$(sha256_file "${DST}")"
 
 if [[ "${MODE}" == "check" ]]; then
   if [[ "${src_sha}" == "${dst_sha}" ]]; then
@@ -65,6 +77,6 @@ fi
 
 cp -p "${SRC}" "${DST}"
 chmod 644 "${DST}"
-dst_sha="$(shasum -a 256 "${DST}" | awk '{print $1}')"
+dst_sha="$(sha256_file "${DST}")"
 [[ "${src_sha}" == "${dst_sha}" ]] || { echo "❌ 同步后校验失败" >&2; exit 1; }
 (( QUIET )) || echo "✅ 已同步 bridge/script.js ← hook/script.js（${src_sha}）"
