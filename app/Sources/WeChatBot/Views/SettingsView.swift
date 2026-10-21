@@ -165,7 +165,7 @@ struct SettingsView: View {
                             .font(.system(size: 12, weight: .medium))
                             .frame(width: 16)
                             .foregroundStyle(category == item ? Color.accentColor : Color.secondary)
-                        Text(item.title)
+                        Text(L(item.title))
                             .font(.system(size: 12.5, weight: category == item ? .semibold : .regular))
                             .foregroundStyle(.primary)
                         Spacer(minLength: 2)
@@ -284,7 +284,7 @@ struct SettingsView: View {
                         .labelsHidden()
                         .frame(width: 330)
 
-                        Text(store.settings.general.sleepPrevention.detail)
+                        Text(L(store.settings.general.sleepPrevention.detail))
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                             .multilineTextAlignment(.trailing)
@@ -618,7 +618,7 @@ struct SettingsView: View {
                 if !store.hookStatus.detail.isEmpty {
                     SettingsDivider()
                     SettingsRow(title: "详情", symbol: "info.circle", tint: .secondary) {
-                        Text(store.hookStatus.detail)
+                        Text(L(store.hookStatus.detail))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
@@ -742,7 +742,7 @@ struct SettingsView: View {
 
     private func hookStatusRow(_ title: String, value: String, symbol: String, tint: Color = .secondary) -> some View {
         SettingsRow(title: title, symbol: symbol, tint: tint) {
-            Text(value)
+            Text(L(value))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -831,7 +831,7 @@ struct SettingsView: View {
                             .textSelection(.enabled)
                         CopyButton(text: wsURL, accessibilityText: "复制 WS 地址")
                         Spacer()
-                        Text(store.gatewayConnected ? "已连接" : "未连接")
+                        Text(L(store.gatewayConnected ? "已连接" : "未连接"))
                             .font(.caption2)
                             .foregroundStyle(store.gatewayConnected ? Theme.success : Color.secondary)
                     }

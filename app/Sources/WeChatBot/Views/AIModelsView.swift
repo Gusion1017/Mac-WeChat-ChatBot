@@ -117,7 +117,7 @@ struct AIModelsView: View {
                         tint: Theme.warning
                     ) {
                         Stepper(
-                            "\(Int(store.settings.ai.requestTimeoutSeconds)) 秒",
+                            Lf("%d 秒", Int(store.settings.ai.requestTimeoutSeconds)),
                             value: timeoutBinding,
                             in: 5...300,
                             step: 5
@@ -133,7 +133,7 @@ struct AIModelsView: View {
                         tint: .secondary
                     ) {
                         Stepper(
-                            "\(store.settings.ai.retryCount) 次",
+                            Lf("%d 次", store.settings.ai.retryCount),
                             value: retryBinding,
                             in: 0...5,
                             step: 1
@@ -196,7 +196,7 @@ struct AIModelsView: View {
         guard let provider = store.settings.provider(id: store.settings.ai.defaultProviderID) else {
             return "未配置通道"
         }
-        return "\(count) 个通道 · 默认 \(provider.name) · \(provider.model)"
+        return Lf("%d 个通道 · 默认 %@ · %@", count, provider.name, provider.model)
     }
 
     private var sortedProviders: [AIProvider] {

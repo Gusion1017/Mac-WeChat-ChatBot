@@ -135,7 +135,7 @@ struct LogsView: View {
                         size: 6,
                         pulsing: !isPaused
                     )
-                    Text(isPaused ? "已暂停 · 显示暂停时的快照" : "实时更新")
+                    Text(L(isPaused ? "已暂停 · 显示暂停时的快照" : "实时更新"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }

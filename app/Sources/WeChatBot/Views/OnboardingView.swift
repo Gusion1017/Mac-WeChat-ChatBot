@@ -261,7 +261,7 @@ struct OnboardingView: View {
                 SettingsDivider()
                 SettingsRow(title: "版本", symbol: "number", tint: .secondary) {
                     HStack(spacing: 6) {
-                        Text(store.hookStatus.wechatVersion.isEmpty ? "未检测" : store.hookStatus.wechatVersion)
+                        Text(store.hookStatus.wechatVersion.isEmpty ? L("未检测") : store.hookStatus.wechatVersion)
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
                         PillLabel(
@@ -302,7 +302,7 @@ struct OnboardingView: View {
                 Button {
                     detectWeChat()
                 } label: {
-                    Label(isDetecting ? "检测中…" : "检测微信", systemImage: "magnifyingglass")
+                    Label(L(isDetecting ? "检测中…" : "检测微信"), systemImage: "magnifyingglass")
                 }
                 .buttonStyle(.glass)
                 .disabled(isDetecting || isInstalling)
@@ -411,7 +411,7 @@ struct OnboardingView: View {
                     Button {
                         testAI()
                     } label: {
-                        Label(isTestingAI ? "测试中…" : "保存并测试连接", systemImage: "bolt.horizontal")
+                        Label(L(isTestingAI ? "测试中…" : "保存并测试连接"), systemImage: "bolt.horizontal")
                     }
                     .buttonStyle(.glassProminent)
                     .tint(Theme.accent)

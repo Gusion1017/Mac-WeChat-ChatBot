@@ -81,7 +81,7 @@ struct ConversationsView: View {
                         .font(.system(.title3, design: .default, weight: .semibold))
                     Spacer(minLength: 4)
                     if totalUnread > 0 {
-                        PillLabel(text: "\(totalUnread) 未读", color: Theme.accent)
+                        PillLabel(text: Lf("%d 未读", totalUnread), color: Theme.accent)
                     }
                 }
                 SearchField(text: $search, placeholder: "搜索会话或消息")
@@ -142,11 +142,11 @@ struct ConversationsView: View {
                 size: 6,
                 pulsing: store.gatewayConnected
             )
-            Text(store.gatewayConnected ? "OneBot 已连接" : "OneBot 未连接")
+            Text(L(store.gatewayConnected ? "OneBot 已连接" : "OneBot 未连接"))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Spacer()
-            Text(L("\(store.conversations.count) 个会话"))
+            Text(Lf("%d 个会话", store.conversations.count))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -229,7 +229,7 @@ struct ConversationsView: View {
             .help(L("控制此会话是否自动回复"))
 
             Menu {
-                Section("人格") {
+                Section(L("人格")) {
                     Button {
                         setPersona(nil, for: conversation)
                     } label: {
@@ -243,7 +243,7 @@ struct ConversationsView: View {
                         }
                     }
                 }
-                Section("工作时间") {
+                Section(L("工作时间")) {
                     Button {
                         setWorkingHours(nil, for: conversation)
                     } label: {
@@ -253,7 +253,7 @@ struct ConversationsView: View {
                         workingHoursTarget = conversation
                     } label: {
                         Label(
-                            conversation.workingHours == nil ? "自定义时段…" : "编辑自定义时段…",
+                            L(conversation.workingHours == nil ? "自定义时段…" : "编辑自定义时段…"),
                             systemImage: "clock.badge.checkmark"
                         )
                     }
@@ -263,7 +263,7 @@ struct ConversationsView: View {
                         Label(L("此会话不限制"), systemImage: "infinity")
                     }
                 }
-                Section("名称") {
+                Section(L("名称")) {
                     Button {
                         renameTarget = conversation
                     } label: {
@@ -277,8 +277,8 @@ struct ConversationsView: View {
                         }
                     }
                 }
-                Section("会话") {
-                    Button(conversation.isPinned ? "取消置顶" : "置顶会话") {
+                Section(L("会话")) {
+                    Button(L(conversation.isPinned ? "取消置顶" : "置顶会话")) {
                         togglePin(conversation)
                     }
                     Button(L("标记为已读")) {

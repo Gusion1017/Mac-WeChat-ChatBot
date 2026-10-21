@@ -34,7 +34,7 @@ struct StatusCard: View {
                         Text(L(title))
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text(value)
+                        Text(L(value))
                             .font(.callout.weight(.semibold))
                             .lineLimit(1)
                     }
@@ -42,7 +42,7 @@ struct StatusCard: View {
                     HStack(spacing: 4) {
                         StatusDot(color: statusTint, size: 7, pulsing: isLive)
                         if let statusText {
-                            Text(statusText)
+                            Text(L(statusText))
                                 .font(.caption2)
                                 .foregroundStyle(statusTint)
                                 .lineLimit(1)

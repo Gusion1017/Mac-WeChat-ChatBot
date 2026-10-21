@@ -44,7 +44,7 @@ struct SessionRow: View {
                         }
                     }
                     HStack(spacing: 5) {
-                        Text(conversation.lastMessagePreview.isEmpty ? "暂无消息" : conversation.lastMessagePreview)
+                        Text(conversation.lastMessagePreview.isEmpty ? L("暂无消息") : conversation.lastMessagePreview)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)

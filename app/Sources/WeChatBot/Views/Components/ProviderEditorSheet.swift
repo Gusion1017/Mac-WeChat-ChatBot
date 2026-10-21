@@ -60,7 +60,7 @@ struct ProviderEditorSheet: View {
         HStack(spacing: 11) {
             IconTile(symbol: draft.kind.uiSymbol, tint: Theme.providerTint(draft.kind), size: 32)
             VStack(alignment: .leading, spacing: 2) {
-                Text(isNew ? "添加 AI 通道" : "编辑 AI 通道")
+                Text(L(isNew ? "添加 AI 通道" : "编辑 AI 通道"))
                     .font(.headline)
                 Text(L("OpenAI 兼容接口 · 密钥安全存储"))
                     .font(.caption)

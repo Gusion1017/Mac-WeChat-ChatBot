@@ -56,7 +56,7 @@ struct ReplyProgressBar: View {
 
                 Spacer(minLength: 8)
 
-                Text(timerText(now: now))
+                Text(L(timerText(now: now)))
                     .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                     .foregroundStyle(tint)
                     .monospacedDigit()
@@ -286,7 +286,7 @@ struct ReplyMiniStatus: View {
     }
 
     private func label(now: Date) -> some View {
-        Text(text(now: now))
+        Text(L(text(now: now)))
             .font(.system(size: 9, weight: .medium))
             .foregroundStyle(tint)
             .monospacedDigit()

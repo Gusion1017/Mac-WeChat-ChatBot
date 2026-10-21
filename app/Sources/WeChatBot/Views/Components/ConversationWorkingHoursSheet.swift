@@ -60,7 +60,7 @@ struct ConversationWorkingHoursSheet: View {
                             Text(L("当前全局工作时间"))
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
-                            Text(globalSummary)
+                            Text(L(globalSummary))
                                 .font(.callout)
                             Text(L("之后在「机器人 → 工作时间」修改全局设置时，此会话会同步生效。"))
                                 .font(.caption2)
@@ -90,12 +90,12 @@ struct ConversationWorkingHoursSheet: View {
 
                             HStack(spacing: 16) {
                                 DatePicker(
-                                    "开始",
+                                    L("开始"),
                                     selection: minuteBinding(\.startMinute),
                                     displayedComponents: .hourAndMinute
                                 )
                                 DatePicker(
-                                    "结束",
+                                    L("结束"),
                                     selection: minuteBinding(\.endMinute),
                                     displayedComponents: .hourAndMinute
                                 )

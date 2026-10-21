@@ -20,8 +20,8 @@ struct WorkingHoursBadge: View {
     private func badge(at date: Date) -> some View {
         let status = workingHours.status(at: date)
         return PillLabel(text: status.label, color: status.tint, symbol: status.symbol)
-            .help(helpText(for: status))
-            .accessibilityLabel(accessibilityText(for: status))
+            .help(L(helpText(for: status)))
+            .accessibilityLabel(L(accessibilityText(for: status)))
     }
 
     // MARK: Copy

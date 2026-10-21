@@ -208,7 +208,7 @@ struct MessageBubble: View, Equatable {
             Image(systemName: "waveform")
                 .font(.system(size: 14, weight: .medium))
             VStack(alignment: .leading, spacing: 1) {
-                Text(message.text.isEmpty ? "语音消息" : message.text)
+                Text(message.text.isEmpty ? L("语音消息") : message.text)
                     .font(.callout)
                 Text(L("语音"))
                     .font(.system(size: 9))
@@ -253,7 +253,7 @@ struct MessageBubble: View, Equatable {
         HStack(spacing: 7) {
             Image(systemName: "globe")
                 .font(.system(size: 13, weight: .medium))
-            Text(message.text.isEmpty ? (message.mediaURL ?? "链接") : message.text)
+            Text(message.text.isEmpty ? (message.mediaURL ?? L("链接")) : message.text)
                 .font(.callout)
                 .lineLimit(2)
         }
@@ -353,7 +353,7 @@ struct SystemNoticeRow: View, Equatable {
         HStack(spacing: 5) {
             Image(systemName: "info.circle")
                 .font(.system(size: 9))
-            Text(message.text.isEmpty ? "系统消息" : message.text)
+            Text(message.text.isEmpty ? L("系统消息") : message.text)
                 .font(.caption)
                 .multilineTextAlignment(.center)
             Text(UIFormat.time.string(from: message.timestamp))

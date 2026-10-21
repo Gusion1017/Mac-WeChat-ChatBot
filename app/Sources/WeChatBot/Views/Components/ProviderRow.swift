@@ -61,7 +61,7 @@ struct ProviderRow: View {
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                    Text(provider.model.isEmpty ? "未设置模型" : provider.model)
+                    Text(provider.model.isEmpty ? L("未设置模型") : provider.model)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -139,7 +139,7 @@ struct ProviderRow: View {
         HStack(spacing: 3) {
             Image(systemName: provider.hasAPIKey ? "key.fill" : "key.slash")
                 .font(.system(size: 8.5, weight: .semibold))
-            Text(provider.hasAPIKey ? "密钥已登记" : "未配置密钥")
+            Text(L(provider.hasAPIKey ? "密钥已登记" : "未配置密钥"))
                 .font(.caption2)
         }
         .foregroundStyle(provider.hasAPIKey ? Theme.success : Color.secondary)

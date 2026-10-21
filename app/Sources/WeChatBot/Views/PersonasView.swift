@@ -176,7 +176,7 @@ struct PersonaEditorSheet: View {
                         .foregroundStyle(.white)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(isNew ? "添加人格" : "编辑人格").font(.headline)
+                    Text(L(isNew ? "添加人格" : "编辑人格")).font(.headline)
                     Text(L("决定系统提示词与模型覆盖"))
                         .font(.caption)
                         .foregroundStyle(.secondary)

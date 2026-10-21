@@ -54,8 +54,8 @@ enum ScheduleMath {
 
     static func dayLabel(for date: Date?, calendar: Calendar = .current) -> String {
         guard let date else { return "—" }
-        if calendar.isDateInToday(date) { return "今天" }
-        if calendar.isDateInTomorrow(date) { return "明天" }
+        if calendar.isDateInToday(date) { return L("今天") }
+        if calendar.isDateInTomorrow(date) { return L("明天") }
         return UIFormat.weekdayName(calendar.component(.weekday, from: date))
     }
 }
@@ -78,7 +78,7 @@ struct ScheduleRow: View {
                 Text(nextFire.map { UIFormat.time.string(from: $0) } ?? "--:--")
                     .font(.system(.title3, design: .rounded, weight: .semibold))
                     .foregroundStyle(task.enabled ? Color.primary : Color.secondary)
-                Text(nextFire.map { ScheduleMath.dayLabel(for: $0) } ?? "已结束")
+                Text(nextFire.map { ScheduleMath.dayLabel(for: $0) } ?? L("已结束"))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -92,7 +92,7 @@ struct ScheduleRow: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text(task.name.isEmpty ? "未命名任务" : task.name)
+                    Text(task.name.isEmpty ? L("未命名任务") : task.name)
                         .font(.callout.weight(.semibold))
                         .lineLimit(1)
                     PillLabel(text: task.repeatRule.label, color: Theme.info, symbol: "repeat")

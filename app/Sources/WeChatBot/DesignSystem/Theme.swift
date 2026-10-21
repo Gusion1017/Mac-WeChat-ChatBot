@@ -136,39 +136,47 @@ struct PageBackground: View {
 enum UIFormat {
     static let time: DateFormatter = makeFormatter("HH:mm")
     static let shortTime: DateFormatter = makeFormatter("HH:mm:ss")
-    static let dateTime: DateFormatter = makeFormatter("M月d日 HH:mm")
-    static let fullDateTime: DateFormatter = makeFormatter("yyyy年M月d日 HH:mm")
+    static let dateTimeZH: DateFormatter = makeFormatter("M月d日 HH:mm", locale: "zh_Hans_CN")
+    static let dateTimeEN: DateFormatter = makeFormatter("MMM d, HH:mm", locale: "en_US")
+    static let fullDateTimeZH: DateFormatter = makeFormatter("yyyy年M月d日 HH:mm", locale: "zh_Hans_CN")
+    static let fullDateTimeEN: DateFormatter = makeFormatter("MMM d, yyyy HH:mm", locale: "en_US")
     static let fileDate: DateFormatter = makeFormatter("yyyyMMdd-HHmmss")
-    static let day: DateFormatter = makeFormatter("M月d日")
+    static let dayZH: DateFormatter = makeFormatter("M月d日", locale: "zh_Hans_CN")
+    static let dayEN: DateFormatter = makeFormatter("MMM d", locale: "en_US")
 
-    private static func makeFormatter(_ format: String) -> DateFormatter {
+    static var dateTime: DateFormatter { L10n.language == "en" ? dateTimeEN : dateTimeZH }
+    static var fullDateTime: DateFormatter { L10n.language == "en" ? fullDateTimeEN : fullDateTimeZH }
+    static var day: DateFormatter { L10n.language == "en" ? dayEN : dayZH }
+
+    private static func makeFormatter(_ format: String, locale: String = "zh_Hans_CN") -> DateFormatter {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.locale = Locale(identifier: locale)
         formatter.dateFormat = format
         return formatter
     }
 
-    static let weekdayOptions: [(value: Int, label: String)] = [
-        (2, "周一"), (3, "周二"), (4, "周三"), (5, "周四"),
-        (6, "周五"), (7, "周六"), (1, "周日")
-    ]
+    static var weekdayOptions: [(value: Int, label: String)] {
+        [(2, L("周一")), (3, L("周二")), (4, L("周三")), (5, L("周四")),
+         (6, L("周五")), (7, L("周六")), (1, L("周日"))]
+    }
 
     static func weekdayName(_ value: Int) -> String {
-        weekdayOptions.first(where: { $0.value == value })?.label ?? "周\(value)"
+        weekdayOptions.first(where: { $0.value == value })?.label ?? Lf("周%d", value)
     }
 
     static func weekdaySummary(_ days: [Int]) -> String {
         let ordered = weekdayOptions.filter { days.contains($0.value) }.map(\.label)
-        if ordered.count == 7 { return "每天" }
-        if ordered == ["周一", "周二", "周三", "周四", "周五"] { return "工作日" }
-        return ordered.isEmpty ? "未选择" : ordered.joined(separator: "、")
+        if ordered.count == 7 { return L("每天") }
+        if Set(days) == Set([2, 3, 4, 5, 6]) { return L("工作日") }
+        if ordered.isEmpty { return L("未选择") }
+        return ordered.joined(separator: L10n.language == "en" ? ", " : "、")
     }
 
     /// Compact timestamp for list rows: 14:20 / 昨天 / 3/12.
     static func relativeShort(_ date: Date, now: Date = Date()) -> String {
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return time.string(from: date) }
-        if calendar.isDateInYesterday(date) { return "昨天" }
+        if calendar.isDateInYesterday(date) { return L("昨天") }
         if calendar.isDate(date, equalTo: now, toGranularity: .year) {
             return calendar.component(.month, from: date).description + "/" + calendar.component(.day, from: date).description
         }
@@ -179,13 +187,13 @@ enum UIFormat {
     static func relative(_ date: Date?, now: Date = Date()) -> String {
         guard let date else { return "—" }
         let interval = now.timeIntervalSince(date)
-        if interval < 45 { return "刚刚" }
-        if interval < 3600 { return "\(max(1, Int(interval / 60))) 分钟前" }
+        if interval < 45 { return L("刚刚") }
+        if interval < 3600 { return Lf("%d 分钟前", max(1, Int(interval / 60))) }
         let calendar = Calendar.current
-        if calendar.isDateInToday(date) { return "今天 \(time.string(from: date))" }
-        if calendar.isDateInYesterday(date) { return "昨天 \(time.string(from: date))" }
+        if calendar.isDateInToday(date) { return L("今天") + " " + time.string(from: date) }
+        if calendar.isDateInYesterday(date) { return L("昨天") + " " + time.string(from: date) }
         if interval < 7 * 86_400 {
-            return "\(weekdayName(calendar.component(.weekday, from: date))) \(time.string(from: date))"
+            return weekdayName(calendar.component(.weekday, from: date)) + " " + time.string(from: date)
         }
         return dateTime.string(from: date)
     }
@@ -195,7 +203,7 @@ enum UIFormat {
         guard let date else { return "—" }
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return time.string(from: date) }
-        if calendar.isDateInYesterday(date) { return "昨天 \(time.string(from: date))" }
+        if calendar.isDateInYesterday(date) { return L("昨天") + " " + time.string(from: date) }
         return dateTime.string(from: date)
     }
 
@@ -206,7 +214,7 @@ enum UIFormat {
     }
 
     static func compactPath(_ path: String) -> String {
-        guard !path.isEmpty else { return "未设置" }
+        guard !path.isEmpty else { return L("未设置") }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         if path.hasPrefix(home) { return "~" + path.dropFirst(home.count) }
         return path
@@ -216,11 +224,11 @@ enum UIFormat {
     static func liveSeconds(_ interval: TimeInterval) -> String {
         let value = max(0, interval)
         if value < 60 {
-            return String(format: "%.1f 秒", value)
+            return Lf("%.1f 秒", value)
         }
         let minutes = Int(value) / 60
         let seconds = Int(value) % 60
-        return "\(minutes) 分 \(String(format: "%02d", seconds)) 秒"
+        return Lf("%d 分 %02d 秒", minutes, seconds)
     }
 
     static func logLine(_ entry: LogEntry) -> String {

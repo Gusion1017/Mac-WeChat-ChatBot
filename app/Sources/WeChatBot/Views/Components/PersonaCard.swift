@@ -28,7 +28,7 @@ struct PersonaCard: View {
                         .foregroundStyle(.white)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(persona.name.isEmpty ? "未命名人格" : persona.name)
+                    Text(persona.name.isEmpty ? L("未命名人格") : persona.name)
                         .font(.callout.weight(.semibold))
                         .lineLimit(1)
                     HStack(spacing: 5) {

@@ -42,7 +42,7 @@ struct MenuBarView: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text("WeChat AI")
                     .font(.system(.callout, design: .rounded, weight: .semibold))
-                Text(store.isBotRunning ? "机器人运行中" : "机器人已停止")
+                Text(L(store.isBotRunning ? "机器人运行中" : "机器人已停止"))
                     .font(.caption2)
                     .foregroundStyle(store.isBotRunning ? Theme.success : Color.secondary)
             }
@@ -102,7 +102,7 @@ struct MenuBarView: View {
                 .frame(width: 30, alignment: .leading)
             Spacer()
             StatusDot(color: color, size: 5)
-            Text(value)
+            Text(L(value))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

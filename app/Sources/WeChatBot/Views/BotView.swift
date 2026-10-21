@@ -17,7 +17,7 @@ struct BotView: View {
             Button {
                 toggleBot()
             } label: {
-                Label(store.isBotRunning ? "停止" : "启动", systemImage: store.isBotRunning ? "stop.fill" : "play.fill")
+                Label(L(store.isBotRunning ? "停止" : "启动"), systemImage: store.isBotRunning ? "stop.fill" : "play.fill")
             }
             .buttonStyle(.glassProminent)
             .tint(store.isBotRunning ? Theme.danger : Theme.accent)
@@ -58,7 +58,7 @@ struct BotView: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 7) {
-                        Text(store.isBotRunning ? "机器人运行中" : "机器人已停止")
+                        Text(L(store.isBotRunning ? "机器人运行中" : "机器人已停止"))
                             .font(.title3.weight(.semibold))
                         PillLabel(
                             text: store.settings.bot.dryRun ? "演练模式" : "真实发送",
@@ -84,7 +84,7 @@ struct BotView: View {
                             size: 6,
                             pulsing: store.gatewayConnected
                         )
-                        Text(store.gatewayConnected ? "OneBot 已连接" : "OneBot 未连接")
+                        Text(L(store.gatewayConnected ? "OneBot 已连接" : "OneBot 未连接"))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -201,7 +201,7 @@ struct BotView: View {
                         Text(L("群聊关键词"))
                             .font(.callout)
                         Spacer()
-                        Text(groupKeywordEnabled ? "已启用「关键词」触发" : "勾选「关键词」后生效")
+                        Text(L(groupKeywordEnabled ? "已启用「关键词」触发" : "勾选「关键词」后生效"))
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
@@ -335,7 +335,7 @@ struct BotView: View {
                         Text(L("每条回复冷却"))
                             .font(.callout)
                         Spacer()
-                        Text(String(format: "%.0f 秒", store.settings.bot.cooldownSeconds))
+                        Text(Lf("%.0f 秒", store.settings.bot.cooldownSeconds))
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
@@ -347,13 +347,13 @@ struct BotView: View {
 
                 HStack(spacing: 22) {
                     Stepper(
-                        "每分钟最多 \(store.settings.bot.maxRepliesPerMinute) 条回复",
+                        Lf("每分钟最多 %d 条回复", store.settings.bot.maxRepliesPerMinute),
                         value: bind(\.bot.maxRepliesPerMinute),
                         in: 1...60
                     )
                     .font(.callout)
                     Stepper(
-                        "临时记忆最多 \(store.settings.bot.maxContextMessages) 条 · 累计 \(ChatEngine.overflowBatchThreshold) 条旧消息后批量总结",
+                        Lf("临时记忆最多 %d 条 · 累计 %d 条旧消息后批量总结", store.settings.bot.maxContextMessages, ChatEngine.overflowBatchThreshold),
                         value: bind(\.bot.maxContextMessages),
                         in: 2...ChatEngine.shortTermMemoryLimit
                     )
@@ -437,7 +437,7 @@ struct BotView: View {
                         Text(L("随机延迟范围"))
                             .font(.callout)
                         Spacer()
-                        Text(String(format: "%.1f – %.1f 秒",
+                        Text(Lf("%.1f – %.1f 秒",
                                     Double(store.settings.bot.humanize.minDelayMs) / 1000,
                                     Double(store.settings.bot.humanize.maxDelayMs) / 1000))
                             .font(.caption.monospacedDigit())
@@ -457,7 +457,7 @@ struct BotView: View {
                     Toggle(L("拆分为多条消息"), isOn: bind(\.bot.humanize.splitMessages))
                         .toggleStyle(.switch)
                     Stepper(
-                        "最多 \(store.settings.bot.humanize.maxSegments) 段",
+                        Lf("最多 %d 段", store.settings.bot.humanize.maxSegments),
                         value: bind(\.bot.humanize.maxSegments),
                         in: 1...10
                     )
@@ -651,10 +651,10 @@ struct BotView: View {
     // MARK: Actions
 
     private var subtitle: String {
-        let state = store.isBotRunning ? "运行中" : "已停止"
-        let mode = store.settings.bot.dryRun ? "演练模式" : "真实发送"
-        let gateway = store.gatewayConnected ? "OneBot 已连接" : "OneBot 未连接"
-        return "\(state) · \(mode) · \(gateway)"
+        let state = L(store.isBotRunning ? "运行中" : "已停止")
+        let mode = L(store.settings.bot.dryRun ? "演练模式" : "真实发送")
+        let gateway = L(store.gatewayConnected ? "OneBot 已连接" : "OneBot 未连接")
+        return Lf("%@ · %@ · %@", state, mode, gateway)
     }
 
     private func toggleWeekday(_ weekday: Int) {

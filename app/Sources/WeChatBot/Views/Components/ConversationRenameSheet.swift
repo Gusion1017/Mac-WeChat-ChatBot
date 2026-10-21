@@ -53,7 +53,7 @@ struct ConversationRenameSheet: View {
                 .textFieldStyle(.roundedBorder)
                 .focused($isNameFocused)
                 .onSubmit(save)
-            Text(hint)
+            Text(L(hint))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

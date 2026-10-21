@@ -99,7 +99,7 @@ struct SidebarView: View {
 
     private func sidebarSection(_ section: SidebarSection) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(section.title)
+            Text(L(section.title))
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.tertiary)
                 .padding(.leading, 9)
@@ -241,7 +241,7 @@ struct SidebarStatusCapsule: View {
                         size: 6,
                         pulsing: store.isBotRunning
                     )
-                    Text(store.isBotRunning ? "机器人运行中" : "机器人已停止")
+                    Text(L(store.isBotRunning ? "机器人运行中" : "机器人已停止"))
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(store.isBotRunning ? Theme.success : Color.secondary)
                     Spacer(minLength: 2)
@@ -296,7 +296,7 @@ struct SidebarStatusCapsule: View {
                 .frame(width: 28, alignment: .leading)
             Spacer(minLength: 2)
             StatusDot(color: color, size: 5)
-            Text(value)
+            Text(L(value))
                 .font(.system(size: 9.5))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

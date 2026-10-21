@@ -133,7 +133,7 @@ struct DashboardView: View {
         HStack(alignment: .center, spacing: 12) {
             StatusCard(
                 title: "微信",
-                value: store.hookStatus.wechatVersion.isEmpty ? "未检测" : "微信 \(store.hookStatus.wechatVersion)",
+                value: store.hookStatus.wechatVersion.isEmpty ? L("未检测") : Lf("微信 %@", store.hookStatus.wechatVersion),
                 detail: URL(fileURLWithPath: store.settings.hook.wechatPath).lastPathComponent
                     + (store.hookStatus.wechatRunning ? " · 运行中" : " · 未运行"),
                 symbol: "iphone",
@@ -397,7 +397,7 @@ private struct DashboardRecentConversationsCard: View {
                                     Text(conversation.displayTitle)
                                         .font(.caption.weight(.medium))
                                         .lineLimit(1)
-                                    Text(conversation.lastMessagePreview.isEmpty ? "暂无消息" : conversation.lastMessagePreview)
+                                    Text(conversation.lastMessagePreview.isEmpty ? L("暂无消息") : conversation.lastMessagePreview)
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
@@ -448,7 +448,7 @@ private struct DashboardMetricsRow: View {
                 unit: "条",
                 symbol: "arrow.up.message.fill",
                 tint: Theme.accent,
-                detail: store.stats.lastReplyAt.map { "最近 \(UIFormat.relative($0))" } ?? "尚未回复"
+                detail: store.stats.lastReplyAt.map { Lf("最近 %@", UIFormat.relative($0)) } ?? L("尚未回复")
             )
             MetricTile(
                 title: "失败",
@@ -463,7 +463,7 @@ private struct DashboardMetricsRow: View {
                 value: UIFormat.duration(milliseconds: store.stats.aiLatencyAverageMs),
                 symbol: "timer",
                 tint: Theme.violet,
-                detail: store.stats.startedAt.map { "启动于 \(UIFormat.relative($0))" } ?? "未启动"
+                detail: store.stats.startedAt.map { Lf("启动于 %@", UIFormat.relative($0)) } ?? L("未启动")
             )
         }
     }

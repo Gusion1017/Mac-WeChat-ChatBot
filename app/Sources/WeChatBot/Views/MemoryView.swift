@@ -8,8 +8,8 @@ private enum MemoryMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .longTerm: "长期记忆"
-        case .chat: "聊天记录"
+        case .longTerm: L("长期记忆")
+        case .chat: L("聊天记录")
         }
     }
 }
@@ -36,9 +36,9 @@ private enum MemoryFolder: Hashable, Identifiable {
 
     var title: String {
         switch self {
-        case .all: "全部记忆"
-        case .global: "全局记忆"
-        case .conversation(_, let title, _): title.isEmpty ? "未命名会话" : title
+        case .all: L("全部记忆")
+        case .global: L("全局记忆")
+        case .conversation(_, let title, _): title.isEmpty ? L("未命名会话") : title
         case .orphaned(let id): id
         }
     }
@@ -86,8 +86,8 @@ private enum MemorySortMode: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .weight: "综合权重"
-        case .recentlyUpdated: "最近更新"
+        case .weight: L("综合权重")
+        case .recentlyUpdated: L("最近更新")
         }
     }
 
@@ -316,7 +316,7 @@ struct MemoryView: View {
                         isSelected: snapshot.activeFolder.id == MemoryFolder.global.id
                     )
                     ForEach(snapshot.folderSections) { section in
-                        Text(section.title)
+                        Text(L(section.title))
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 14)
@@ -490,7 +490,7 @@ struct MemoryView: View {
     /// 排序菜单：菜单里直接列出两种模式，标签只显示当前模式，避免挤压顶栏。
     private var memorySortMenu: some View {
         Menu {
-            Section("排序方式") {
+            Section(L("排序方式")) {
                 ForEach(MemorySortMode.allCases) { mode in
                     Button {
                         sortMode = mode
