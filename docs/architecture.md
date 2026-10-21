@@ -176,9 +176,9 @@ bridge/onebot \
   - 展示层 `ConversationName` 兜底：系统账号中文名 + `群聊 / 微信好友 / 公众号 · 尾号`；
     启动时 `MemoryStore.repairPlaceholderConversationTitles` 幂等清理历史 ID 标题。
 - 通讯录真实昵称/群名（2026-10-21 起）：App 连接后请求 `get_contact_directory`；
-  bridge 调 hook 在微信进程内解密 `contact.db`（SQLCipher4）并查询联系人/群，
-  返回 `users` / `groups`（`groups[*].members` 为群成员群昵称）。App 只在标题为空/占位时
-  用目录填 `Conversation.title`；bridge 转发入站事件时覆盖 `sender.nickname`
+  bridge 调 hook 在本机**只读**读取通讯录并查询联系人/群，返回 `users` / `groups`
+  （`groups[*].members` 为群成员群昵称）。App 只在标题为空/占位时用目录填
+  `Conversation.title`；bridge 转发入站事件时覆盖 `sender.nickname`
   （群聊优先群昵称，再回退通讯录显示名；群事件附 `group_name`），群 @ 昵称同样优先群昵称。
   详见 [`hook-contact-directory.md`](hook-contact-directory.md)。
 - 媒体字段：`data.url` 为 `file://` 本地路径时复制到 App 媒体目录；`data.file` 可能为 base64。
@@ -207,7 +207,7 @@ bridge/onebot \
 - 拍一拍：**App 已移除出站 `pat`**（2026-10-21），不再发送原生拍一拍；bridge/hook 仍保留
   `pat` 解析与 `triggerSendPatMessage` 作为历史路径（`r3PatSend=false`，产品不调用）。
   入站 `pat_*` 字段保留，App 用它触发自定义文字/AI 回复。原生 sendpat 失败与崩溃记录见
-  [`hook-r3-native-send.md`](hook-r3-native-send.md) §10.9（历史）。
+  [`hook-r3-native-send.md`](hook-r3-native-send.md) 的「历史」一节。
 
 ## 4. App 内部关键类型
 
@@ -235,21 +235,16 @@ bridge/onebot \
 
 ## 6. Hook 版本契约
 
-- 版本文件：`hook/versions/<version_with_underscores>_mac.json`，字段与上游一致：
-  `structVer, sendFuncAddr, req2bufEnterAddr, req2bufExitAddr, buf2RespAddr, blrX8Addr,
-   autoBufferWriteFunc, uploadImageAddr, cdnGetServiceAddr, cdnManagerGetterAddr,
-   cndOnCompleteAddr, uploadGetCallbackWrapperAddr, uploadGetCallbackWrapperFuncAddr,
-   uploadOnCompleteFuncAddr, uploadOnCompleteAddr, startDownloadMedia,
-   downloadImagAddr, downloadFileAddr, downloadVideoAddr`。
+- 版本文件：`hook/versions/<version_with_underscores>_mac.json`，字段与上游/本项目脚本
+  保持一致；**具体键名、地址与发送开关只以文件本身为准，文档不重复**。
+- 版本文件是 Hook 地址与开关的唯一数据源；修改必须真机验证并同步 `bridge/NOTICE`。
 - 当前目标：WeChat 4.1.15.55 (270135)，arm64，`/Applications/WeChat.app/Contents/Resources/wechat.dylib`。
-- 4.1.15.55 发送附加键（R3，仓库默认 `enableSend=false` / `req2bufSendMode=off`）：
-  `classAVtable, globalServiceHolder, defaultScopeString, stringCtorAddr, serviceScopeAddr,
-   newSendMsgTaskCtorAddr, newSendMsgTaskVtable, r3ClosureVtable, slot13Addr, operatorNewAddr,
-   newsendmsgUrl, r3ClosureCapture, r3Slot13Capture, r3QueueUntilSeed, r3MaxClones`。
-  App 在 4.1.15.55 上按设置合并出 `enableSend=true, req2bufSendMode=r3, r3Slot13Capture=true,
-  r3QueueUntilSeed=true`（默认开启，可在设置中关闭）；首次使用（或微信重启后）需在本机微信
-  手动发一条消息以捕获种子闭包，App/bridge 重启会按微信 PID 从缓存自动恢复。
-- 任何偏移变更必须 runtime 验证文本收发 + 图片上传后才能标记 `matchedVersion = true`。
+- 4.1.15.55 发送附加配置（R3，仓库默认 `enableSend=false` / `req2bufSendMode=off`）：
+  由 App 读取版本 JSON 后按设置合并生成运行期配置；具体键名、运行期参数与地址表只维护在
+  `hook/versions/*.json` 与 `hook/script.js`，文档不展开。
+  App 默认开启 R3（可在设置中关闭）；首次使用（或微信重启后）需在本机微信手动发一条消息
+  以捕获发送上下文，App/bridge 重启会按微信 PID 从本地缓存自动恢复。
+- 任何 Hook 适配变更必须在真机验证文本收发后才能标记为可用（见 `hook-porting.md`）。
 - 安装 Gadget 流程：完整备份 → 注入 load command → 复制 Gadget/配置 → ad-hoc 重签整个 App → 校验。
 - 恢复：从备份 zip 还原整个 `/Applications/WeChat.app` 并重签（或直接用备份替换）。
 
@@ -323,15 +318,14 @@ stdout：
 
 4.1.15 的旧 `buf2RespAddr` 不再承载普通入站消息。桥接的接收路径改为：
 
-- Frida hook **通用 Message 终结器** `base+0x4cbc3ac`（antirecall 已对 270135 验证）；
-  `x1==1` 表示新收到的网络消息。
-- 字段布局（270135）：
-  `type=+0x0C`、`from=+0x18`(std::string)、`to=+0x30`(std::string)、
-  `serverId=+0xF8`、`created=+0x114`、`content=+0x130`(std::string)。
-- JS 读取后发送 `incoming_message` 给 Go bridge；Go 的 `incoming.go` 转成 OneBot
-  事件并经 WebSocket/HTTP 推送。App 的 OneBotClient 消费。
-- 群聊 `from` 以 `@chatroom` 结尾；文本 `content` 可能以 `sender_wxid:\n` 前缀，
-  JS 会剥离并把 sender 作为 user_id。
+- Frida 在微信进程内挂**只读的 Message 终结器**；具体函数地址与字段布局由
+  `hook/versions/*.json` 与 `hook/script.js` 按微信版本维护，**不在公开文档展开**。
+- Hook 读取到新消息后发送 `incoming_message` 给 Go bridge；Go 的 `incoming.go` 转成
+  OneBot 事件并经 WebSocket/HTTP 推送。App 的 OneBotClient 消费。
+- 群聊 `from` 以 `@chatroom` 结尾；文本可能带 `sender_wxid:` 前缀，JS 会剥离并把
+  sender 作为 user_id。
+- 消息字段的兼容性处理（群/@/拍一拍/自消息方向）在 `hook/script.js` 与
+  `bridge/incoming.go` 中完成，文档只描述对外字段契约（见 §3）。
 
 安全：Message finalizer hook 为**只读**，不修改寄存器/内存。R3 发送由 App 设置控制
 （默认开启）；如果绕过 App、直接用 `scripts/run_bridge.sh` 调试，它默认

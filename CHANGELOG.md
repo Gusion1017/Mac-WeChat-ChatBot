@@ -8,10 +8,10 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ### 新增
 
-- **通讯录真实昵称 / 群名**：hook 在微信进程内解密 `contact.db`（SQLCipher 4 页格式，
-  捕获 CommonCrypto 页操作密钥）后返回联系人目录，bridge 暴露 OneBot `get_contact_directory`，
-  App 用真实昵称/群名替换 wxid 标题，并在群成员缓存未命中时回退通讯录昵称。
-  详见 [`docs/hook-contact-directory.md`](docs/hook-contact-directory.md)。
+- **通讯录真实昵称 / 群名**：hook 在本机**只读**读取通讯录后返回联系人目录，
+  bridge 暴露 OneBot `get_contact_directory`，App 用真实昵称/群名替换 wxid 标题，
+  并在群成员缓存未命中时回退通讯录昵称。详见
+  [`docs/hook-contact-directory.md`](docs/hook-contact-directory.md)。
 - **稳定性与崩溃取证**：`CrashReporter`（未捕获异常报告、会话面包屑、主线程看门狗）、
   `AppKitLayoutGuard`（显示周期断言安全阀），详见 `docs/performance.md`。
 - **回复进度倒计时**：`ReplyProgressBar`，会话详情头部、输入区与会话行同步显示
@@ -94,9 +94,8 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   会通过 `-self_id` 覆盖 bridge 的真实账号，使 `get_login_info` 与 `pat_target_wxid`
   对不上。现在启动 bridge 前用 `image_path` 的 `xwechat_files/<账号>_xxx` 校验 selfID，
   不一致就不传、由 bridge 重新推导；入站事件只在 selfID 为空时兜底学习。
-- **原生回拍真机失败（2026-10-21）**：`newsendmsg` 种子任务构造的 sendappmsg 请求
-  显示提交成功（`slot13 -> 0`、worker result=1），但收件端收不到拍一拍；该能力已整体移除，
-  详见「变更」中的「移除原生拍一拍回拍」。
+- **原生回拍真机失败（2026-10-21）**：原生拍一拍发送在真机未送达，继续合成还会导致
+  微信崩溃；该能力已整体移除，详见「变更」中的「移除原生拍一拍回拍」。
 - **设置兼容**：拍一拍设置放在可选 `bot.pat` 结构中，旧 `config.json` 缺键不会导致
   整份配置解码失败/重置。
 - **R3 误报失败**：跳过 buf2resp 等待后不再返回 HTTP 500 send timeout；接收链路不受影响。
@@ -106,13 +105,15 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   改为 `HOOK_DEBUG` 开关。历史回放从约 1 条/秒恢复到成批到达，详见 `docs/performance.md` §7。
 - **R3 重启后状态误报**：bridge/App 重启时发送句柄已从 `r3-seed.json` 恢复，但 App 只解析
   「捕获闭包」日志，Hook 卡片仍显示「R3 等待信号」并提示手动发消息；现解析恢复/过期日志、
-  同步 `r3Seeded` 与提示文案（仅微信重启后需要手动发送），见 `docs/hook-r3-native-send.md` §10.8。
+  同步 `r3Seeded` 与提示文案（仅微信重启后需要手动发送），见 `docs/hook-r3-native-send.md`。
 
 ### 安全
 
 - 运行期 Hook 配置与仓库版本 JSON 分离：仓库保持 `enableSend=false` / `req2bufSendMode=off`，
   R3 只由 App 设置开启。
-- 通讯录密钥只在内存与 bridge 缓存文件中出现，不写日志；日志只打印 salt 前 8 位与是否命中。
+- 通讯录读取密钥只在内存与本机受限缓存中出现，不写日志、不下发 App。
+- 公开文档、变更日志与「关于」页收敛敏感实现细节：不再描述 Hook 地址、结构偏移、
+  密钥派生或发送任务构造，只保留行为、开关与安全边界。
 - 新增 `.gitignore` 与文档层面的隐私检查（真实 wxid / 聊天记录 / 截图 / Key 不入库）。
 
 ## [1.0.0] — 2026-10-20

@@ -39,9 +39,8 @@ Makefile.upstream（上游 onebot/Makefile，仅作参考，不参与构建）
 --------------
 script.js
   以上游 onebot/script.js 为基础，同步了本仓库 hook/script.js 的 WeChat
-  4.1.12 / 4.1.15 ABI 适配（req2bufLayout、autoBuffer 预写注入、消息 finalizer
-  接收、R3 原生发送等）。该文件不是上游原版，修改来自 Hook 移植工作；
-  GPL-3.0 同样适用于这些修改。
+  4.1.12 / 4.1.15 ABI 适配（入站消息、R3 发送、通讯录等）。该文件不是上游原版，
+  修改来自 Hook 移植工作；GPL-3.0 同样适用于这些修改。
   维护方式：`hook/script.js` 是唯一事实来源，修改后运行
   `bash scripts/sync_hook_script.sh` 覆盖本文件，并用
   `bash scripts/sync_hook_script.sh --check` 校验；不要把哈希写死在文档里。
@@ -50,8 +49,7 @@ main.go
   新增 `-self_id`（App 传入当前账号，优先于 image_path 推导）与
   `-log_file`（日志外置到 `~/Library/Logs/WeChatAI/bridge/macos.log`，
   避免写入 app bundle 破坏 ad-hoc 签名）。其余启动流程与上游一致。
-  Frida ready 后调用 `restoreContactDBKeys()`，把
-  `~/Library/Caches/WeChatAI/db-keys.json` 里的 SQLCipher DB key 用
+  Frida ready 后调用 `restoreContactDBKeys()`，把本机受限缓存中的通讯录读取密钥用
   `setDbKeys` 回灌给 hook（无缓存/失败只记日志，密钥不打印）。
 
 logger.go
@@ -102,11 +100,11 @@ http_auth_test.go         无 Gadget 场景下验证 HTTP 鉴权、参数校验�
 incoming_msg_test.go      `HandleMsg` 序列化保留 mentions / 自消息字段的回归测试
 incoming_normalize_test.go 入站事件归一化（自消息、群聊、@、非法帧、非法群 ID
                           清洗、旧 hook 群自消息补群）单元测试
-r3seed.go                 R3 发送句柄（newsendmsg hand-off 闭包 clone）按微信
-                          PID 持久化，bridge/App 重启后可恢复
-contact.go                通讯录目录：`get_contact_directory` 的 db_storage 推导、
+r3seed.go                 R3 发送句柄按微信 PID 持久化，
+                          bridge/App 重启后可恢复
+contact.go                通讯录目录：`get_contact_directory` 的路径推导、
                           目录缓存与入站昵称/群名补全、群 @ 昵称回退，以及
-                          SQLCipher DB key 缓存（0600、原子写）与启动回灌
+                          本机受限密钥缓存（0600、原子写）与启动回灌
 contact_test.go           上述逻辑的单元测试（路径推导、JSON 解析、缓存、密钥文件
                           权限/往返、入站补全、httptest WS 动作；不连接微信/Frida）
 

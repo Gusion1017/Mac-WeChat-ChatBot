@@ -248,7 +248,7 @@ bridge/onebot \
 | --- | --- | --- |
 | `get_login_info` | `{"echo":..., "status":"ok", "data":{"user_id":..., "nickname":...}}` | 上游 `nickname` 直接填 `wxid`（不是昵称）；`user_id` 来自 `image_path` 推断或已收到事件。 |
 | `get_group_member_info` | `{"echo":..., "status":"ok", "data":{"nickname":...}}` | 只查进程内缓存（曾收到该群该成员消息）；未命中时为 `null`。 |
-| `get_contact_directory` | `{"echo":..., "status":"ok", "data":{"ok":true,"users":{...},"groups":{...}}}` | 微信进程内解密 `contact.db` 后的通讯录目录；失败回 `{"status":"failed","error":...}`。字段与隐私注意见 [`hook-contact-directory.md`](hook-contact-directory.md)。 |
+| `get_contact_directory` | `{"echo":..., "status":"ok", "data":{"ok":true,"users":{...},"groups":{...}}}` | 本机**只读**读取通讯录后的目录；失败回 `{"status":"failed","error":...}`。字段与隐私边界见 [`hook-contact-directory.md`](hook-contact-directory.md)。 |
 | `send_private_msg` / `send_group_msg` | **不回包** | 发送结果只写日志；成功/失败不会产生 echo/响应。App 应以 HTTP 发送为主通道。 |
 
 其余 action 会被静默忽略。同一时刻只有一个 WS 连接（全局 `conn`）；新连接会替换旧连接，
@@ -307,9 +307,8 @@ $ echo $?
 编译、`-h` 自检、契约测试全部通过，耗时约 70 秒。
 
 `script.js`（Hook 脚本）单独验证：用与 `main.go` 相同的 `text/template` + 版本 JSON
-渲染 4.1.15 与 4.1.12 的模板，`node --check` 均通过；4.1.15 渲染出
-`req2bufLayout = "v4_1_15"`，4.1.12 缺省渲染为 `<no value>` 并走旧布局（上游代码
-按非 `v4_1_15` 处理）。
+渲染 4.1.15 与 4.1.12 的模板，`node --check` 均通过；4.1.15 渲染出对应的布局标记，
+4.1.12 走旧布局（由上游代码按版本处理）。
 
 ### 4.2 无 Gadget 行为
 
@@ -399,15 +398,15 @@ go test -count=1 -timeout=120s -run 'TestSendHandlerAuth|TestWebSocketGetLoginIn
    `incoming.go`（Message finalizer 归一化、非法群 ID 清洗、通讯录昵称补全）、
    `websocket.go`（`get_contact_directory`、`at` 昵称回退）、
    `http.go`（`at` 昵称回退）、`worker.go`（R3 提交后跳过 buf2resp）。
-3. **本项目新增**：`contact.go`（通讯录目录 + SQLCipher key 缓存）、
+3. **本项目新增**：`contact.go`（通讯录目录与本地受限密钥缓存）、
    `r3seed.go`（发送句柄按 PID 持久化）、`NOTICE`、`.gitignore`、
    `*_test.go`、`UPSTREAM_README.md`（上游 `readme.md` 重命名）与
    `Makefile.upstream`（上游 Makefile，仅参考）。
 4. **工程脚本**：`scripts/build_bridge.sh`（下载/校验/离线缓存/Go 工具链隔离/构建自检）
    与 `scripts/run_bridge.sh`（参数化启动与前置检查）。
 5. **`script.js`**：唯一被修改的上游脚本，已同步 `hook/script.js` 的 4.1.12 / 4.1.15
-   ABI 适配（`req2bufLayout`、autoBuffer 预写、Message finalizer、R3 发送、通讯录）。
-   它以 `hook/script.js` 为唯一事实来源，细节见 NOTICE。
+   ABI 适配（入站消息、R3 发送、通讯录）。它以 `hook/script.js` 为唯一事实来源，
+   细节见 NOTICE。
 
 ---
 
@@ -439,7 +438,7 @@ go test -count=1 -timeout=120s -run 'TestSendHandlerAuth|TestWebSocketGetLoginIn
     务必对比 `hook/script.js` 与 `bridge/script.js` 的 SHA256（见 NOTICE）。
 14. **`pat` 出站段保留但产品不再使用**：bridge 的 HTTP/WS 仍能解析 `{"type":"pat"}`
     并调用 hook 的 `triggerSendPatMessage`，属于历史/实验路径；App 已移除 `sendPat`，
-    `r3PatSend` 永久保持 `false`，不要启用原生回拍（见 `hook-r3-native-send.md` §10.9）。
+    `r3PatSend` 永久保持 `false`，不要启用原生回拍（见 `hook-r3-native-send.md`「历史」）。
 
 ---
 

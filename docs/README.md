@@ -16,10 +16,10 @@
 | [`performance.md`](performance.md) | 稳定性：AppKit 显示周期断言安全阀、崩溃取证（面包屑/crash-*.log）、主线程看门狗与卡顿排查 | 全部 | 现行手册 + 事故记录 |
 | [`integration-status.md`](integration-status.md) | 真机集成状态与证据（接收/发送/AI/误路由修复/稳定性） | 全部 | 现状跟踪 |
 | [`acceptance.md`](acceptance.md) | 2026-10-20 首版验收报告（历史记录）、功能矩阵、已知限制 | 全部 | 历史记录 |
-| [`hook-porting.md`](hook-porting.md) | 4.1.12.53 → 4.1.15.55 地址移植记录与 `addrfind` 流程 | hook-port | 历史记录 + 方法 |
-| [`hook-4_1_15-abi.md`](hook-4_1_15-abi.md) | 4.1.15.55 req2buf ABI、注入策略、崩溃分析与历史发送模式 | hook-port | 历史记录 |
-| [`hook-r3-native-send.md`](hook-r3-native-send.md) | **R3 原生 task 构造 + slot13 提交（产品默认开，仓库 JSON 默认 off；仅 text；2026-10-20 真机验证通过）** | hook-port | 现行实现 |
-| [`hook-contact-directory.md`](hook-contact-directory.md) | **通讯录真实昵称/群名：SQLCipher4 页格式、CommonCrypto key 捕获、进程内解密 + 查询、bridge/App 契约** | hook-port / bridge / swift-core | 现行实现 |
+| [`hook-porting.md`](hook-porting.md) | 微信 4.x 版本移植方法、验证矩阵与回滚（不公开地址/偏移） | hook-port | 方法 |
+| [`hook-4_1_15-abi.md`](hook-4_1_15-abi.md) | 4.1.15.55 适配方法与安全边界（不公开地址/偏移） | hook-port | 现行方法 |
+| [`hook-r3-native-send.md`](hook-r3-native-send.md) | R3 原生文本发送：开关、排队、句柄恢复、限制与排查 | hook-port | 现行实现 |
+| [`hook-contact-directory.md`](hook-contact-directory.md) | 通讯录昵称/群名：能力、数据契约、隐私边界与限制 | hook-port / bridge / swift-core | 现行实现 |
 
 根目录另见：[`README.md`](../README.md)（项目介绍与快速开始）、
 [`AGENTS.md`](../AGENTS.md)（AI 编码代理指南）、
@@ -28,6 +28,10 @@
 [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md)（行为准则）、
 [`SUPPORT.md`](../SUPPORT.md)（支持渠道）、
 [`SECURITY.md`](../SECURITY.md)（安全与隐私报告）。
+
+> **安全披露边界**：涉及微信 Hook 的公开文档只保留行为、契约与安全边界；
+> 函数地址、结构偏移、密钥派生与发送任务构造**不写入文档**，只维护在
+> `hook/script.js` 与 `hook/versions/*.json`。
 
 > **现行 vs 历史**：`architecture.md` / `core-services.md` / `bridge.md` / `memory.md` /
 > `ui-design.md` / `hook-r3-native-send.md` / `hook-contact-directory.md` 描述**当前实现**；
@@ -44,7 +48,7 @@
 - 想改协议：先读 `architecture.md` §3–§4，再读对应模块文档。
 - 想移植新微信版本：`hook-porting.md` → `hook-4_1_15-abi.md` → `hook/diag/README.md`。
 - 想看 4.1.15 发送新路线：`hook-r3-native-send.md`（真机探针保存在本地 `_research/`，不入库）。
-- 想拿真实好友昵称/群名：`hook-contact-directory.md`（SQLCipher 解密 + 进程内查询；密钥缓存注意隐私）。
+- 想拿真实好友昵称/群名：`hook-contact-directory.md`（本机只读读取；隐私边界见文档）。
 - App 闪退 / 卡顿排查：先看 `performance.md`（`~/Library/Logs/WeChatAI/` 取证文件、安全阀、看门狗）。
 - 只想本地联调（无微信）：[`devtools/README.md`](../devtools/README.md)。
 - 提交前自检：`bash scripts/check.sh`；文档链接：`python3 scripts/check_docs.py`。
