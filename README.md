@@ -9,10 +9,26 @@
 把微信消息桥接到本地 **原生 SwiftUI** 应用，由 **DeepSeek / OpenAI 兼容模型** 生成
 拟人化回复，并提供总览、会话、人格、记忆、定时任务、日志与设置界面。
 
-> 个人自用 / 学习研究项目，遵循 GPL-3.0。修改微信客户端存在账号风控与签名失效风险，
-> 请先阅读[风险与备份](#风险与备份)。本项目与腾讯、Apple 无关联。
+On macOS this project **injects the official WeChat client with Frida Gadget** (reusing the
+single running instance — no second login), bridges WeChat messages to a **native SwiftUI** app,
+and writes human-like replies with **DeepSeek / any OpenAI-compatible model**, with screens for
+an overview, conversations, personas, memory, scheduled tasks, logs and settings.
 
-## 目录
+> 个人自用 / 学习研究项目，遵循 GPL-3.0。修改微信客户端存在账号风控与签名失效风险，
+> 请先阅读「风险与备份」。本项目与腾讯、Apple 无关联。
+>
+> A personal / learning project under GPL-3.0. Patching the WeChat client breaks its official
+> signature and carries account risk — read 「Risks and Backup」 first. Not affiliated with
+> Tencent or Apple.
+
+> 本文件同时包含 **简体中文** 与 **English** 两个版本，向下滚动即可查看对应内容。
+> This README contains **both Simplified Chinese and English**; scroll down for your language of choice.
+
+---
+
+## 简体中文
+
+### 目录
 
 - [功能](#功能)
 - [状态](#状态)
@@ -26,7 +42,7 @@
 - [隐私与安全](#隐私与安全)
 - [许可](#许可)
 
-## 功能
+### 功能
 
 - **私聊自动回复**；**群聊触发可多选**（@ / 关键词 / 拍一拍；「所有消息」独占），并支持学习群昵称后的纯文本 @ 兜底；
   拍一拍只认「拍的是机器人」的目标，拍别人不会唤醒；可在机器人页开启「拍一拍回复」（默认关闭），配置 AI 前/后自定义文字和/或 AI 回复；
@@ -57,7 +73,7 @@
 - **关闭窗口即隐藏**，可从菜单栏（或 Dock，若启用）恢复；退出仅保留 ⌥⌘Q 与菜单栏入口
 - **低开销**：无 WebView / Electron；bridge 仅机器人开启时运行；SQLite WAL；日志环形缓冲
 
-## 状态
+### 状态
 
 | 模块 | 状态 |
 | --- | --- |
@@ -67,7 +83,7 @@
 | 4.1.12.53 接收 + 主动发送 | ✅ 真机全链路，单条自动回复稳定 |
 | 4.1.15.55 接收（Message finalizer） | ✅ 历史验证 |
 | 4.1.15.55 发送（R3 原生发送） | ✅ 文本私聊真机验证（2026-10-20）；设置内可开关 |
-| 通讯录昵称 / 群名（本机只读） | ✅ 4.1.15.55 真机验证（2026-10-21，22 条：21 联系人 + 1 群）， |
+| 通讯录昵称 / 群名（本机只读） | ✅ 4.1.15.55 真机验证（2026-10-21） |
 | 安装 / 备份 / 重签工具链 | ✅ 已在微信副本上校验通过 |
 | App 打包脚本 / 图标 / Info.plist | ✅ |
 | 首版验收 | ✅ 2026-10-20 通过 |
@@ -76,7 +92,7 @@
 与 **4.1.15.55 (270135)**（Message finalizer 接收 + R3 文本发送；R3 首次使用需在本机微信
 手动发一条消息以捕获发送句柄）。
 
-## 架构
+### 架构
 
 ```
 WeChatAI.app (SwiftUI)
@@ -97,7 +113,7 @@ WeChatAI.app (SwiftUI)
 详细契约见 [`docs/architecture.md`](docs/architecture.md)，记忆设计见 [`docs/memory.md`](docs/memory.md)，
 完整文档索引见 [`docs/README.md`](docs/README.md)，变更历史见 [`CHANGELOG.md`](CHANGELOG.md)。
 
-## 快速开始
+### 快速开始
 
 > **从 GitHub 下载 ZIP？**
 > - **普通用户**：请下载 **Releases** 里的 `WeChat-AI-<版本>.zip`（已编译 App，免 Xcode）；
@@ -135,7 +151,7 @@ open "$HOME/Applications/WeChat AI.app"
 > **只想本地联调、不想碰微信？** 见 [`devtools/README.md`](devtools/README.md)：
 > 用 `mock_onebot.py` + `mock_ai.py` 即可跑通「收消息 → 规则/人格 → AI → 发送」全链路。
 
-## 手动管理微信 Hook
+### 手动管理微信 Hook
 
 ```bash
 bash tools/manage_wechat.sh status     # 查看版本/运行/注入/备份状态（JSON）
@@ -146,7 +162,7 @@ bash tools/manage_wechat.sh restore    # 还原官方 App
 
 `install` 需要先完全退出微信；App 内会先备份再修改，并提供一键还原入口。
 
-## 目录结构
+### 目录结构
 
 ```
 Mac-WeChat-ChatBot/
@@ -179,7 +195,7 @@ Mac-WeChat-ChatBot/
 以下目录 / 文件**可随时重建，不入库**：`app/.build*`、`bridge/onebot`、`dist/`、`log/`、
 `bridge/log/`、`hook/gadget/FridaGadget.dylib`、`_research/`（本地研究证据）与 `_local/`（本地开发笔记/探针）。
 
-## 开发与测试
+### 开发与测试
 
 环境准备、构建、测试与常见任务见本节；架构与契约见 [`docs/` 文档索引](docs/README.md)。
 
@@ -215,7 +231,7 @@ GitHub Actions 只跑可在 Linux 上完成的检查（文档链接、脚本语�
 - 提交前跑 `bash scripts/check.sh` 与 `git status`；不要提交构建产物、二进制和真实会话数据。
 - `scripts/check_docs.py` 会校验 Markdown 相对链接；新增文档请在 `docs/README.md` 登记。
 
-## 清理、打包与分享
+### 清理、打包与分享
 
 ```bash
 bash scripts/clean.sh                      # 预览将删除的构建缓存/产物
@@ -240,7 +256,7 @@ bash scripts/package_release.sh      # 或 make release
 git archive --format=zip --prefix=Mac-WeChat-ChatBot/ -o Mac-WeChat-ChatBot-src.zip HEAD
 ```
 
-### 发布前检查清单
+#### 发布前检查清单
 
 准备上传到 GitHub 时按顺序确认：
 
@@ -263,7 +279,7 @@ git push -u origin main
 > 仓库不包含截图；如需本地留存，请放在 `_research/`（已忽略），不要提交到 `docs/images/`。
 > 仓库默认不含真实 wxid、群 ID、聊天记录、API Key 或本地路径。
 
-## 风险与备份
+### 风险与备份
 
 - 修改 `/Applications/WeChat.app` 会破坏 Tencent 官方签名，**微信更新后可能失效**；
   脚本会尽力关闭 Sparkle 自动更新，但请在微信更新后重新检测并安装。
@@ -273,7 +289,7 @@ git push -u origin main
 - 所有本地服务只监听 `127.0.0.1`；API Key 存 macOS Keychain；配置文件不含明文密钥。
 - 本项目与腾讯、Apple 无关联。
 
-## 隐私与安全
+### 隐私与安全
 
 - **密钥**：仅保存在 macOS Keychain（`service = com.gusionw.wechatai`），`config.json` 只记录引用名。
 - **通讯录读取密钥**：只在本机内存与受限缓存（0600）中，不写日志、不入库；
@@ -283,7 +299,7 @@ git push -u origin main
   示例文本与测试数据均已脱敏。
 - **报告问题**：安全或隐私问题请走私密渠道（不要开公开 issue），更不要粘贴密钥、wxid 或聊天内容。
 
-## 许可
+### 许可
 
 GPL-3.0，见 [`LICENSE`](LICENSE)。基于以下开源工作（详见 [`ThirdPartyNotices.txt`](ThirdPartyNotices.txt)）：
 
@@ -292,3 +308,327 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于以下开源工作（详见 [`ThirdPa
 - [Frida](https://frida.re)（LGPL-2.1）
 
 仅供学习研究；请遵守微信用户协议与当地法律。
+
+---
+
+## English
+
+### Table of Contents
+
+- [Features](#features)
+- [Status](#status)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Managing the WeChat Hook Manually](#managing-the-wechat-hook-manually)
+- [Repository Layout](#repository-layout)
+- [Build and Test](#build-and-test)
+- [Clean, Package and Share](#clean-package-and-share)
+- [Risks and Backup](#risks-and-backup)
+- [Privacy and Security](#privacy-and-security)
+- [License](#license)
+
+### Features
+
+- **Automatic private-chat replies**; **multi-select group triggers** (@ / keywords / pat-pat, with
+  "all messages" being exclusive) plus a plain-text @ fallback learned from group nicknames. A
+  pat-pat only fires when *the bot* is patted — patting someone else does not wake it. Optional
+  "reply to pat-pat" (off by default) with custom text before/after the AI reply; group replies can
+  also **@ the person who patted** (a real `<atuserlist>` @). Sending pat-pat back has been removed.
+- **Unified allow / block list (conversation ID or user wxid) / cooldown / per-minute rate limit /
+  working hours**, each overridable per conversation.
+- **Per-conversation personas**, system prompts and model overrides; temperature configured per model.
+- **Memory system**: a 10-message short-term window → older messages outside it are summarized in
+  batches of 8. The memory screen organises conversations as folders; combined weight = base weight
+  × content importance × recall reinforcement × a 30-day half-life, and the base weight is adjustable
+  in the memory editor (0.1–10×), with core memories also sorted by weight. Auto summaries are capped
+  at 600 characters and compressed automatically; core memories follow their conversation / global
+  scope and are never overwritten by auto summaries.
+- **Sleep prevention** (General settings): never / only on AC power / always. It only blocks idle
+  system sleep, never lid-close sleep.
+- **Human-like pacing**: random delay, single-message replies by default, dry-run. Multi-part sending
+  stays off by default because of the 4.1.12 canary risk.
+- **Reply progress countdown**: after an incoming message the UI shows AI generation time, the
+  "sending in N seconds" countdown, delivery receipts and failure reasons — synchronised across the
+  detail header, composer and conversation row, so you can tell exactly where it is stuck.
+- **4.1.15.55 native text sending (R3)**: toggle under Settings → Hook (on by default). Without a send
+  handle, messages queue up and are re-sent after you manually send one message in WeChat on this Mac.
+  Text only; 4.1.12 still uses legacy and the two paths are isolated.
+- **Real contact nicknames / group names**: a **read-only** local contact-directory read maps wxids in
+  incoming events to real nicknames / group names, falling back to the directory when the group-member
+  cache misses. Everything stays on this Mac; see 「Privacy and Security」 below.
+- **Multiple AI channels**: DeepSeek by default, plus OpenAI, Ollama or any OpenAI-compatible endpoint.
+- **Images / voice / emoji / files**: text, emoji and group @ verified; the image/file download hook is
+  still missing for 4.1.12 (see Status).
+- **Scheduled proactive messages**, a **live conversation board** and **runtime logs**.
+- **Chinese / English UI**: switch in the first-run wizard (top-right) or under
+  Settings → General → Interface language — follow system / Simplified Chinese / English, applied instantly.
+- **Native Apple-style UI**: Liquid Glass, SF Symbols, light / dark, keyboard shortcuts, menu bar.
+  Closing the Dock icon still leaves the window reachable from the menu bar; duplicate toggles on the
+  same page collapsed into single entry points; clicking the active conversation row (or the sidebar
+  "Conversations" item) collapses the chat detail.
+- **Closing the window hides it**; restore from the menu bar (or Dock, if enabled). Quit only via ⌥⌘Q
+  or the menu-bar entry.
+- **Low overhead**: no WebView / Electron; the bridge only runs while the bot is on; SQLite WAL;
+  ring-buffer logging.
+
+### Status
+
+| Component | Status |
+| --- | --- |
+| SwiftUI app (9 sidebar pages + first-run wizard) | ✅ Builds, E2E on a real device |
+| Swift core (OneBot, AI, SQLite memory, trigger rules, scheduler) | ✅ Builds / 126 tests passing |
+| OneBot bridge (Go + frida-core) | ✅ Builds / auth / real-device attach / 60 tests passing |
+| 4.1.12.53 receive + active send | ✅ Full real-device chain, single auto-reply stable |
+| 4.1.15.55 receive (Message finalizer) | ✅ Verified earlier |
+| 4.1.15.55 send (R3 native sending) | ✅ Text private-chat verified on device (2026-10-20); toggle in Settings |
+| Contact nicknames / group names (local, read-only) | ✅ Verified on 4.1.15.55 (2026-10-21) |
+| Install / backup / re-sign toolchain | ✅ Validated on a copy of WeChat |
+| App packaging scripts / icon / Info.plist | ✅ |
+| First release acceptance | ✅ Passed 2026-10-20 |
+
+Target environment: Apple Silicon, macOS 26+, Xcode 27. Supported WeChat versions:
+**4.1.12.53 (269365)** (legacy send/receive) and **4.1.15.55 (270135)** (Message-finalizer receive +
+R3 text sending; the first R3 send requires you to send one message in WeChat on this Mac to capture
+the send handle).
+
+### Architecture
+
+```
+WeChatAI.app (SwiftUI)
+  ├── UI / trigger rules / personas / memory / scheduler / logs
+  ├── OneBotClient  ── WS/HTTP 127.0.0.1:58080 ──┐
+  ├── AIClient (OpenAI-compatible, SSE)          │
+  ├── MemoryStore (SQLite WAL)                   │
+  ├── SleepPreventionCenter (IOKit assertion)    │
+  └── HookManager (detect/backup/install/start-stop) │
+                                                 ▼
+                                      bridge/onebot (Go)
+                                        ├── frida-core → Gadget 127.0.0.1:27042
+                                        └── hook/script.js → WeChat 4.x low-level send/receive
+                                                 ▲
+                                      WeChat.app (single official instance, ad-hoc re-signed)
+```
+
+Contracts live in [`docs/architecture.md`](docs/architecture.md), the memory design in
+[`docs/memory.md`](docs/memory.md), the full document index in [`docs/README.md`](docs/README.md),
+and the history in [`CHANGELOG.md`](CHANGELOG.md).
+
+### Quick Start
+
+> **Downloading a ZIP from GitHub?**
+> - **Regular users**: download `WeChat-AI-<version>.zip` from **Releases** (a prebuilt app, no Xcode
+>   needed). Unzip, then right-click → Open; the first-run wizard installs the hook. Full steps in
+>   [docs/install.md](docs/install.md).
+> - **Source ZIP only**: requires Xcode 27 — build it yourself with this section. The source archive
+>   **does not** contain a built app, `bridge/onebot` or `FridaGadget.dylib`.
+
+**Requirements**: Apple Silicon, macOS 26+, Xcode 27 (with command-line tools). Go 1.25 and Frida
+Gadget 17.8.0 are downloaded and checksum-verified by the scripts at pinned versions — no manual install.
+
+```bash
+# 0. Get the sources
+git clone https://github.com/Gusion1017/Mac-WeChat-ChatBot.git
+cd Mac-WeChat-ChatBot
+
+# 1. Download Frida Gadget (writes hook/gadget/FridaGadget.dylib)
+bash scripts/fetch_gadget.sh
+
+# 2. Build the OneBot bridge (writes bridge/onebot)
+bash scripts/build_bridge.sh
+
+# 3. Build and package the SwiftUI app (produces dist/WeChat AI.app)
+bash scripts/build_app.sh
+
+# 4. Install to ~/Applications and launch
+bash scripts/install_app.sh
+open "$HOME/Applications/WeChat AI.app"
+
+# 5. First-run wizard: detect WeChat → back up and install Gadget → configure AI → start
+```
+
+You can also run straight from `dist/`: `open "dist/WeChat AI.app"`.
+In a restricted sandbox (CI / agent), build with `SWIFT_DISABLE_SANDBOX=1 bash scripts/build_app.sh`.
+
+> **Only want local integration testing without touching WeChat?** See
+> [`devtools/README.md`](devtools/README.md): `mock_onebot.py` + `mock_ai.py` cover the whole
+> receive → rules/persona → AI → send chain.
+
+### Managing the WeChat Hook Manually
+
+```bash
+bash tools/manage_wechat.sh status     # version / running / injected / backup state (JSON)
+bash tools/manage_wechat.sh backup     # full backup of the official app (zip, ~650 MB)
+bash tools/manage_wechat.sh install    # inject Gadget + ad-hoc re-sign keeping entitlements
+bash tools/manage_wechat.sh restore    # restore the official app
+```
+
+`install` requires WeChat to be fully quit. The app backs up before modifying anything and offers a
+one-click restore.
+
+### Repository Layout
+
+```
+Mac-WeChat-ChatBot/
+├── app/                     SwiftUI macOS app (SwiftPM)
+│   ├── Package.swift        macOS 26 / Swift 6.2
+│   ├── Sources/WeChatBot/   Models / Core / Services / DesignSystem / Views
+│   ├── Tests/WeChatAITests/ 126 unit tests
+│   └── Packaging/           packaging template / Info.plist / en.lproj, zh-Hans.lproj
+├── bridge/                  OneBot Go bridge (GPL-3.0 derivative, includes proto/)
+│   └── NOTICE               upstream origin and the list of modified/new files
+├── hook/                    Frida injection script
+│   ├── script.js            single source of truth (version adaptation + R3)
+│   ├── versions/*.json      WeChat version address tables
+│   └── gadget/              FridaGadget.config (the .dylib is downloaded at runtime, not committed)
+├── tools/                   Mach-O injection, WeChat backup/install/restore
+├── scripts/                 build, package, install, run, clean, self-check
+├── devtools/                local mocks (integration testing without WeChat / Frida)
+├── assets/                  app icon sources (.iconset / .icns)
+├── docs/                    architecture, contracts, services, bridge, memory and UI design
+├── .github/                 release-note categories and the docs CI
+├── .editorconfig            encoding, indentation and line-ending conventions
+├── .gitattributes           newline normalisation and generated-code markers
+├── .gitignore               build output, logs and privacy-file ignore rules
+├── Makefile                 common dev commands (make help)
+├── LICENSE                  full GPL-3.0 text
+├── CHANGELOG.md             change log
+└── ThirdPartyNotices.txt    third-party open-source notices
+```
+
+These paths are **rebuildable and never committed**: `app/.build*`, `bridge/onebot`, `dist/`, `log/`,
+`bridge/log/`, `hook/gadget/FridaGadget.dylib`, `_research/` (local research evidence) and
+`_local/` (local dev notes / probes).
+
+### Build and Test
+
+Environment setup, builds, tests and common tasks are in this section; architecture and contracts live
+in the [docs index](docs/README.md).
+
+```bash
+# Static checks + Swift tests in one command
+bash scripts/check.sh
+
+# Swift: build + unit tests (126/126)
+cd app && swift build && swift test
+
+# Go bridge: Go tests run as part of the build (60 tests)
+bash scripts/build_bridge.sh
+
+# Build the bridge only (skip tests)
+BRIDGE_SKIP_TESTS=1 bash scripts/build_bridge.sh
+
+# After editing hook/script.js, sync the bridge runtime copy
+bash scripts/sync_hook_script.sh
+```
+
+You can also use the root `Makefile` (`make help`): `make setup` / `make bridge` / `make app` /
+`make release` / `make test` / `make check` / `make clean`. In a restricted sandbox (CI / agent) add
+`SWIFT_DISABLE_SANDBOX=1`.
+
+GitHub Actions only runs checks that work on Linux (docs links, script syntax, hook/bridge copy
+equality, no build artifacts/screenshots in the repo). Swift and Go builds need macOS / a real
+device — run them locally.
+
+Conventions:
+
+- **Docs first**: `docs/` is the source of truth; change the docs before the code for interface or
+  behaviour changes (see `docs/architecture.md` §2).
+- Use a separate scratch path for parallel builds (e.g. `.build-core` / `.build-ui`) to avoid SwiftPM
+  lock contention.
+- Hook addresses may only be marked usable after verifying text send/receive at runtime.
+- Run `bash scripts/check.sh` and `git status` before committing; never commit build output, binaries
+  or real conversation data.
+- `scripts/check_docs.py` validates relative Markdown links; register new documents in `docs/README.md`.
+
+### Clean, Package and Share
+
+```bash
+bash scripts/clean.sh                      # preview the build caches/artifacts to delete
+bash scripts/clean.sh --yes                # clean app/.build*, bridge/onebot, dist/, logs, __pycache__
+bash scripts/clean.sh --yes --keep-dist    # keep the dist/ artifacts
+bash scripts/clean.sh --yes --all          # also delete the Frida Gadget (needs re-download)
+```
+
+Cleaning only removes regenerable files — it never touches sources, `hook/versions/`, `assets/`,
+`docs/` or `_research/`, nor the app installed in `~/Applications`; rebuild with
+[Quick Start](#quick-start).
+
+Build a GitHub-Releases-ready app archive (with SHA256; build the bridge and Gadget first):
+
+```bash
+bash scripts/package_release.sh      # or make release
+# artifacts: dist/WeChat-AI-<version>.zip / .sha256
+```
+
+Export a source archive containing **only Git-tracked files** (build output, logs, the Gadget and
+research data are excluded):
+
+```bash
+git archive --format=zip --prefix=Mac-WeChat-ChatBot/ -o Mac-WeChat-ChatBot-src.zip HEAD
+```
+
+#### Pre-release Checklist
+
+Confirm in order before uploading to GitHub:
+
+- [ ] `bash scripts/check.sh --with-go` passes (126 Swift tests, 60 Go tests, docs links, script
+      syntax, copy consistency).
+- [ ] `bash scripts/clean.sh --yes` cleans build caches, artifacts and logs (add `--keep-dist` to keep
+      `dist/`).
+- [ ] `git status --short` shows only the expected sources and docs — no `_local/`, `_research/`,
+      `dist/`, `log/`, `*.sqlite*` or `*.dmg`.
+- [ ] `git ls-files | grep -Ei '(\.(dylib|dmg|zip|sqlite|sqlite3|db|log)$|^bridge/onebot$)'` prints
+      nothing.
+- [ ] The repo contains no real wxid, group ID, phone number, chat content, screenshots, API key or
+      OneBot token.
+- [ ] Export the `git archive` above, spot-check its contents, then create the GitHub repo and push.
+
+Upload to GitHub:
+
+```bash
+git remote add origin git@github.com:Gusion1017/Mac-WeChat-ChatBot.git
+git push -u origin main
+```
+
+> **Never share the whole working directory as an archive**: `_research/` (real-device probe logs and
+> addresses), `dist/`, `log/` and `.git/` may contain real conversation data or old history. Share
+> sources with the `git archive` command above, or package only Git-tracked files. The repo contains
+> no screenshots; keep local ones in `_research/` (ignored) and out of `docs/images/`. The repo
+> contains no real wxid, group ID, chat records, API keys or local paths.
+
+### Risks and Backup
+
+- Modifying `/Applications/WeChat.app` breaks Tencent's official signature and **may stop working
+  after a WeChat update**. The scripts try to disable Sparkle auto-update, but please re-detect and
+  re-install after updating WeChat.
+- Unofficial clients carry **account risk**; judge for yourself and prefer a personal test account.
+- `install` backs everything up to `~/Library/Application Support/WeChatAI/backups/` first; `restore`
+  brings back the official signature and app. Chat data lives in the WeChat container and is not
+  deleted by install / restore.
+- All local services listen on `127.0.0.1` only; the API key lives in the macOS Keychain and config
+  files hold no plaintext secrets.
+- This project is not affiliated with Tencent or Apple.
+
+### Privacy and Security
+
+- **Keys**: stored only in the macOS Keychain (`service = com.gusionw.wechatai`); `config.json` merely
+  records the reference name.
+- **Contact-directory key**: kept only in local memory and a restricted cache (0600) — never logged,
+  never committed. Deleting the cache requires signing in to WeChat again to recollect. For your own
+  device and account only.
+- **Data**: messages, memory and logs all stay on this Mac; no telemetry, no cloud sync, no WebView.
+- **Repository**: contains no real wxid, group ID, chat records, CDN keys, API keys or UI / device
+  screenshots; sample text and test data are sanitised.
+- **Reporting**: send security or privacy reports through a private channel (not a public issue), and
+  never paste keys, wxids or chat content.
+
+### License
+
+GPL-3.0 — see [`LICENSE`](LICENSE). Built on the following open-source work (see
+[`ThirdPartyNotices.txt`](ThirdPartyNotices.txt)):
+
+- [yincongcyincong/weixin-macos](https://github.com/yincongcyincong/weixin-macos) (hook / OneBot / addrfind)
+- [xiaoguiwucan/wechat-mac-hook](https://github.com/xiaoguiwucan/wechat-mac-hook) (macOS 4.x integration and ops)
+- [Frida](https://frida.re) (LGPL-2.1)
+
+For learning and research only; comply with WeChat's terms of service and local law.
