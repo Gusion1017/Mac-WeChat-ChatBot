@@ -91,18 +91,18 @@ struct ProviderRow: View {
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .help(provider.enabled ? "停用此通道" : "启用此通道")
-                    .accessibilityLabel("启用 \(provider.name)")
+                    .accessibilityLabel(L("启用 \(provider.name)"))
                 }
 
                 HStack(spacing: 6) {
-                    Button("编辑") { onEdit() }
+                    Button(L("编辑")) { onEdit() }
                         .buttonStyle(.glass)
                         .controlSize(.small)
                     Menu {
-                        Button("编辑…", action: onEdit)
-                        Button("测试连接", action: onTest)
+                        Button(L("编辑…"), action: onEdit)
+                        Button(L("测试连接"), action: onTest)
                         Divider()
-                        Button("删除通道…", role: .destructive, action: onDelete)
+                        Button(L("删除通道…"), role: .destructive, action: onDelete)
                             .disabled(!canDelete)
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -111,8 +111,8 @@ struct ProviderRow: View {
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
-                    .help("更多操作")
-                    .accessibilityLabel("\(provider.name) 更多操作")
+                    .help(L("更多操作"))
+                    .accessibilityLabel(L("\(provider.name) 更多操作"))
                 }
             }
         }
@@ -152,24 +152,24 @@ struct ProviderRow: View {
             Button {
                 onTest()
             } label: {
-                Label("测试", systemImage: "bolt.horizontal")
+                Label(L("测试"), systemImage: "bolt.horizontal")
                     .font(.caption2)
             }
             .buttonStyle(.glass)
             .controlSize(.small)
-            .help("测试此通道连接")
+            .help(L("测试此通道连接"))
         case .testing:
             HStack(spacing: 4) {
                 ProgressView().controlSize(.mini)
-                Text("测试中").font(.caption2).foregroundStyle(.secondary)
+                Text(L("测试中")).font(.caption2).foregroundStyle(.secondary)
             }
         case .success(let detail):
-            Label("连接正常", systemImage: "checkmark.circle.fill")
+            Label(L("连接正常"), systemImage: "checkmark.circle.fill")
                 .font(.caption2)
                 .foregroundStyle(Theme.success)
                 .help(detail)
         case .failure(let detail):
-            Label("连接失败", systemImage: "xmark.circle.fill")
+            Label(L("连接失败"), systemImage: "xmark.circle.fill")
                 .font(.caption2)
                 .foregroundStyle(Theme.danger)
                 .help(detail)

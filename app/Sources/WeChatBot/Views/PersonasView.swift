@@ -16,7 +16,7 @@ struct PersonasView: View {
             Button {
                 addPersona()
             } label: {
-                Label("添加人格", systemImage: "plus")
+                Label(L("添加人格"), systemImage: "plus")
             }
             .buttonStyle(.glassProminent)
             .tint(Theme.accent)
@@ -68,12 +68,12 @@ struct PersonasView: View {
             ),
             presenting: pendingDelete
         ) { persona in
-            Button("删除 \(persona.name)", role: .destructive) {
+            Button(L("删除") + " \(persona.name)", role: .destructive) {
                 delete(persona)
             }
-            Button("取消", role: .cancel) { pendingDelete = nil }
+            Button(L("取消"), role: .cancel) { pendingDelete = nil }
         } message: { _ in
-            Text("使用该人格的会话会自动回退到默认人格。")
+            Text(L("使用该人格的会话会自动回退到默认人格。"))
         }
     }
 
@@ -177,7 +177,7 @@ struct PersonaEditorSheet: View {
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(isNew ? "添加人格" : "编辑人格").font(.headline)
-                    Text("决定系统提示词与模型覆盖")
+                    Text(L("决定系统提示词与模型覆盖"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -191,12 +191,12 @@ struct PersonaEditorSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 15) {
                     FormField(label: "名称") {
-                        TextField("例如：温柔助手", text: $draft.name)
+                        TextField(L("例如：温柔助手"), text: $draft.name)
                             .textFieldStyle(.roundedBorder)
                     }
 
                     FormField(label: "简介", hint: "用于人格列表展示，可留空") {
-                        TextField("一句话描述这个人格", text: $draft.summary)
+                        TextField(L("一句话描述这个人格"), text: $draft.summary)
                             .textFieldStyle(.roundedBorder)
                     }
 
@@ -214,7 +214,7 @@ struct PersonaEditorSheet: View {
                                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                                     .strokeBorder(Theme.hairline, lineWidth: 1)
                             }
-                            .accessibilityLabel("系统提示词")
+                            .accessibilityLabel(L("系统提示词"))
                     }
 
                     FormField(
@@ -244,7 +244,7 @@ struct PersonaEditorSheet: View {
 
             HStack(spacing: 9) {
                 Spacer()
-                Button("取消") { dismiss() }
+                Button(L("取消")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button(isNew ? "添加人格" : "保存") { save() }
                     .buttonStyle(.borderedProminent)

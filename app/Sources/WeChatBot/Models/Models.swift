@@ -18,15 +18,15 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
 
     var title: String {
         switch self {
-        case .dashboard: "总览"
-        case .conversations: "会话"
-        case .bot: "机器人"
-        case .ai: "AI 模型"
-        case .personas: "人格设定"
-        case .memory: "记忆库"
-        case .schedules: "定时任务"
-        case .logs: "运行日志"
-        case .settings: "设置"
+        case .dashboard: L("总览")
+        case .conversations: L("会话")
+        case .bot: L("机器人")
+        case .ai: L("AI 模型")
+        case .personas: L("人格设定")
+        case .memory: L("记忆库")
+        case .schedules: L("定时任务")
+        case .logs: L("运行日志")
+        case .settings: L("设置")
         }
     }
 
@@ -66,9 +66,9 @@ enum ConversationKind: String, Codable, Hashable {
 
     var label: String {
         switch self {
-        case .direct: "私聊"
-        case .group: "群聊"
-        case .official: "公众号"
+        case .direct: L("私聊")
+        case .group: L("群聊")
+        case .official: L("公众号")
         }
     }
 
@@ -465,11 +465,11 @@ enum ReplyStage: String, Sendable, Equatable {
 
     var label: String {
         switch self {
-        case .generating: "AI 正在生成回复"
-        case .waitingToSend: "等待发送"
-        case .sending: "正在发送"
-        case .completed: "回复已发送"
-        case .failed: "回复失败"
+        case .generating: L("AI 正在生成回复")
+        case .waitingToSend: L("等待发送")
+        case .sending: L("正在发送")
+        case .completed: L("回复已发送")
+        case .failed: L("回复失败")
         }
     }
 
@@ -541,8 +541,8 @@ enum ProviderKind: String, Codable, CaseIterable, Hashable, Identifiable {
         switch self {
         case .deepSeek: "DeepSeek"
         case .openAI: "OpenAI"
-        case .ollama: "Ollama 本地"
-        case .custom: "自定义兼容"
+        case .ollama: L("Ollama 本地")
+        case .custom: L("自定义兼容")
         }
     }
 
@@ -610,11 +610,11 @@ enum TriggerMode: String, Codable, CaseIterable, Hashable, Identifiable {
     /// 群聊触发方式展示用：私聊语义不适用，省略「或私聊」。
     var groupLabel: String {
         switch self {
-        case .always: "所有消息"
+        case .always: L("所有消息")
         case .mention: "@"
-        case .keyword: "关键词"
-        case .pat: "拍一拍"
-        case .prefix: "命令前缀"
+        case .keyword: L("关键词")
+        case .pat: L("拍一拍")
+        case .prefix: L("命令前缀")
         }
     }
 
@@ -634,10 +634,10 @@ enum ScheduleRepeat: String, Codable, CaseIterable, Hashable, Identifiable {
 
     var label: String {
         switch self {
-        case .once: "一次"
-        case .daily: "每天"
-        case .weekly: "每周"
-        case .weekdays: "工作日"
+        case .once: L("一次")
+        case .daily: L("每天")
+        case .weekly: L("每周")
+        case .weekdays: L("工作日")
         }
     }
 }
@@ -754,10 +754,10 @@ enum LogLevel: String, Codable, CaseIterable, Hashable, Identifiable {
 
     var label: String {
         switch self {
-        case .debug: "调试"
-        case .info: "信息"
-        case .warning: "警告"
-        case .error: "错误"
+        case .debug: L("调试")
+        case .info: L("信息")
+        case .warning: L("警告")
+        case .error: L("错误")
         }
     }
 
@@ -791,13 +791,13 @@ enum HookState: String, Codable, Hashable {
 
     var label: String {
         switch self {
-        case .unknown: "未知"
-        case .notInstalled: "未安装"
-        case .installed: "已安装"
-        case .wechatNotRunning: "微信未运行"
-        case .waitingForGadget: "等待注入"
-        case .bridgeStarting: "桥接启动中"
-        case .connected: "已连接"
+        case .unknown: L("未知")
+        case .notInstalled: L("未安装")
+        case .installed: L("已安装")
+        case .wechatNotRunning: L("微信未运行")
+        case .waitingForGadget: L("等待注入")
+        case .bridgeStarting: L("桥接启动中")
+        case .connected: L("已连接")
         case .failed: "异常"
         }
     }

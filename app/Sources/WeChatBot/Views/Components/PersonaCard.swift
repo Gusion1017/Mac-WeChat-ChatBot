@@ -39,11 +39,11 @@ struct PersonaCard: View {
                 }
                 Spacer(minLength: 2)
                 Menu {
-                    Button("编辑…", action: onEdit)
-                    Button("设为默认人格", action: onSetDefault)
+                    Button(L("编辑…"), action: onEdit)
+                    Button(L("设为默认人格"), action: onSetDefault)
                         .disabled(isDefault)
                     Divider()
-                    Button("删除人格…", role: .destructive, action: onDelete)
+                    Button(L("删除人格…"), role: .destructive, action: onDelete)
                         .disabled(isDefault)
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -52,7 +52,7 @@ struct PersonaCard: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
-                .accessibilityLabel("\(persona.name) 更多操作")
+                .accessibilityLabel(L("\(persona.name) 更多操作"))
             }
 
             if !persona.summary.isEmpty {
@@ -76,7 +76,7 @@ struct PersonaCard: View {
                     Label(model, systemImage: "cpu")
                 }
                 Spacer(minLength: 4)
-                Button("编辑") { onEdit() }
+                Button(L("编辑")) { onEdit() }
                     .buttonStyle(.glass)
                     .controlSize(.small)
             }

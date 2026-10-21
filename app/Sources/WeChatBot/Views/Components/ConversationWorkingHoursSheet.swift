@@ -33,7 +33,7 @@ struct ConversationWorkingHoursSheet: View {
             HStack(spacing: 10) {
                 IconTile(symbol: "clock.badge.checkmark", tint: Theme.warning, size: 30)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("会话工作时间").font(.headline)
+                    Text(L("会话工作时间")).font(.headline)
                     Text(conversationTitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -48,21 +48,21 @@ struct ConversationWorkingHoursSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Picker("时段来源", selection: $followsGlobal) {
-                        Text("跟随全局").tag(true)
-                        Text("自定义").tag(false)
+                    Picker(L("时段来源"), selection: $followsGlobal) {
+                        Text(L("跟随全局")).tag(true)
+                        Text(L("自定义")).tag(false)
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
 
                     if followsGlobal {
                         VStack(alignment: .leading, spacing: 7) {
-                            Text("当前全局工作时间")
+                            Text(L("当前全局工作时间"))
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                             Text(globalSummary)
                                 .font(.callout)
-                            Text("之后在「机器人 → 工作时间」修改全局设置时，此会话会同步生效。")
+                            Text(L("之后在「机器人 → 工作时间」修改全局设置时，此会话会同步生效。"))
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                         }
@@ -70,7 +70,7 @@ struct ConversationWorkingHoursSheet: View {
                         .padding(13)
                         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     } else {
-                        Toggle("启用时间限制", isOn: $hours.enabled)
+                        Toggle(L("启用时间限制"), isOn: $hours.enabled)
                             .toggleStyle(.switch)
                             .font(.callout)
 
@@ -100,12 +100,12 @@ struct ConversationWorkingHoursSheet: View {
                                     displayedComponents: .hourAndMinute
                                 )
                                 Spacer()
-                                Text("跨夜时段会自动识别")
+                                Text(L("跨夜时段会自动识别"))
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
                             }
                         } else {
-                            Text("关闭限制后，此会话在任何时间都会自动回复。")
+                            Text(L("关闭限制后，此会话在任何时间都会自动回复。"))
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                         }
@@ -118,9 +118,9 @@ struct ConversationWorkingHoursSheet: View {
 
             HStack(spacing: 9) {
                 Spacer()
-                Button("取消") { dismiss() }
+                Button(L("取消")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button("保存") {
+                Button(L("保存")) {
                     onSave(followsGlobal ? nil : hours)
                     dismiss()
                 }

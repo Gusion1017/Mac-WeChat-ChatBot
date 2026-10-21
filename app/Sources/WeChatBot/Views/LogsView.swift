@@ -67,7 +67,7 @@ struct LogsView: View {
             Button {
                 exportLogs()
             } label: {
-                Label("导出", systemImage: "square.and.arrow.up")
+                Label(L("导出"), systemImage: "square.and.arrow.up")
             }
             .buttonStyle(.glass)
             .disabled(displayLogs.isEmpty)
@@ -75,7 +75,7 @@ struct LogsView: View {
             Button {
                 showClearConfirm = true
             } label: {
-                Label("清空", systemImage: "trash")
+                Label(L("清空"), systemImage: "trash")
             }
             .buttonStyle(.glass)
             .disabled(feed.logs.isEmpty)
@@ -111,8 +111,8 @@ struct LogsView: View {
             }
 
             HStack(spacing: 8) {
-                Picker("来源", selection: $sourceFilter) {
-                    Text("全部来源").tag(String?.none)
+                Picker(L("来源"), selection: $sourceFilter) {
+                    Text(L("全部来源")).tag(String?.none)
                     ForEach(feed.sources, id: \.self) { source in
                         Text(source).tag(Optional(source))
                     }
@@ -121,11 +121,11 @@ struct LogsView: View {
                 .pickerStyle(.menu)
                 .frame(width: 160)
 
-                Toggle("自动滚动", isOn: $autoFollow)
+                Toggle(L("自动滚动"), isOn: $autoFollow)
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .font(.caption2)
-                    .help("新日志到达时自动滚动到底部")
+                    .help(L("新日志到达时自动滚动到底部"))
 
                 Spacer()
 
@@ -140,7 +140,7 @@ struct LogsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Text("\(displayLogs.count) / \(feed.logs.count) 条")
+                Text(L("\(displayLogs.count) / \(feed.logs.count) 条"))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
             }

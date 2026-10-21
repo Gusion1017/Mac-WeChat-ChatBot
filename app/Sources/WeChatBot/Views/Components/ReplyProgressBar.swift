@@ -46,7 +46,7 @@ struct ReplyProgressBar: View {
                         }
                     }
                     if let detail = detailText {
-                        Text(detail)
+                        Text(L(detail))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -71,8 +71,8 @@ struct ReplyProgressBar: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help("收起状态")
-                    .accessibilityLabel("收起回复状态")
+                    .help(L("收起状态"))
+                    .accessibilityLabel(L("收起回复状态"))
                 }
             }
 
@@ -98,7 +98,7 @@ struct ReplyProgressBar: View {
                 .strokeBorder(tint.opacity(0.16), lineWidth: 1)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("回复状态：\(progress.stage.label)，\(timerText(now: now))")
+        .accessibilityLabel(L("回复状态：\(progress.stage.label)，\(timerText(now: now))"))
     }
 
     // MARK: Derived
@@ -220,7 +220,7 @@ struct ReplyStatusBadge: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("回复状态：\(progress.stage.label)，\(text(now: Date()))")
+        .accessibilityLabel(L("回复状态：\(progress.stage.label)，\(text(now: Date()))"))
     }
 
     private func badge(now: Date) -> some View {

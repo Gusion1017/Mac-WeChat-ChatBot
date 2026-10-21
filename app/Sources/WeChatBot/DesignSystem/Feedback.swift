@@ -28,9 +28,9 @@ struct EmptyState: View {
                     .foregroundStyle(Theme.accent)
             }
             VStack(spacing: 4) {
-                Text(title).font(.headline)
+                Text(L(title)).font(.headline)
                 if let message {
-                    Text(message)
+                    Text(L(message))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -39,7 +39,7 @@ struct EmptyState: View {
                 }
             }
             if let actionTitle, let action {
-                Button(actionTitle, action: action)
+                Button(L(actionTitle), action: action)
                     .buttonStyle(.glass)
                     .controlSize(.regular)
             }
@@ -56,7 +56,7 @@ struct LoadingState: View {
     var body: some View {
         HStack(spacing: 9) {
             ProgressView().controlSize(.small)
-            Text(title).font(.callout).foregroundStyle(.secondary)
+            Text(L(title)).font(.callout).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 32)
@@ -97,7 +97,7 @@ struct ProgressPanel: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small).tint(tint)
-                Text(title).font(.callout.weight(.medium))
+                Text(L(title)).font(.callout.weight(.medium))
                 Spacer(minLength: 6)
                 if let progress {
                     Text("\(Int(progress * 100))%")
@@ -111,7 +111,7 @@ struct ProgressPanel: View {
                     .tint(tint)
             }
             if let detail {
-                Text(detail)
+                Text(L(detail))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -150,15 +150,15 @@ struct ConfirmSheet: View {
                     .font(.system(size: 24))
                     .foregroundStyle(tint)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.headline)
-                    Text("请确认此操作")
+                    Text(L(title)).font(.headline)
+                    Text(L("请确认此操作"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
 
-            Text(message)
+            Text(L(message))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -171,7 +171,7 @@ struct ConfirmSheet: View {
                                 .fill(tint)
                                 .frame(width: 4, height: 4)
                                 .padding(.top, 5)
-                            Text(item)
+                            Text(L(item))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -185,9 +185,9 @@ struct ConfirmSheet: View {
 
             HStack(spacing: 9) {
                 Spacer()
-                Button(cancelTitle, role: .cancel) { dismiss() }
+                Button(L(cancelTitle), role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button(confirmTitle) {
+                Button(L(confirmTitle)) {
                     onConfirm()
                     dismiss()
                 }
@@ -268,7 +268,7 @@ struct ToastView: View {
             Image(systemName: message.symbol)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(message.tone.tint)
-            Text(message.text)
+            Text(L(message.text))
                 .font(.callout)
                 .lineLimit(2)
         }

@@ -31,7 +31,7 @@ struct StatusCard: View {
                 HStack(spacing: 9) {
                     IconTile(symbol: symbol, tint: tint, size: 30)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(title)
+                        Text(L(title))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Text(value)
@@ -50,7 +50,7 @@ struct StatusCard: View {
                     }
                 }
                 if let detail {
-                    Text(detail)
+                    Text(L(detail))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .lineLimit(2)
@@ -85,7 +85,7 @@ struct QuickActionButton: View {
                             .foregroundStyle(tint)
                     }
                 }
-                Text(title)
+                Text(L(title))
                     .font(.caption)
                     .foregroundStyle(isEnabled ? Color.primary : Color.secondary)
                     .lineLimit(2)

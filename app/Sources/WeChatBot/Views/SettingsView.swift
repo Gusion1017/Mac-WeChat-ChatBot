@@ -138,7 +138,7 @@ struct SettingsView: View {
             HStack(spacing: 5) {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 8))
-                Text("全部数据仅保存在本机")
+                Text(L("全部数据仅保存在本机"))
                     .font(.system(size: 9))
             }
             .foregroundStyle(.tertiary)
@@ -151,7 +151,7 @@ struct SettingsView: View {
 
     private func sidebarGroup(_ title: String, items: [SettingsCategory]) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title)
+            Text(L(title))
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.tertiary)
                 .padding(.leading, 8)
@@ -213,7 +213,7 @@ struct SettingsView: View {
                     symbol: "menubar.rectangle",
                     tint: Theme.accent
                 ) {
-                    Toggle("显示菜单栏图标", isOn: showInMenuBarBinding)
+                    Toggle(L("显示菜单栏图标"), isOn: showInMenuBarBinding)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -225,7 +225,7 @@ struct SettingsView: View {
                     symbol: "power",
                     tint: .secondary
                 ) {
-                    Toggle("登录时启动", isOn: bind(\.general.launchAtLogin))
+                    Toggle(L("登录时启动"), isOn: bind(\.general.launchAtLogin))
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -237,7 +237,7 @@ struct SettingsView: View {
                     symbol: "dock.rectangle",
                     tint: .secondary
                 ) {
-                    Toggle("显示 Dock 图标", isOn: showDockIconBinding)
+                    Toggle(L("显示 Dock 图标"), isOn: showDockIconBinding)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -249,7 +249,7 @@ struct SettingsView: View {
                     symbol: "exclamationmark.circle",
                     tint: Theme.warning
                 ) {
-                    Toggle("退出前确认", isOn: bind(\.general.confirmBeforeQuit))
+                    Toggle(L("退出前确认"), isOn: bind(\.general.confirmBeforeQuit))
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -275,7 +275,7 @@ struct SettingsView: View {
                     tint: Theme.violet
                 ) {
                     VStack(alignment: .trailing, spacing: 5) {
-                        Picker("防止系统睡眠", selection: sleepPreventionBinding) {
+                        Picker(L("防止系统睡眠"), selection: sleepPreventionBinding) {
                             ForEach(SleepPreventionMode.allCases) { mode in
                                 Text(mode.label).tag(mode)
                             }
@@ -307,18 +307,20 @@ struct SettingsView: View {
                 InlineNotice(kind: .warning, title: "防睡眠未生效", message: lastError)
             }
 
-            SettingsSection(title: "语言") {
+            SettingsSection(title: "语言 / Language") {
                 SettingsRow(
                     title: "界面语言",
-                    subtitle: "首版仅提供简体中文",
+                    subtitle: "跟随系统，或强制使用简体中文 / English",
                     symbol: "character.bubble",
                     tint: Theme.info
                 ) {
-                    Picker("界面语言", selection: bind(\.general.language)) {
-                        Text("简体中文").tag("zh-Hans")
+                    Picker(L("界面语言"), selection: languageBinding) {
+                        ForEach(AppLanguage.allCases) { language in
+                            Text(language.displayName).tag(language.rawValue)
+                        }
                     }
                     .labelsHidden()
-                    .frame(width: 150)
+                    .frame(width: 190)
                 }
             }
 
@@ -329,7 +331,7 @@ struct SettingsView: View {
                     symbol: "sparkles.rectangle.stack",
                     tint: Theme.accent
                 ) {
-                    Button("打开向导") {
+                    Button(L("打开向导")) {
                         store.isOnboardingPresented = true
                     }
                     .buttonStyle(.glass)
@@ -381,6 +383,13 @@ struct SettingsView: View {
         }
     }
 
+    private var languageBinding: Binding<String> {
+        Binding(
+            get: { store.settings.general.language },
+            set: { store.setLanguage($0) }
+        )
+    }
+
     private var sleepStatusTint: Color {
         switch store.settings.general.sleepPrevention {
         case .never:
@@ -408,7 +417,7 @@ struct SettingsView: View {
                 footer: "选择「跟随系统」时，App 会实时响应 macOS 的浅色/深色切换。"
             ) {
                 VStack(alignment: .leading, spacing: 12) {
-                    Picker("外观模式", selection: bind(\.general.appearance)) {
+                    Picker(L("外观模式"), selection: bind(\.general.appearance)) {
                         ForEach(AppearanceMode.allCases) { mode in
                             Text(mode.label).tag(mode)
                         }
@@ -452,9 +461,9 @@ struct SettingsView: View {
 
             SettingsSection(title: "设计说明") {
                 VStack(alignment: .leading, spacing: 7) {
-                    Label("Liquid Glass 卡片、半透明侧边栏与系统材质。", systemImage: "circle.lefthalf.filled")
-                    Label("SF Symbols + SF Pro / 苹方系统字体，支持 1x / 2x 渲染。", systemImage: "textformat")
-                    Label("中文排版：语义行距、宽松留白、克制动效。", systemImage: "character.textbox")
+                    Label(L("Liquid Glass 卡片、半透明侧边栏与系统材质。"), systemImage: "circle.lefthalf.filled")
+                    Label(L("SF Symbols + SF Pro / 苹方系统字体，支持 1x / 2x 渲染。"), systemImage: "textformat")
+                    Label(L("中文排版：语义行距、宽松留白、克制动效。"), systemImage: "character.textbox")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -524,7 +533,7 @@ struct SettingsView: View {
                     symbol: "bell.badge",
                     tint: Theme.warning
                 ) {
-                    Toggle("启用通知", isOn: bind(\.general.notificationsEnabled))
+                    Toggle(L("启用通知"), isOn: bind(\.general.notificationsEnabled))
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -536,7 +545,7 @@ struct SettingsView: View {
                     symbol: "speaker.wave.2",
                     tint: Theme.info
                 ) {
-                    Toggle("通知声音", isOn: bind(\.general.soundEnabled))
+                    Toggle(L("通知声音"), isOn: bind(\.general.soundEnabled))
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -632,7 +641,7 @@ struct SettingsView: View {
                         Button {
                             Task { await store.refreshStatus() }
                         } label: {
-                            Label("刷新状态", systemImage: "arrow.clockwise")
+                            Label(L("刷新状态"), systemImage: "arrow.clockwise")
                         }
                         .buttonStyle(.glass)
                         .disabled(isWorking)
@@ -640,7 +649,7 @@ struct SettingsView: View {
                         Button {
                             hookAction = .install
                         } label: {
-                            Label("安装 Hook", systemImage: "wrench.and.screwdriver")
+                            Label(L("安装 Hook"), systemImage: "wrench.and.screwdriver")
                         }
                         .buttonStyle(.glassProminent)
                         .tint(Theme.warning)
@@ -649,7 +658,7 @@ struct SettingsView: View {
                         Button {
                             hookAction = .restore
                         } label: {
-                            Label("还原官方微信", systemImage: "arrow.uturn.backward")
+                            Label(L("还原官方微信"), systemImage: "arrow.uturn.backward")
                         }
                         .buttonStyle(.glass)
                         .tint(Theme.danger)
@@ -657,7 +666,7 @@ struct SettingsView: View {
                         Spacer()
                     }
 
-                    Text("安装流程：完整备份 → 注入 Frida Gadget → ad-hoc 重签 → 校验。安装前请退出微信。")
+                    Text(L("安装流程：完整备份 → 注入 Frida Gadget → ad-hoc 重签 → 校验。安装前请退出微信。"))
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
@@ -678,16 +687,16 @@ struct SettingsView: View {
                                 .textFieldStyle(.roundedBorder)
                                 .font(.system(.caption, design: .monospaced))
                         }
-                        Button("选择…") { chooseWeChatApp() }
+                        Button(L("选择…")) { chooseWeChatApp() }
                             .buttonStyle(.glass)
                             .controlSize(.small)
                     }
                     FormField(label: "版本配置文件", hint: "留空则自动匹配 hook/versions 中的版本配置") {
                         HStack(spacing: 8) {
-                            TextField("自动匹配", text: bind(\.hook.versionConfigPath))
+                            TextField(L("自动匹配"), text: bind(\.hook.versionConfigPath))
                                 .textFieldStyle(.roundedBorder)
                                 .font(.system(.caption, design: .monospaced))
-                            Button("选择…") { chooseVersionConfig() }
+                            Button(L("选择…")) { chooseVersionConfig() }
                                 .buttonStyle(.glass)
                                 .controlSize(.small)
                         }
@@ -699,14 +708,14 @@ struct SettingsView: View {
                     }
                     SettingsDivider()
                     SettingsRow(title: "自动启动微信", subtitle: "机器人启动时若微信未运行则自动打开", symbol: "play.circle", tint: .secondary) {
-                        Toggle("自动启动微信", isOn: bind(\.hook.autoLaunchWeChat))
+                        Toggle(L("自动启动微信"), isOn: bind(\.hook.autoLaunchWeChat))
                             .labelsHidden()
                             .toggleStyle(.switch)
                             .controlSize(.small)
                     }
                     SettingsDivider()
                     SettingsRow(title: "自动启动 Bridge", subtitle: "机器人启动时自动拉起 OneBot 桥接进程", symbol: "arrow.triangle.branch", tint: .secondary) {
-                        Toggle("自动启动 Bridge", isOn: bind(\.hook.autoStartBridge))
+                        Toggle(L("自动启动 Bridge"), isOn: bind(\.hook.autoStartBridge))
                             .labelsHidden()
                             .toggleStyle(.switch)
                             .controlSize(.small)
@@ -718,7 +727,7 @@ struct SettingsView: View {
                         symbol: "paperplane",
                         tint: .secondary
                     ) {
-                        Toggle("R3 原生发送", isOn: bind(\.hook.enableNativeSend))
+                        Toggle(L("R3 原生发送"), isOn: bind(\.hook.enableNativeSend))
                             .labelsHidden()
                             .toggleStyle(.switch)
                             .controlSize(.small)
@@ -767,7 +776,7 @@ struct SettingsView: View {
                                 .frame(width: 100)
                         }
                         FormField(label: "连接类型") {
-                            Picker("连接类型", selection: bind(\.onebot.connType)) {
+                            Picker(L("连接类型"), selection: bind(\.onebot.connType)) {
                                 Text("WebSocket").tag("websocket")
                                 Text("HTTP").tag("http")
                             }
@@ -802,19 +811,19 @@ struct SettingsView: View {
                     }
 
                     FormField(label: "Bridge 可执行文件", hint: "留空时使用 App 内置 bridge；开发环境可指定绝对路径") {
-                        TextField("内置 bridge", text: bind(\.onebot.bridgePath))
+                        TextField(L("内置 bridge"), text: bind(\.onebot.bridgePath))
                             .textFieldStyle(.roundedBorder)
                             .font(.system(.caption, design: .monospaced))
                     }
 
                     FormField(label: "图片临时目录", hint: "bridge 读取微信图片的目录，留空则自动探测") {
-                        TextField("自动探测", text: bind(\.onebot.imagePath))
+                        TextField(L("自动探测"), text: bind(\.onebot.imagePath))
                             .textFieldStyle(.roundedBorder)
                             .font(.system(.caption, design: .monospaced))
                     }
 
                     HStack(spacing: 8) {
-                        Text("WS 地址")
+                        Text(L("WS 地址"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Text(wsURL)
@@ -867,14 +876,14 @@ struct SettingsView: View {
                         Button {
                             exportConfiguration()
                         } label: {
-                            Label("导出配置", systemImage: "square.and.arrow.up")
+                            Label(L("导出配置"), systemImage: "square.and.arrow.up")
                         }
                         .buttonStyle(.glass)
 
                         Button {
                             NSWorkspace.shared.open(AppPaths.supportDirectory)
                         } label: {
-                            Label("打开数据目录", systemImage: "folder")
+                            Label(L("打开数据目录"), systemImage: "folder")
                         }
                         .buttonStyle(.glass)
 
@@ -882,12 +891,12 @@ struct SettingsView: View {
                             store.reload()
                             toast.show("已重新加载配置文件", tone: .success)
                         } label: {
-                            Label("重新加载配置", systemImage: "arrow.clockwise")
+                            Label(L("重新加载配置"), systemImage: "arrow.clockwise")
                         }
                         .buttonStyle(.glass)
                         Spacer()
                     }
-                    Text("数据库与日志的完整备份请直接复制数据目录；微信官方备份由 Hook 安装流程自动创建。")
+                    Text(L("数据库与日志的完整备份请直接复制数据目录；微信官方备份由 Hook 安装流程自动创建。"))
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                     if !store.settings.hook.lastBackupPath.isEmpty {
@@ -927,7 +936,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("WeChat AI")
                             .font(.title2.weight(.semibold))
-                        Text("微信 AI 聊天助手 · 原生 macOS")
+                        Text(L("微信 AI 聊天助手 · 原生 macOS"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         HStack(spacing: 6) {
@@ -1104,9 +1113,9 @@ struct SettingsView: View {
                 .frame(width: 18, alignment: .center)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 3) {
-                Text(title)
+                Text(L(title))
                     .font(.callout)
-                Text(detail)
+                Text(L(detail))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1120,7 +1129,7 @@ struct SettingsView: View {
 
     private func aboutRow(_ title: String, _ value: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            Text(title)
+            Text(L(title))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .frame(width: 96, alignment: .leading)
@@ -1316,8 +1325,8 @@ private struct TechLinkRow: View {
                 label
             }
             .buttonStyle(.plain)
-            .help("在 GitHub 打开 \(title)")
-            .accessibilityLabel(Text("在 GitHub 打开 \(title)，\(repo)，\(license)"))
+            .help(L("在 GitHub 打开 \(title)"))
+            .accessibilityLabel(Text(L("在 GitHub 打开 \(title)，\(repo)，\(license)")))
         } else {
             label
         }
@@ -1330,11 +1339,11 @@ private struct TechLinkRow: View {
                 .foregroundStyle(tint)
                 .frame(width: 18, alignment: .center)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                Text(L(title))
                     .font(.callout)
                     .foregroundStyle(.primary)
                 if let subtitle {
-                    Text(subtitle)
+                    Text(L(subtitle))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1382,7 +1391,7 @@ private struct LogBufferMaintenanceRow: View {
             symbol: "text.alignleft",
             tint: Theme.info
         ) {
-            Button("清空日志") {
+            Button(L("清空日志")) {
                 store.clearLogs()
                 toast.show("日志已清空", tone: .info, symbol: "trash")
             }

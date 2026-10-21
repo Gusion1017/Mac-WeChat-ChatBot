@@ -9,7 +9,7 @@ struct BotView: View {
 
     var body: some View {
         ScrollingPage(title: "机器人", subtitle: subtitle) {
-            Button("保存设置") {
+            Button(L("保存设置")) {
                 store.persist()
                 toast.show("机器人设置已保存", tone: .success)
             }
@@ -112,7 +112,7 @@ struct BotView: View {
                     symbol: "eye",
                     tint: Theme.warning
                 ) {
-                    Toggle("演练模式", isOn: bind(\.bot.dryRun))
+                    Toggle(L("演练模式"), isOn: bind(\.bot.dryRun))
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -124,7 +124,7 @@ struct BotView: View {
                     symbol: "person.fill",
                     tint: Theme.accent
                 ) {
-                    Toggle("私聊自动回复", isOn: bind(\.bot.replyToDirect))
+                    Toggle(L("私聊自动回复"), isOn: bind(\.bot.replyToDirect))
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -155,39 +155,39 @@ struct BotView: View {
                     symbol: "hand.tap.fill",
                     tint: Theme.info
                 ) {
-                    Toggle("拍一拍回复", isOn: patReplyBinding)
+                    Toggle(L("拍一拍回复"), isOn: patReplyBinding)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
                 }
                 if store.settings.bot.patReplyEnabled {
                     VStack(alignment: .leading, spacing: 10) {
-                        Toggle("发送自定义文字", isOn: patFixedTextBinding)
+                        Toggle(L("发送自定义文字"), isOn: patFixedTextBinding)
                             .toggleStyle(.switch)
                             .controlSize(.small)
                         if store.settings.bot.patFixedTextEnabled {
                             VStack(alignment: .leading, spacing: 8) {
-                                TextField("AI 前文字（留空不发送）", text: patBeforeTextBinding)
-                                TextField("AI 后文字（留空不发送）", text: patAfterTextBinding)
-                                Text("自定义文字支持 {name} 占位符（替换为对方昵称）。")
+                                TextField(L("AI 前文字（留空不发送）"), text: patBeforeTextBinding)
+                                TextField(L("AI 后文字（留空不发送）"), text: patAfterTextBinding)
+                                Text(L("自定义文字支持 {name} 占位符（替换为对方昵称）。"))
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
                             }
                             .textFieldStyle(.roundedBorder)
                         }
-                        Toggle("附带 AI 回复", isOn: patAIBinding)
+                        Toggle(L("附带 AI 回复"), isOn: patAIBinding)
                             .toggleStyle(.switch)
                             .controlSize(.small)
-                        Toggle("群聊被拍后 @ 拍的人", isOn: patMentionBinding)
+                        Toggle(L("群聊被拍后 @ 拍的人"), isOn: patMentionBinding)
                             .toggleStyle(.switch)
                             .controlSize(.small)
                         if store.settings.bot.patMentionPatterEnabled {
-                            Text("仅群聊生效；@ 附在第一条回复前（自定义前文字 → AI 首段 → 自定义后文字）。bridge 解析不到群昵称时按普通文本发送。")
+                            Text(L("仅群聊生效；@ 附在第一条回复前（自定义前文字 → AI 首段 → 自定义后文字）。bridge 解析不到群昵称时按普通文本发送。"))
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                         }
                         if store.settings.bot.patFixedTextEnabled || store.settings.bot.patAIEnabled {
-                            Text("发送顺序：自定义文字（前）→ AI 回复 → 自定义文字（后）；AI 失败时仍发送文字。")
+                            Text(L("发送顺序：自定义文字（前）→ AI 回复 → 自定义文字（后）；AI 失败时仍发送文字。"))
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                         }
@@ -198,7 +198,7 @@ struct BotView: View {
                 SettingsDivider()
                 VStack(alignment: .leading, spacing: 7) {
                     HStack {
-                        Text("群聊关键词")
+                        Text(L("群聊关键词"))
                             .font(.callout)
                         Spacer()
                         Text(groupKeywordEnabled ? "已启用「关键词」触发" : "勾选「关键词」后生效")
@@ -213,11 +213,11 @@ struct BotView: View {
                         }
                     }
                     HStack(spacing: 6) {
-                        TextField("添加关键词，例如 AI", text: $newKeyword)
+                        TextField(L("添加关键词，例如 AI"), text: $newKeyword)
                             .textFieldStyle(.roundedBorder)
                             .onSubmit { addKeyword() }
                             .frame(maxWidth: 220)
-                        Button("添加", action: addKeyword)
+                        Button(L("添加"), action: addKeyword)
                             .buttonStyle(.glass)
                             .controlSize(.small)
                             .disabled(newKeyword.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -233,7 +233,7 @@ struct BotView: View {
                     symbol: "person.crop.circle.badge.xmark",
                     tint: .secondary
                 ) {
-                    Toggle("忽略自己发送的消息", isOn: bind(\.bot.ignoreSelf))
+                    Toggle(L("忽略自己发送的消息"), isOn: bind(\.bot.ignoreSelf))
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -245,7 +245,7 @@ struct BotView: View {
                     symbol: "megaphone.fill",
                     tint: .secondary
                 ) {
-                    Toggle("忽略公众号消息", isOn: bind(\.bot.ignoreOfficialAccounts))
+                    Toggle(L("忽略公众号消息"), isOn: bind(\.bot.ignoreOfficialAccounts))
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -332,7 +332,7 @@ struct BotView: View {
             VStack(alignment: .leading, spacing: 13) {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
-                        Text("每条回复冷却")
+                        Text(L("每条回复冷却"))
                             .font(.callout)
                         Spacer()
                         Text(String(format: "%.0f 秒", store.settings.bot.cooldownSeconds))
@@ -341,7 +341,7 @@ struct BotView: View {
                     }
                     Slider(value: bind(\.bot.cooldownSeconds), in: 0...60, step: 1)
                         .tint(Theme.accent)
-                        .accessibilityLabel("每条回复冷却时间")
+                        .accessibilityLabel(L("每条回复冷却时间"))
                         .accessibilityValue("\(Int(store.settings.bot.cooldownSeconds)) 秒")
                 }
 
@@ -373,11 +373,11 @@ struct BotView: View {
             tint: Theme.warning
         ) {
             VStack(alignment: .leading, spacing: 12) {
-                Toggle("启用工作时间限制", isOn: bind(\.bot.workingHours.enabled))
+                Toggle(L("启用工作时间限制"), isOn: bind(\.bot.workingHours.enabled))
                     .toggleStyle(.switch)
                     .font(.callout)
 
-                Text("这是全局默认时段；可在「会话」页为单个会话设置独立时段或取消限制。")
+                Text(L("这是全局默认时段；可在「会话」页为单个会话设置独立时段或取消限制。"))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
 
@@ -408,7 +408,7 @@ struct BotView: View {
                         displayedComponents: .hourAndMinute
                     )
                     Spacer()
-                    Text("跨夜时段会自动识别")
+                    Text(L("跨夜时段会自动识别"))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -428,13 +428,13 @@ struct BotView: View {
             tint: Theme.accent
         ) {
             VStack(alignment: .leading, spacing: 13) {
-                Toggle("启用拟人化（输入延迟 / 分段）", isOn: bind(\.bot.humanize.enabled))
+                Toggle(L("启用拟人化（输入延迟 / 分段）"), isOn: bind(\.bot.humanize.enabled))
                     .toggleStyle(.switch)
                     .font(.callout)
 
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
-                        Text("随机延迟范围")
+                        Text(L("随机延迟范围"))
                             .font(.callout)
                         Spacer()
                         Text(String(format: "%.1f – %.1f 秒",
@@ -446,22 +446,22 @@ struct BotView: View {
                     HStack(spacing: 10) {
                         Slider(value: minDelayBinding, in: 0...5000, step: 100)
                             .tint(Theme.accent)
-                            .accessibilityLabel("最小回复延迟")
+                            .accessibilityLabel(L("最小回复延迟"))
                         Slider(value: maxDelayBinding, in: 0...8000, step: 100)
                             .tint(Theme.accent)
-                            .accessibilityLabel("最大回复延迟")
+                            .accessibilityLabel(L("最大回复延迟"))
                     }
                 }
 
                 HStack(spacing: 18) {
-                    Toggle("拆分为多条消息", isOn: bind(\.bot.humanize.splitMessages))
+                    Toggle(L("拆分为多条消息"), isOn: bind(\.bot.humanize.splitMessages))
                         .toggleStyle(.switch)
                     Stepper(
                         "最多 \(store.settings.bot.humanize.maxSegments) 段",
                         value: bind(\.bot.humanize.maxSegments),
                         in: 1...10
                     )
-                    Toggle("显示输入中状态", isOn: bind(\.bot.humanize.typingIndicator))
+                    Toggle(L("显示输入中状态"), isOn: bind(\.bot.humanize.typingIndicator))
                         .toggleStyle(.switch)
                 }
                 .font(.callout)
@@ -481,15 +481,15 @@ struct BotView: View {
             tint: Theme.violet
         ) {
             HStack(spacing: 18) {
-                Picker("默认人格", selection: bind(\.bot.defaultPersonaID)) {
-                    Text("跟随全局").tag(String?.none)
+                Picker(L("默认人格"), selection: bind(\.bot.defaultPersonaID)) {
+                    Text(L("跟随全局")).tag(String?.none)
                     ForEach(store.personas) { persona in
                         Text(persona.name).tag(Optional(persona.id))
                     }
                 }
                 .frame(maxWidth: 260)
 
-                Text("默认通道在「AI 模型 → 全局请求」设置")
+                Text(L("默认通道在「AI 模型 → 全局请求」设置"))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
 
@@ -713,11 +713,11 @@ private struct IDListEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
-                Text(title)
+                Text(L(title))
                     .font(.callout.weight(.medium))
                 Spacer()
                 if !suggestions.isEmpty {
-                    Menu("从会话选择") {
+                    Menu(L("从会话选择")) {
                         ForEach(suggestions, id: \.id) { suggestion in
                             Button {
                                 add(suggestion.id)
@@ -738,14 +738,14 @@ private struct IDListEditor: View {
             }
 
             if let subtitle {
-                Text(subtitle)
+                Text(L(subtitle))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             if items.isEmpty {
-                Text("未限制")
+                Text(L("未限制"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
@@ -767,7 +767,7 @@ private struct IDListEditor: View {
                     .font(.system(.caption, design: .monospaced))
                     .onSubmit { add(newValue) }
                     .frame(maxWidth: 260)
-                Button("添加") {
+                Button(L("添加")) {
                     add(newValue)
                 }
                 .buttonStyle(.glass)

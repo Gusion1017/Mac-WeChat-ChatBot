@@ -62,7 +62,7 @@ struct ProviderEditorSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(isNew ? "添加 AI 通道" : "编辑 AI 通道")
                     .font(.headline)
-                Text("OpenAI 兼容接口 · 密钥安全存储")
+                Text(L("OpenAI 兼容接口 · 密钥安全存储"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -82,7 +82,7 @@ struct ProviderEditorSheet: View {
                 )
             }
             Spacer()
-            Button("取消") { dismiss() }
+            Button(L("取消")) { dismiss() }
                 .keyboardShortcut(.cancelAction)
             Button(isNew ? "添加通道" : "保存") {
                 save()
@@ -99,16 +99,16 @@ struct ProviderEditorSheet: View {
 
     private var basicsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("基本信息").font(.subheadline.weight(.semibold))
+            Text(L("基本信息")).font(.subheadline.weight(.semibold))
 
             FormField(label: "名称") {
-                TextField("例如：DeepSeek 主力", text: $draft.name)
+                TextField(L("例如：DeepSeek 主力"), text: $draft.name)
                     .textFieldStyle(.roundedBorder)
             }
 
             HStack(alignment: .bottom, spacing: 10) {
                 FormField(label: "类型") {
-                    Picker("类型", selection: $draft.kind) {
+                    Picker(L("类型"), selection: $draft.kind) {
                         ForEach(ProviderKind.allCases) { kind in
                             Text(kind.label).tag(kind)
                         }
@@ -117,7 +117,7 @@ struct ProviderEditorSheet: View {
                     .pickerStyle(.menu)
                     .frame(width: 200, alignment: .leading)
                 }
-                Button("填入默认地址与模型") {
+                Button(L("填入默认地址与模型")) {
                     draft.baseURL = draft.kind.defaultBaseURL
                     draft.model = draft.kind.defaultModel
                 }
@@ -135,7 +135,7 @@ struct ProviderEditorSheet: View {
             }
 
             FormField(label: "模型", hint: "请求时使用的模型名称，例如 deepseek-chat") {
-                TextField("模型名称", text: $draft.model)
+                TextField(L("模型名称"), text: $draft.model)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.body, design: .monospaced))
             }
@@ -179,13 +179,13 @@ struct ProviderEditorSheet: View {
                     Image(systemName: "key.fill")
                         .font(.system(size: 9))
                         .foregroundStyle(Theme.success)
-                    Text("已登记 Keychain 引用：\(draft.apiKeyReference)")
+                    Text(L("已登记 Keychain 引用：\(draft.apiKeyReference)"))
                         .font(.caption2.monospaced())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer(minLength: 4)
-                    Button("清除已保存密钥", role: .destructive) {
+                    Button(L("清除已保存密钥"), role: .destructive) {
                         onDeleteKey?()
                         dismiss()
                     }
@@ -199,9 +199,9 @@ struct ProviderEditorSheet: View {
 
     private var parametersSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("生成参数").font(.subheadline.weight(.semibold))
+            Text(L("生成参数")).font(.subheadline.weight(.semibold))
 
-            Text("温度不随通道设置，改在「模型温度」中按模型单独配置；未配置时由模型使用自身默认值。")
+            Text(L("温度不随通道设置，改在「模型温度」中按模型单独配置；未配置时由模型使用自身默认值。"))
                 .font(.caption)
                 .foregroundStyle(.tertiary)
 
@@ -222,11 +222,11 @@ struct ProviderEditorSheet: View {
                 .font(.callout)
             }
 
-            Toggle("流式返回（逐字输出）", isOn: $draft.stream)
+            Toggle(L("流式返回（逐字输出）"), isOn: $draft.stream)
                 .toggleStyle(.switch)
                 .font(.callout)
 
-            Text("仅在「AI 模型 → 全局请求」开启流式回复时生效；全局关闭时所有通道都不流式。")
+            Text(L("仅在「AI 模型 → 全局请求」开启流式回复时生效；全局关闭时所有通道都不流式。"))
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
@@ -234,11 +234,11 @@ struct ProviderEditorSheet: View {
 
     private var statusSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("状态").font(.subheadline.weight(.semibold))
-            Text("启用 / 停用请在通道列表使用开关；新添加的通道默认启用。")
+            Text(L("状态")).font(.subheadline.weight(.semibold))
+            Text(L("启用 / 停用请在通道列表使用开关；新添加的通道默认启用。"))
                 .font(.caption)
                 .foregroundStyle(.tertiary)
-            Text("默认通道在「AI 模型 → 全局请求」中设置。停用后不会用于自动回复。")
+            Text(L("默认通道在「AI 模型 → 全局请求」中设置。停用后不会用于自动回复。"))
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }

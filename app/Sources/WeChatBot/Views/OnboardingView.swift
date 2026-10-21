@@ -67,6 +67,13 @@ struct OnboardingView: View {
 
     // MARK: Header
 
+    private var languageBinding: Binding<String> {
+        Binding(
+            get: { store.settings.general.language },
+            set: { store.setLanguage($0) }
+        )
+    }
+
     private var header: some View {
         VStack(spacing: 13) {
             HStack(spacing: 10) {
@@ -85,19 +92,29 @@ struct OnboardingView: View {
                         .foregroundStyle(.white)
                 }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("WeChat AI 设置向导")
+                    Text(L("WeChat AI 设置向导"))
                         .font(.headline)
-                    Text("4 步完成本机配置，随时可以跳过或在设置中修改")
+                    Text(L("4 步完成本机配置，随时可以跳过或在设置中修改"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Picker(L("语言 / Language"), selection: languageBinding) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.displayName).tag(language.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 170)
+                .help(L("语言 / Language"))
+
                 if step < stepTitles.count - 1 {
-                    Button("跳过向导") { skip() }
+                    Button(L("跳过向导")) { skip() }
                         .buttonStyle(.plain)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .help("跳过剩余步骤，之后可在设置或菜单中重新打开")
+                        .help(L("跳过剩余步骤，之后可在设置或菜单中重新打开"))
                 }
             }
 
@@ -118,7 +135,7 @@ struct OnboardingView: View {
                                     .foregroundStyle(index == step ? .white : Color.secondary)
                             }
                         }
-                        Text(title)
+                        Text(L(title))
                             .font(.system(size: 9.5, weight: index == step ? .semibold : .regular))
                             .foregroundStyle(index <= step ? Color.primary : Color.secondary)
                     }
@@ -173,9 +190,9 @@ struct OnboardingView: View {
                         .font(.system(size: 34, weight: .light))
                         .foregroundStyle(Theme.accent)
                 }
-                Text("欢迎使用 WeChat AI")
+                Text(L("欢迎使用 WeChat AI"))
                     .font(.title.weight(.semibold))
-                Text("把 AI 接进你的微信，同时保留完整的本机控制权。")
+                Text(L("把 AI 接进你的微信，同时保留完整的本机控制权。"))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -216,8 +233,8 @@ struct OnboardingView: View {
         HStack(alignment: .top, spacing: 11) {
             IconTile(symbol: symbol, tint: tint, size: 32)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.callout.weight(.medium))
-                Text(message).font(.caption).foregroundStyle(.secondary)
+                Text(L(title)).font(.callout.weight(.medium))
+                Text(L(message)).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
@@ -312,7 +329,7 @@ struct OnboardingView: View {
                     message: "下一步配置 AI 模型；之后启动机器人即可连接微信。"
                 )
             } else {
-                Text("暂时不安装也可以继续；之后可在「设置 → Hook」中备份并安装。")
+                Text(L("暂时不安装也可以继续；之后可在「设置 → Hook」中备份并安装。"))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -340,7 +357,7 @@ struct OnboardingView: View {
             } else {
                 SettingsSection(title: "默认通道") {
                     SettingsRow(title: "通道", symbol: "sparkles", tint: Theme.violet) {
-                        Picker("通道", selection: providerSelection) {
+                        Picker(L("通道"), selection: providerSelection) {
                             ForEach(store.providers) { provider in
                                 Text("\(provider.name) · \(provider.kind.label)").tag(Optional(provider.id))
                             }
@@ -381,7 +398,7 @@ struct OnboardingView: View {
                                 }
                             }
                             if !provider.hasAPIKey, apiKeyDraft.isEmpty {
-                                Text("尚未配置密钥；保存后才能测试连接并生成回复。")
+                                Text(L("尚未配置密钥；保存后才能测试连接并生成回复。"))
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
                             }
@@ -400,7 +417,7 @@ struct OnboardingView: View {
                     .tint(Theme.accent)
                     .disabled(isTestingAI)
 
-                    Button("打开 AI 模型页") {
+                    Button(L("打开 AI 模型页")) {
                         store.isOnboardingPresented = false
                         store.sidebarSelection = .ai
                     }
@@ -417,7 +434,7 @@ struct OnboardingView: View {
                     )
                 }
 
-                Text("也可以暂时跳过；没有可用 AI 时机器人不会自动回复。")
+                Text(L("也可以暂时跳过；没有可用 AI 时机器人不会自动回复。"))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -459,7 +476,7 @@ struct OnboardingView: View {
                 )
             }
 
-            Toggle("完成向导后立即启动机器人", isOn: $shouldStartBot)
+            Toggle(L("完成向导后立即启动机器人"), isOn: $shouldStartBot)
                 .toggleStyle(.switch)
                 .font(.callout)
 
@@ -478,8 +495,8 @@ struct OnboardingView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.callout)
-                Text(detail).font(.caption2).foregroundStyle(.secondary)
+                Text(L(title)).font(.callout)
+                Text(L(detail)).font(.caption2).foregroundStyle(.secondary)
             }
             Spacer()
             Image(systemName: ready ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
@@ -493,8 +510,8 @@ struct OnboardingView: View {
 
     private func stepHeading(title: String, message: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.title3.weight(.semibold))
-            Text(message)
+            Text(L(title)).font(.title3.weight(.semibold))
+            Text(L(message))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -508,7 +525,7 @@ struct OnboardingView: View {
             Button {
                 goBack()
             } label: {
-                Label("上一步", systemImage: "chevron.left")
+                Label(L("上一步"), systemImage: "chevron.left")
             }
             .buttonStyle(.glass)
             .disabled(step == 0 || isInstalling)

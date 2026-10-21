@@ -15,7 +15,7 @@ struct AIModelsView: View {
             Button {
                 addProvider()
             } label: {
-                Label("添加通道", systemImage: "plus")
+                Label(L("添加通道"), systemImage: "plus")
             }
             .buttonStyle(.glassProminent)
             .tint(Theme.accent)
@@ -59,7 +59,7 @@ struct AIModelsView: View {
             ) {
                 VStack(spacing: 0) {
                     if knownModels.isEmpty {
-                        Text("先添加通道并填写模型名称。")
+                        Text(L("先添加通道并填写模型名称。"))
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -87,8 +87,8 @@ struct AIModelsView: View {
                         symbol: "star.fill",
                         tint: Theme.warning
                     ) {
-                        Picker("默认通道", selection: defaultProviderBinding) {
-                            Text("无").tag(String?.none)
+                        Picker(L("默认通道"), selection: defaultProviderBinding) {
+                            Text(L("无")).tag(String?.none)
                             ForEach(store.providers) { provider in
                                 Text(provider.name).tag(Optional(provider.id))
                             }
@@ -104,7 +104,7 @@ struct AIModelsView: View {
                         symbol: "waveform",
                         tint: Theme.info
                     ) {
-                        Toggle("流式回复", isOn: streamBinding)
+                        Toggle(L("流式回复"), isOn: streamBinding)
                             .labelsHidden()
                             .toggleStyle(.switch)
                             .controlSize(.small)
@@ -152,9 +152,9 @@ struct AIModelsView: View {
                 tint: Theme.success
             ) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label("API Key 仅保存在 macOS Keychain，配置文件只记录引用名。", systemImage: "key.fill")
-                    Label("测试连接会向所选通道发送一次最小聊天请求。", systemImage: "bolt.horizontal")
-                    Label("Ollama 本地通道无需密钥，默认地址为 127.0.0.1。", systemImage: "desktopcomputer")
+                    Label(L("API Key 仅保存在 macOS Keychain，配置文件只记录引用名。"), systemImage: "key.fill")
+                    Label(L("测试连接会向所选通道发送一次最小聊天请求。"), systemImage: "bolt.horizontal")
+                    Label(L("Ollama 本地通道无需密钥，默认地址为 127.0.0.1。"), systemImage: "desktopcomputer")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -180,12 +180,12 @@ struct AIModelsView: View {
             ),
             presenting: pendingDelete
         ) { provider in
-            Button("删除 \(provider.name)", role: .destructive) {
+            Button(L("删除") + " \(provider.name)", role: .destructive) {
                 delete(provider)
             }
-            Button("取消", role: .cancel) { pendingDelete = nil }
+            Button(L("取消"), role: .cancel) { pendingDelete = nil }
         } message: { _ in
-            Text("只会删除本机通道配置，不会影响远端服务。")
+            Text(L("只会删除本机通道配置，不会影响远端服务。"))
         }
     }
 
@@ -246,7 +246,7 @@ struct AIModelsView: View {
                     Slider(value: temperatureBinding(for: model), in: 0...2, step: 0.1)
                         .tint(Theme.accent)
                         .frame(width: 150)
-                        .accessibilityLabel("\(model) 温度")
+                        .accessibilityLabel(L("\(model) 温度"))
                         .accessibilityValue(String(format: "%.1f", temperature))
                     Text(String(format: "%.1f", temperature))
                         .font(.caption.monospacedDigit())
@@ -259,10 +259,10 @@ struct AIModelsView: View {
                     }
                     .buttonStyle(.glass)
                     .controlSize(.small)
-                    .help("恢复模型默认温度")
-                    .accessibilityLabel("恢复 \(model) 默认温度")
+                    .help(L("恢复模型默认温度"))
+                    .accessibilityLabel(L("恢复 \(model) 默认温度"))
                 } else {
-                    Button("设置温度") {
+                    Button(L("设置温度")) {
                         setModelTemperature(0.7, for: model)
                     }
                     .buttonStyle(.glass)

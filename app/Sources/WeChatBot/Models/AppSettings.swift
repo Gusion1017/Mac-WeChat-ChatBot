@@ -47,9 +47,9 @@ enum AppearanceMode: String, Codable, CaseIterable, Hashable, Identifiable {
 
     var label: String {
         switch self {
-        case .system: "跟随系统"
-        case .light: "浅色"
-        case .dark: "深色"
+        case .system: L("跟随系统")
+        case .light: L("浅色")
+        case .dark: L("深色")
         }
     }
 }
@@ -66,17 +66,17 @@ enum SleepPreventionMode: String, Codable, CaseIterable, Hashable, Identifiable 
 
     var label: String {
         switch self {
-        case .never: "永不"
-        case .externalPowerOnly: "接入电源时"
-        case .always: "始终"
+        case .never: L("永不")
+        case .externalPowerOnly: L("接入电源时")
+        case .always: L("始终")
         }
     }
 
     var detail: String {
         switch self {
-        case .never: "允许系统按节能设置进入空闲睡眠。"
-        case .externalPowerOnly: "仅接入电源适配器时阻止系统空闲睡眠；使用电池时允许系统按节能设置睡眠。"
-        case .always: "即使使用电池也阻止系统空闲睡眠。"
+        case .never: L("允许系统按节能设置进入空闲睡眠。")
+        case .externalPowerOnly: L("仅接入电源适配器时阻止系统空闲睡眠；使用电池时允许系统按节能设置睡眠。")
+        case .always: L("即使使用电池也阻止系统空闲睡眠。")
         }
     }
 }
@@ -89,7 +89,7 @@ struct GeneralSettings: Codable, Hashable {
     var soundEnabled: Bool = false
     var confirmBeforeQuit: Bool = true
     var showDockIcon: Bool = true
-    var language: String = "zh-Hans"
+    var language: String = "system"
     var sleepPrevention: SleepPreventionMode = .never
 }
 

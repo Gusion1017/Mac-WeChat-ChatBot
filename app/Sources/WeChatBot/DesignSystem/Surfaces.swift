@@ -55,9 +55,9 @@ struct SectionCard<Content: View, Trailing: View>: View {
                             .foregroundStyle(tint)
                     }
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(title).font(.headline)
+                        Text(L(title)).font(.headline)
                         if let subtitle {
-                            Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                            Text(L(subtitle)).font(.caption).foregroundStyle(.secondary)
                         }
                     }
                     Spacer(minLength: 8)
@@ -98,11 +98,11 @@ struct GlassToolbar<Trailing: View>: View {
     var body: some View {
         HStack(alignment: .center, spacing: 16) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(title)
+                Text(L(title))
                     .font(Theme.pageTitle)
                     .foregroundStyle(.primary)
                 if let subtitle {
-                    Text(subtitle)
+                    Text(L(subtitle))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -269,7 +269,7 @@ struct PillLabel: View {
             if let symbol {
                 Image(systemName: symbol).font(.system(size: 9, weight: .semibold))
             }
-            Text(text).font(.caption2.weight(.medium))
+            Text(L(text)).font(.caption2.weight(.medium))
         }
         .foregroundStyle(filled ? Color.white : color)
         .padding(.horizontal, 8)
@@ -286,9 +286,9 @@ struct SectionHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.title2.weight(.semibold))
+            Text(L(title)).font(.title2.weight(.semibold))
             if let subtitle {
-                Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+                Text(L(subtitle)).font(.subheadline).foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -312,7 +312,7 @@ struct MetricTile: View {
                 Image(systemName: symbol)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(tint)
-                Text(title)
+                Text(L(title))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -323,11 +323,11 @@ struct MetricTile: View {
                     .font(Theme.metricSmall)
                     .contentTransition(.numericText())
                 if let unit {
-                    Text(unit).font(.caption2).foregroundStyle(.secondary)
+                    Text(L(unit)).font(.caption2).foregroundStyle(.secondary)
                 }
             }
             if let detail {
-                Text(detail)
+                Text(L(detail))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)

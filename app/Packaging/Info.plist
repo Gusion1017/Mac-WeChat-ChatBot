@@ -4,6 +4,11 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>zh-Hans</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>zh-Hans</string>
+    </array>
     <key>CFBundleDisplayName</key>
     <string>微信 AI 助手</string>
     <key>CFBundleExecutable</key>

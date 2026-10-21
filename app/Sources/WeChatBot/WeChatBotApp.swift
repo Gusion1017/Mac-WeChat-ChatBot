@@ -75,6 +75,7 @@ struct WeChatAIApp: App {
                 .syncActivationPolicy()
                 .environment(store)
                 .environment(toastCenter)
+                .environment(\.locale, appLocale)
                 .frame(minWidth: 1100, minHeight: 720)
                 .background(Theme.pageGradient)
                 .onChange(of: store.settings.general.showInMenuBar) { _, newValue in
@@ -93,6 +94,7 @@ struct WeChatAIApp: App {
         Settings {
             SettingsView()
                 .syncActivationPolicy()
+                .environment(\.locale, appLocale)
                 .frame(minWidth: 880, minHeight: 640)
                 .toastOverlay()
                 .preferredColorScheme(colorScheme(for: store.settings.general.appearance))
@@ -117,6 +119,7 @@ struct WeChatAIApp: App {
             MenuBarView()
                 .environment(store)
                 .environment(toastCenter)
+                .environment(\.locale, appLocale)
         }
         .menuBarExtraStyle(.window)
     }
@@ -131,6 +134,10 @@ struct WeChatAIApp: App {
                 store.persist()
             }
         )
+    }
+
+    private var appLocale: Locale {
+        (AppLanguage(rawValue: store.settings.general.language) ?? .system).locale
     }
 
     private func colorScheme(for mode: AppearanceMode) -> ColorScheme? {
@@ -153,13 +160,13 @@ struct AppCommands: Commands {
         // ⌘Q is deliberately unbound (⇧⌘Q is reserved by macOS for log out):
         // shortcut or the menu bar, so an accidental ⌘Q cannot stop the bot.
         CommandGroup(replacing: .appTermination) {
-            Button("退出 WeChat AI") {
+            Button(L("退出 WeChat AI")) {
                 NSApp.terminate(nil)
             }
             .keyboardShortcut("q", modifiers: [.command, .option])
         }
 
-        CommandMenu("前往") {
+        CommandMenu(L("前往")) {
             ForEach(SidebarItem.allCases) { item in
                 Button(item.title) {
                     store.sidebarSelection = item

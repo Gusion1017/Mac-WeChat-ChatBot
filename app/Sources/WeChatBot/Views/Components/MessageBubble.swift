@@ -79,12 +79,12 @@ struct MessageBubble: View, Equatable {
             }
             .contextMenu {
                 if !message.text.isEmpty {
-                    Button("复制文本") {
+                    Button(L("复制文本")) {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(message.text, forType: .string)
                     }
                 }
-                Button("复制消息 ID") {
+                Button(L("复制消息 ID")) {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(message.id, forType: .string)
                 }
@@ -210,7 +210,7 @@ struct MessageBubble: View, Equatable {
             VStack(alignment: .leading, spacing: 1) {
                 Text(message.text.isEmpty ? "语音消息" : message.text)
                     .font(.callout)
-                Text("语音")
+                Text(L("语音"))
                     .font(.system(size: 9))
                     .opacity(0.7)
             }
@@ -227,7 +227,7 @@ struct MessageBubble: View, Equatable {
                 Text(fileName)
                     .font(.callout)
                     .lineLimit(1)
-                Text("文件")
+                Text(L("文件"))
                     .font(.system(size: 9))
                     .opacity(0.7)
             }
@@ -243,7 +243,7 @@ struct MessageBubble: View, Equatable {
             VStack(spacing: 5) {
                 Image(systemName: "play.fill")
                     .font(.system(size: 20))
-                Text("视频")
+                Text(L("视频"))
                     .font(.caption2)
             }
         }
@@ -267,7 +267,7 @@ struct MessageBubble: View, Equatable {
             VStack(spacing: 5) {
                 Image(systemName: symbol)
                     .font(.system(size: 20, weight: .light))
-                Text(title)
+                Text(L(title))
                     .font(.caption2)
             }
             .foregroundStyle(.secondary)
@@ -303,7 +303,7 @@ struct MessageBubble: View, Equatable {
         case .generating:
             HStack(spacing: 3) {
                 TypingIndicator()
-                Text("生成中")
+                Text(L("生成中"))
                     .font(.system(size: 9))
                     .foregroundStyle(Theme.accent)
             }
@@ -318,7 +318,7 @@ struct MessageBubble: View, Equatable {
         case .failed:
             HStack(spacing: 2) {
                 Image(systemName: "exclamationmark.circle.fill")
-                Text("发送失败")
+                Text(L("发送失败"))
             }
             .font(.system(size: 9))
             .foregroundStyle(Theme.danger)
@@ -388,7 +388,7 @@ struct TypingIndicator: View {
             }
         }
         .frame(height: 12)
-        .accessibilityLabel("正在生成回复")
+        .accessibilityLabel(L("正在生成回复"))
     }
 }
 
@@ -406,6 +406,6 @@ struct DateSeparator: View, Equatable {
             Rectangle().fill(Theme.hairline).frame(height: 1)
         }
         .padding(.vertical, 8)
-        .accessibilityLabel("日期 \(UIFormat.stamp(date))")
+        .accessibilityLabel(L("日期 \(UIFormat.stamp(date))"))
     }
 }

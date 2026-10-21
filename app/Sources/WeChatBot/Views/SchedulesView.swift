@@ -30,7 +30,7 @@ struct SchedulesView: View {
             Button {
                 addTask()
             } label: {
-                Label("新建任务", systemImage: "plus")
+                Label(L("新建任务"), systemImage: "plus")
             }
             .buttonStyle(.glassProminent)
             .tint(Theme.accent)
@@ -105,12 +105,12 @@ struct SchedulesView: View {
             ),
             presenting: pendingDelete
         ) { task in
-            Button("删除 \(task.name)", role: .destructive) {
+            Button(L("删除") + " \(task.name)", role: .destructive) {
                 delete(task)
             }
-            Button("取消", role: .cancel) { pendingDelete = nil }
+            Button(L("取消"), role: .cancel) { pendingDelete = nil }
         } message: { _ in
-            Text("删除后不会再触发，历史发送记录保留。")
+            Text(L("删除后不会再触发，历史发送记录保留。"))
         }
     }
 
@@ -224,7 +224,7 @@ struct ScheduleEditorSheet: View {
                 IconTile(symbol: "calendar.badge.clock", tint: Theme.info, size: 30)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(isNew ? "新建定时任务" : "编辑定时任务").font(.headline)
-                    Text("按计划向指定会话发送消息")
+                    Text(L("按计划向指定会话发送消息"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -238,7 +238,7 @@ struct ScheduleEditorSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 15) {
                     FormField(label: "任务名称") {
-                        TextField("例如：每日早安问候", text: $draft.name)
+                        TextField(L("例如：每日早安问候"), text: $draft.name)
                             .textFieldStyle(.roundedBorder)
                     }
 
@@ -247,24 +247,24 @@ struct ScheduleEditorSheet: View {
                         hint: usesManualConversation ? "手动输入会话 ID；标题仅用于列表展示。" : "选择一个已同步的会话"
                     ) {
                         VStack(alignment: .leading, spacing: 7) {
-                            Toggle("手动输入会话 ID", isOn: $usesManualConversation)
+                            Toggle(L("手动输入会话 ID"), isOn: $usesManualConversation)
                                 .toggleStyle(.checkbox)
                                 .font(.caption)
                             if usesManualConversation {
                                 HStack(spacing: 8) {
-                                    TextField("会话 ID / wxid / xxx@chatroom", text: $manualConversationID)
+                                    TextField(L("会话 ID / wxid / xxx@chatroom"), text: $manualConversationID)
                                         .textFieldStyle(.roundedBorder)
                                         .font(.system(.caption, design: .monospaced))
-                                    TextField("显示名称（可选）", text: $manualConversationTitle)
+                                    TextField(L("显示名称（可选）"), text: $manualConversationTitle)
                                         .textFieldStyle(.roundedBorder)
                                         .frame(width: 160)
                                 }
                             } else if store.conversations.isEmpty {
-                                Text("暂无已同步会话，请先连接微信或改用手动输入。")
+                                Text(L("暂无已同步会话，请先连接微信或改用手动输入。"))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             } else {
-                                Picker("目标会话", selection: conversationIDBinding) {
+                                Picker(L("目标会话"), selection: conversationIDBinding) {
                                     ForEach(store.conversations) { conversation in
                                         Text(conversation.displayTitle).tag(conversation.id)
                                     }
@@ -286,11 +286,11 @@ struct ScheduleEditorSheet: View {
                                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                                     .strokeBorder(Theme.hairline, lineWidth: 1)
                             }
-                            .accessibilityLabel("发送内容")
+                            .accessibilityLabel(L("发送内容"))
                     }
 
                     FormField(label: "重复方式") {
-                        Picker("重复方式", selection: $draft.repeatRule) {
+                        Picker(L("重复方式"), selection: $draft.repeatRule) {
                             ForEach(ScheduleRepeat.allCases) { repeatRule in
                                 Text(repeatRule.label).tag(repeatRule)
                             }
@@ -349,7 +349,7 @@ struct ScheduleEditorSheet: View {
                         InlineNotice(kind: .danger, title: "无法保存", message: validationMessage)
                     }
 
-                    Toggle("启用此任务", isOn: $draft.enabled)
+                    Toggle(L("启用此任务"), isOn: $draft.enabled)
                         .toggleStyle(.switch)
                         .font(.callout)
                 }
@@ -360,7 +360,7 @@ struct ScheduleEditorSheet: View {
 
             HStack(spacing: 9) {
                 Spacer()
-                Button("取消") { dismiss() }
+                Button(L("取消")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button(isNew ? "添加任务" : "保存") { save() }
                     .buttonStyle(.borderedProminent)

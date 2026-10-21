@@ -66,7 +66,7 @@ struct FilterChip: View {
                 if let symbol {
                     Image(systemName: symbol).font(.system(size: 9, weight: .semibold))
                 }
-                Text(title).font(.caption.weight(.medium))
+                Text(L(title)).font(.caption.weight(.medium))
                 if let count {
                     Text("\(count)")
                         .font(.system(size: 9, weight: .semibold))
@@ -103,7 +103,7 @@ struct TagChip: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Text(title).font(.caption.weight(.medium))
+            Text(L(title)).font(.caption.weight(.medium))
             if let onRemove {
                 Button(action: onRemove) {
                     Image(systemName: "xmark")
@@ -112,7 +112,7 @@ struct TagChip: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("移除 \(title)")
+                .accessibilityLabel(L("移除") + " \(title)")
             }
         }
         .foregroundStyle(tint)
@@ -142,8 +142,8 @@ struct IconActionButton: View {
         }
         .buttonStyle(.glass)
         .disabled(!isEnabled)
-        .help(help)
-        .accessibilityLabel(help)
+        .help(L(help))
+        .accessibilityLabel(L(help))
     }
 }
 
@@ -168,8 +168,8 @@ struct CopyButton: View {
                 .foregroundStyle(copied ? Theme.success : Color.secondary)
         }
         .buttonStyle(.plain)
-        .help(accessibilityText)
-        .accessibilityLabel(accessibilityText)
+        .help(L(accessibilityText))
+        .accessibilityLabel(L(accessibilityText))
     }
 }
 
@@ -184,16 +184,16 @@ struct FormField<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label)
+            Text(L(label))
                 .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
             content
             if let error {
-                Label(error, systemImage: "exclamationmark.circle.fill")
+                Label(L(error), systemImage: "exclamationmark.circle.fill")
                     .font(.caption)
                     .foregroundStyle(Theme.danger)
             } else if let hint {
-                Text(hint)
+                Text(L(hint))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -211,7 +211,7 @@ struct KeyValueRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(label)
+            Text(L(label))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(width: 88, alignment: .leading)
@@ -237,7 +237,7 @@ struct PathRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
-            Text(label)
+            Text(L(label))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .frame(width: labelWidth, alignment: .leading)
@@ -250,7 +250,7 @@ struct PathRow: View {
                 .help(path)
             Spacer(minLength: 4)
             if showCopy, !path.isEmpty {
-                CopyButton(text: path, accessibilityText: "复制路径")
+                CopyButton(text: path, accessibilityText: L("复制路径"))
             }
             if revealInFinder, !path.isEmpty {
                 Button {
@@ -263,8 +263,8 @@ struct PathRow: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("在 Finder 中显示")
-                .accessibilityLabel("在 Finder 中显示 \(label)")
+                .help(L("在 Finder 中显示"))
+                .accessibilityLabel(L("在 Finder 中显示") + " \(L(label))")
             }
         }
     }
@@ -309,11 +309,11 @@ struct InlineNotice: View {
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 2) {
                 if let title {
-                    Text(title)
+                    Text(L(title))
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(kind.tint)
                 }
-                Text(message)
+                Text(L(message))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -342,7 +342,7 @@ struct SearchField: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(.secondary)
-            TextField(placeholder, text: $text)
+            TextField(L(placeholder), text: $text)
                 .textFieldStyle(.plain)
                 .font(.callout)
             if !text.isEmpty {
@@ -354,7 +354,7 @@ struct SearchField: View {
                         .foregroundStyle(.tertiary)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("清除搜索")
+                .accessibilityLabel(L("清除搜索"))
             }
         }
         .padding(.horizontal, 8)
@@ -377,7 +377,7 @@ struct SettingsSection<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text(title)
+            Text(L(title))
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.primary)
                 .padding(.leading, 4)
@@ -388,7 +388,7 @@ struct SettingsSection<Content: View>: View {
                         .strokeBorder(Theme.hairline, lineWidth: 1)
                 }
             if let footer {
-                Text(footer)
+                Text(L(footer))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .padding(.horizontal, 4)
@@ -414,9 +414,9 @@ struct SettingsRow<Content: View>: View {
                     .frame(width: 18, alignment: .center)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.callout)
+                Text(L(title)).font(.callout)
                 if let subtitle {
-                    Text(subtitle)
+                    Text(L(subtitle))
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -449,7 +449,7 @@ struct UnavailableLabel: View {
         HStack(spacing: 4) {
             Image(systemName: "bolt.slash")
                 .font(.system(size: 9, weight: .semibold))
-            Text(text).font(.caption2)
+            Text(L(text)).font(.caption2)
         }
         .foregroundStyle(.secondary)
         .padding(.horizontal, 7)

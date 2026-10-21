@@ -96,7 +96,7 @@ struct MenuBarView: View {
                 .font(.system(size: 9.5, weight: .medium))
                 .foregroundStyle(.tertiary)
                 .frame(width: 13)
-            Text(label)
+            Text(L(label))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(width: 30, alignment: .leading)
@@ -117,7 +117,7 @@ struct MenuBarView: View {
                 .foregroundStyle(.tertiary)
             Text(value)
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
-            Text(label)
+            Text(L(label))
                 .font(.system(size: 8.5))
                 .foregroundStyle(.tertiary)
         }
@@ -182,7 +182,7 @@ struct MenuBarView: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .frame(width: 15)
-                Text(title)
+                Text(L(title))
                     .font(.callout)
                 Spacer()
             }
@@ -204,12 +204,12 @@ struct MenuBarView: View {
             Button {
                 NSApp.terminate(nil)
             } label: {
-                Label("退出", systemImage: "power")
+                Label(L("退出"), systemImage: "power")
                     .font(.caption2)
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .help("退出 WeChat AI（⌥⌘Q）")
+            .help(L("退出 WeChat AI（⌥⌘Q）"))
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

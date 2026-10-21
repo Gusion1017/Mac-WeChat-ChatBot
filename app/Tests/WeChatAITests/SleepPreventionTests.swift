@@ -63,7 +63,7 @@ final class SleepPreventionTests: XCTestCase {
 
         XCTAssertEqual(settings.sleepPrevention, .never)
         XCTAssertEqual(settings.appearance, .system)
-        XCTAssertEqual(settings.language, "zh-Hans")
+        XCTAssertEqual(settings.language, "system")
     }
 
     func testSleepPreventionEncodingRoundtrip() throws {

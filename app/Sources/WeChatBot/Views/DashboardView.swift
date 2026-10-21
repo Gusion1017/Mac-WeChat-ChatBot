@@ -321,7 +321,7 @@ private struct DashboardRecentLogsCard: View {
         SectionCard(title: "最近活动", subtitle: "最新的运行日志", symbol: "text.alignleft", tint: Theme.info) {
             HStack {
                 Spacer()
-                Button("全部日志") { store.sidebarSelection = .logs }
+                Button(L("全部日志")) { store.sidebarSelection = .logs }
                     .buttonStyle(.plain)
                     .font(.caption)
                     .foregroundStyle(Theme.info)
@@ -329,7 +329,7 @@ private struct DashboardRecentLogsCard: View {
             .padding(.top, -8)
             VStack(alignment: .leading, spacing: 0) {
                 if entries.isEmpty {
-                    Text("暂无日志，启动机器人后这里会显示实时活动。")
+                    Text(L("暂无日志，启动机器人后这里会显示实时活动。"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -371,7 +371,7 @@ private struct DashboardRecentConversationsCard: View {
         SectionCard(title: "最近会话", subtitle: "点击继续查看", symbol: "bubble.left.and.bubble.right.fill", tint: Theme.accent) {
             HStack {
                 Spacer()
-                Button("全部会话") { store.sidebarSelection = .conversations }
+                Button(L("全部会话")) { store.sidebarSelection = .conversations }
                     .buttonStyle(.plain)
                     .font(.caption)
                     .foregroundStyle(Theme.accent)
@@ -380,7 +380,7 @@ private struct DashboardRecentConversationsCard: View {
             VStack(alignment: .leading, spacing: 2) {
                 let recent = recentConversations
                 if recent.isEmpty {
-                    Text("暂无会话，连接微信后会自动同步。")
+                    Text(L("暂无会话，连接微信后会自动同步。"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)

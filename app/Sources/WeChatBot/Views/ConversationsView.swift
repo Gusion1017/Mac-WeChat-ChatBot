@@ -77,7 +77,7 @@ struct ConversationsView: View {
         return VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 9) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("会话")
+                    Text(L("会话"))
                         .font(.system(.title3, design: .default, weight: .semibold))
                     Spacer(minLength: 4)
                     if totalUnread > 0 {
@@ -146,7 +146,7 @@ struct ConversationsView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Spacer()
-            Text("\(store.conversations.count) 个会话")
+            Text(L("\(store.conversations.count) 个会话"))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -226,14 +226,14 @@ struct ConversationsView: View {
             .toggleStyle(.switch)
             .controlSize(.small)
             .font(.caption)
-            .help("控制此会话是否自动回复")
+            .help(L("控制此会话是否自动回复"))
 
             Menu {
                 Section("人格") {
                     Button {
                         setPersona(nil, for: conversation)
                     } label: {
-                        Label("跟随默认", systemImage: conversation.personaID == nil ? "checkmark" : "person.crop.circle")
+                        Label(L("跟随默认"), systemImage: conversation.personaID == nil ? "checkmark" : "person.crop.circle")
                     }
                     ForEach(store.personas) { persona in
                         Button {
@@ -247,7 +247,7 @@ struct ConversationsView: View {
                     Button {
                         setWorkingHours(nil, for: conversation)
                     } label: {
-                        Label("跟随全局", systemImage: conversation.workingHours == nil ? "checkmark" : "clock")
+                        Label(L("跟随全局"), systemImage: conversation.workingHours == nil ? "checkmark" : "clock")
                     }
                     Button {
                         workingHoursTarget = conversation
@@ -260,20 +260,20 @@ struct ConversationsView: View {
                     Button {
                         setWorkingHours(WorkingHours(enabled: false), for: conversation)
                     } label: {
-                        Label("此会话不限制", systemImage: "infinity")
+                        Label(L("此会话不限制"), systemImage: "infinity")
                     }
                 }
                 Section("名称") {
                     Button {
                         renameTarget = conversation
                     } label: {
-                        Label("重命名会话…", systemImage: "pencil")
+                        Label(L("重命名会话…"), systemImage: "pencil")
                     }
                     if conversation.customTitle != nil {
                         Button {
                             rename(conversation, to: "")
                         } label: {
-                            Label("恢复自动名称", systemImage: "arrow.uturn.backward")
+                            Label(L("恢复自动名称"), systemImage: "arrow.uturn.backward")
                         }
                     }
                 }
@@ -281,7 +281,7 @@ struct ConversationsView: View {
                     Button(conversation.isPinned ? "取消置顶" : "置顶会话") {
                         togglePin(conversation)
                     }
-                    Button("标记为已读") {
+                    Button(L("标记为已读")) {
                         markRead(conversationID: conversation.id)
                     }
                     .disabled(conversation.unreadCount == 0)
@@ -293,8 +293,8 @@ struct ConversationsView: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .help("会话设置")
-            .accessibilityLabel("会话设置")
+            .help(L("会话设置"))
+            .accessibilityLabel(L("会话设置"))
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -371,7 +371,7 @@ struct ConversationsView: View {
 
             VStack(spacing: 7) {
                 HStack(alignment: .bottom, spacing: 8) {
-                    TextField("输入消息…", text: $draft, axis: .vertical)
+                    TextField(L("输入消息…"), text: $draft, axis: .vertical)
                         .textFieldStyle(.plain)
                         .font(.body)
                         .lineLimit(1...6)
@@ -382,7 +382,7 @@ struct ConversationsView: View {
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .strokeBorder(Theme.hairline, lineWidth: 1)
                         }
-                        .accessibilityLabel("消息输入框")
+                        .accessibilityLabel(L("消息输入框"))
 
                     Button {
                         send(to: conversation)
@@ -402,20 +402,20 @@ struct ConversationsView: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(!canSend)
-                    .help("发送消息（⌘↩）")
+                    .help(L("发送消息（⌘↩）"))
                     .keyboardShortcut(.return, modifiers: [.command])
-                    .accessibilityLabel("发送消息")
+                    .accessibilityLabel(L("发送消息"))
                 }
 
                 HStack(spacing: 8) {
                     Spacer(minLength: 4)
 
                     if store.gatewayConnected {
-                        Text("⌘↩ 发送")
+                        Text(L("⌘↩ 发送"))
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     } else {
-                        Label("服务未连接，手动发送已禁用", systemImage: "bolt.slash")
+                        Label(L("服务未连接，手动发送已禁用"), systemImage: "bolt.slash")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }

@@ -85,14 +85,14 @@ struct SidebarView: View {
                 Text("WeChat AI")
                     .font(.system(.headline, design: .rounded, weight: .semibold))
                     .lineLimit(1)
-                Text("微信智能助手")
+                Text(L("微信智能助手"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
             Spacer(minLength: 2)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("WeChat AI 微信智能助手")
+        .accessibilityLabel(L("WeChat AI 微信智能助手"))
     }
 
     // MARK: Navigation
@@ -207,8 +207,8 @@ struct SidebarView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("设置（⌘,）")
-            .accessibilityLabel("打开设置")
+            .help(L("设置（⌘,）"))
+            .accessibilityLabel(L("打开设置"))
         }
         .padding(.horizontal, 4)
         .padding(.top, 3)
@@ -279,8 +279,8 @@ struct SidebarStatusCapsule: View {
             )
         }
         .buttonStyle(.plain)
-        .help("查看机器人状态")
-        .accessibilityLabel("机器人状态")
+        .help(L("查看机器人状态"))
+        .accessibilityLabel(L("机器人状态"))
         .accessibilityValue("机器人\(store.isBotRunning ? "运行中" : "已停止")，微信\(wechatValue)，Hook \(hookValue)，AI \(aiValue)")
     }
 
@@ -290,7 +290,7 @@ struct SidebarStatusCapsule: View {
                 .font(.system(size: 8, weight: .medium))
                 .foregroundStyle(.tertiary)
                 .frame(width: 11)
-            Text(label)
+            Text(L(label))
                 .font(.system(size: 9.5))
                 .foregroundStyle(.secondary)
                 .frame(width: 28, alignment: .leading)

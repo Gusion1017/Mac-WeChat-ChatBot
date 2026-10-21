@@ -34,7 +34,7 @@ struct ConversationRenameSheet: View {
         HStack(spacing: 10) {
             AvatarView(title: conversation.displayTitle, kind: conversation.kind, size: 34)
             VStack(alignment: .leading, spacing: 2) {
-                Text("重命名会话").font(.headline)
+                Text(L("重命名会话")).font(.headline)
                 Text(conversation.id)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
@@ -49,7 +49,7 @@ struct ConversationRenameSheet: View {
 
     private var form: some View {
         VStack(alignment: .leading, spacing: 10) {
-            TextField("会话名称", text: $name)
+            TextField(L("会话名称"), text: $name)
                 .textFieldStyle(.roundedBorder)
                 .focused($isNameFocused)
                 .onSubmit(save)
@@ -57,7 +57,7 @@ struct ConversationRenameSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("微信接口只下发会话 ID，App 取不到真实昵称；给常用会话起名后，列表、AI 提示词与日志都会使用它。")
+            Text(L("微信接口只下发会话 ID，App 取不到真实昵称；给常用会话起名后，列表、AI 提示词与日志都会使用它。"))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -68,9 +68,9 @@ struct ConversationRenameSheet: View {
     private var footer: some View {
         HStack(spacing: 9) {
             Spacer()
-            Button("取消") { dismiss() }
+            Button(L("取消")) { dismiss() }
                 .keyboardShortcut(.cancelAction)
-            Button("保存") { save() }
+            Button(L("保存")) { save() }
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.accent)
                 .keyboardShortcut(.defaultAction)

@@ -32,7 +32,7 @@ struct SessionRow: View {
                             Image(systemName: "bolt.slash.fill")
                                 .font(.system(size: 7.5))
                                 .foregroundStyle(.tertiary)
-                                .help("AI 自动回复已关闭")
+                                .help(L("AI 自动回复已关闭"))
                         }
                         Spacer(minLength: 4)
                         if let replyProgress {

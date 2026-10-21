@@ -38,6 +38,7 @@ final class AppStore {
         self.providers = settings.providers
         self.personas = settings.personas
         self.schedules = settings.schedules
+        L10n.apply(settings.general.language)
         self.hookStatus.versionConfigFile = settings.hook.versionConfigPath
         // Reading WeChat's Info.plist is disk I/O and used to run synchronously in init.
         // It is filled in off-main by the runtime bootstrap instead (`AppStore+Runtime`),
@@ -80,6 +81,16 @@ final class AppStore {
         providers = loaded.providers
         personas = loaded.personas
         schedules = loaded.schedules
+        L10n.apply(loaded.general.language)
+    }
+
+    /// Changes the interface language and persists it. Views re-render through the
+    /// `language` setting; `L()` strings pick up the new language immediately.
+    func setLanguage(_ raw: String) {
+        guard settings.general.language != raw else { return }
+        settings.general.language = raw
+        L10n.apply(raw)
+        persist()
     }
 
     // MARK: Logs (runtime methods live in AppStore+Runtime.swift)

@@ -175,7 +175,7 @@ struct MemoryView: View {
                     Button {
                         startNewMemory()
                     } label: {
-                        Label("新增记忆", systemImage: "plus")
+                        Label(L("新增记忆"), systemImage: "plus")
                     }
                     .buttonStyle(.glass)
                     .accessibilityHint("新增一条长期记忆，可标记为核心记忆")
@@ -189,7 +189,7 @@ struct MemoryView: View {
                     Button {
                         showCleanup = true
                     } label: {
-                        Label("清理…", systemImage: "trash")
+                        Label(L("清理…"), systemImage: "trash")
                     }
                     .buttonStyle(.glass)
                     .disabled((chat?.totalMessages ?? 0) == 0)
@@ -235,13 +235,13 @@ struct MemoryView: View {
             titleVisibility: .visible,
             presenting: pendingDeletion
         ) { memory in
-            Button("删除", role: .destructive) {
+            Button(L("删除"), role: .destructive) {
                 deleteMemory(memory)
                 pendingDeletion = nil
             }
-            Button("取消", role: .cancel) { pendingDeletion = nil }
+            Button(L("取消"), role: .cancel) { pendingDeletion = nil }
         } message: { memory in
-            Text("「\(memory.summary.prefix(40))」删除后无法恢复，但不会影响微信聊天记录。")
+            Text(L("「\(memory.summary.prefix(40))」删除后无法恢复，但不会影响微信聊天记录。"))
         }
     }
 
@@ -289,11 +289,11 @@ struct MemoryView: View {
     private func memoryFolderPane(_ snapshot: LongTermSnapshot) -> some View {
         VStack(spacing: 0) {
             HStack {
-                Text("文件夹")
+                Text(L("文件夹"))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(snapshot.totalMemoryCount) 条记忆")
+                Text(L("\(snapshot.totalMemoryCount) 条记忆"))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
@@ -341,11 +341,11 @@ struct MemoryView: View {
                 Image(systemName: "star.fill")
                     .font(.system(size: 9))
                     .foregroundStyle(Theme.violet)
-                Text("核心 \(snapshot.coreMemoryCount) 条")
+                Text(L("核心 \(snapshot.coreMemoryCount) 条"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(snapshot.folderSessionCount) 个会话文件夹")
+                Text(L("\(snapshot.folderSessionCount) 个会话文件夹"))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -394,7 +394,7 @@ struct MemoryView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("\(folder.title) · \(counts.total) 条长期记忆 · 核心 \(counts.core) 条")
+        .help(L("\(folder.title) · \(counts.total) 条长期记忆 · 核心 \(counts.core) 条"))
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 
@@ -408,7 +408,7 @@ struct MemoryView: View {
                     .foregroundStyle(Theme.accent)
                 Text(listTitle(snapshot))
                     .font(.caption.weight(.semibold))
-                Text("\(snapshot.memories.count) 条")
+                Text(L("\(snapshot.memories.count) 条"))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
                 if snapshot.isSearching {
@@ -509,8 +509,8 @@ struct MemoryView: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("排序方式：综合权重（核心优先）/ 最近更新")
-        .accessibilityLabel("排序方式：\(sortMode.label)")
+        .help(L("排序方式：综合权重（核心优先）/ 最近更新"))
+        .accessibilityLabel(L("排序方式：\(sortMode.label)"))
     }
 
     /// 顶栏只保留「权重」短标签；公式放进 help 与点击弹出的 popover。
@@ -518,14 +518,14 @@ struct MemoryView: View {
         Button {
             showWeightInfo.toggle()
         } label: {
-            Label("权重", systemImage: "info.circle")
+            Label(L("权重"), systemImage: "info.circle")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("综合权重公式：点击查看说明")
-        .accessibilityLabel("综合权重公式说明")
+        .help(L("综合权重公式：点击查看说明"))
+        .accessibilityLabel(L("综合权重公式说明"))
         .popover(isPresented: $showWeightInfo, arrowEdge: .bottom) {
             weightInfoPopover
         }
@@ -533,7 +533,7 @@ struct MemoryView: View {
 
     private var weightInfoPopover: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("综合权重", systemImage: "scalemass")
+            Label(L("综合权重"), systemImage: "scalemass")
                 .font(.headline)
             Text("权重越高越优先进入提示词；核心记忆优先占用注入名额（最多 \(ChatEngine.longTermMemoryLimit) 条），"
                 + "核心之间也按权重排序。基础权重可在记忆编辑器中自由调整（0.1~10×）。")
@@ -546,7 +546,7 @@ struct MemoryView: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("编辑、合并或召回都会抬高权重；基础权重可手工调整并参与排序；越近、越常用的记忆优先级越高。")
+            Text(L("编辑、合并或召回都会抬高权重；基础权重可手工调整并参与排序；越近、越常用的记忆优先级越高。"))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -616,7 +616,7 @@ struct MemoryView: View {
     private func conversationPane(_ chat: ChatSnapshot) -> some View {
         VStack(spacing: 0) {
             HStack {
-                Text("会话")
+                Text(L("会话"))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -659,7 +659,7 @@ struct MemoryView: View {
                 Image(systemName: "cylinder.split.1x2")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
-                Text("\(chat.totalMessages) 条消息")
+                Text(L("\(chat.totalMessages) 条消息"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -681,7 +681,7 @@ struct MemoryView: View {
                     Text(conversation.displayTitle)
                         .font(.caption.weight(.medium))
                         .lineLimit(1)
-                    Text("\(count) 条 · \(conversation.kind.label)")
+                    Text(L("\(count) 条 · \(conversation.kind.label)"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -711,20 +711,20 @@ struct MemoryView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 if !search.isEmpty {
-                    Label("搜索结果", systemImage: "magnifyingglass")
+                    Label(L("搜索结果"), systemImage: "magnifyingglass")
                         .font(.caption.weight(.medium))
-                    Text("\(chat.searchResults.count) 条匹配")
+                    Text(L("\(chat.searchResults.count) 条匹配"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else if let conversation = selectedConversation {
                     AvatarView(title: conversation.displayTitle, kind: conversation.kind, size: 22)
                     Text(conversation.displayTitle)
                         .font(.caption.weight(.semibold))
-                    Text("\(chat.selectedMessages.count) 条消息")
+                    Text(L("\(chat.selectedMessages.count) 条消息"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("消息")
+                    Text(L("消息"))
                         .font(.caption.weight(.semibold))
                 }
                 Spacer()
@@ -1125,7 +1125,7 @@ private struct LongTermMemoryCard: View {
                             text: "基础 ×\(String(format: "%.1f", memory.baseWeight))",
                             color: Theme.info
                         )
-                        .help("手工调整的基础权重，会改变该记忆的排序")
+                        .help(L("手工调整的基础权重，会改变该记忆的排序"))
                     }
                     PillLabel(text: "权重 \(memory.weightLabel)", color: Theme.success)
                     Spacer(minLength: 4)
@@ -1138,12 +1138,12 @@ private struct LongTermMemoryCard: View {
             }
 
             Menu {
-                Button("编辑…", systemImage: "pencil", action: onEdit)
+                Button(L("编辑…"), systemImage: "pencil", action: onEdit)
                 Button(memory.isCore ? "取消核心记忆" : "设为核心记忆",
                        systemImage: memory.isCore ? "star.slash" : "star",
                        action: onToggleCore)
                 Divider()
-                Button("删除", systemImage: "trash", role: .destructive, action: onDelete)
+                Button(L("删除"), systemImage: "trash", role: .destructive, action: onDelete)
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.system(size: 14))
@@ -1151,7 +1151,7 @@ private struct LongTermMemoryCard: View {
             }
             .menuStyle(.borderlessButton)
             .frame(width: 24)
-            .accessibilityLabel("长期记忆操作")
+            .accessibilityLabel(L("长期记忆操作"))
         }
         .padding(12)
         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
@@ -1232,7 +1232,7 @@ private struct MemoryEditorSheet: View {
                     .foregroundStyle(isCore ? Theme.violet : Theme.accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(isNew ? "新增长期记忆" : "编辑长期记忆").font(.headline)
-                    Text("核心记忆在所属会话内优先注入并可自由调整权重；关联“全局记忆”时对所有会话生效")
+                    Text(L("核心记忆在所属会话内优先注入并可自由调整权重；关联“全局记忆”时对所有会话生效"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1241,7 +1241,7 @@ private struct MemoryEditorSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("记忆内容").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text(L("记忆内容")).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 TextEditor(text: $summary)
                     .font(.body)
                     .frame(minHeight: 150, maxHeight: 220)
@@ -1251,7 +1251,7 @@ private struct MemoryEditorSheet: View {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
                     )
-                Text("例如：对方叫小林，喜欢猫；我们约好周五晚上讨论旅行计划。")
+                Text(L("例如：对方叫小林，喜欢猫；我们约好周五晚上讨论旅行计划。"))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -1272,9 +1272,9 @@ private struct MemoryEditorSheet: View {
 
             HStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("关联会话").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    Picker("关联会话", selection: $conversationID) {
-                        Text("全局记忆（所有会话）").tag("")
+                    Text(L("关联会话")).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Picker(L("关联会话"), selection: $conversationID) {
+                        Text(L("全局记忆（所有会话）")).tag("")
                         ForEach(conversations) { conversation in
                             Text(conversation.displayTitle).tag(conversation.id)
                         }
@@ -1289,10 +1289,10 @@ private struct MemoryEditorSheet: View {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 5) {
-                    Toggle("核心记忆", isOn: $isCore)
+                    Toggle(L("核心记忆"), isOn: $isCore)
                         .toggleStyle(.switch)
                         .tint(Theme.violet)
-                    Text("核心记忆优先注入；核心之间也按综合权重排序")
+                    Text(L("核心记忆优先注入；核心之间也按综合权重排序"))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -1300,31 +1300,31 @@ private struct MemoryEditorSheet: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                    Text("基础权重").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(L("基础权重")).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     Spacer()
                     Text(String(format: "%.1f×", baseWeight))
                         .font(.caption.monospacedDigit().weight(.semibold))
                         .foregroundStyle(hasCustomWeight ? Theme.accent : Color.secondary)
-                    Button("重置") { baseWeight = LongTermMemory.defaultBaseWeight }
+                    Button(L("重置")) { baseWeight = LongTermMemory.defaultBaseWeight }
                         .buttonStyle(.plain)
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(Theme.accent)
                         .disabled(!hasCustomWeight)
-                        .help("恢复默认基础权重 1.0×")
+                        .help(L("恢复默认基础权重 1.0×"))
                 }
                 Slider(
                     value: $baseWeight,
                     in: LongTermMemory.baseWeightRange,
                     step: 0.1
                 ) {
-                    Text("基础权重")
+                    Text(L("基础权重"))
                 } minimumValueLabel: {
                     Text("0.1×").font(.system(size: 9)).foregroundStyle(.tertiary)
                 } maximumValueLabel: {
                     Text("10×").font(.system(size: 9)).foregroundStyle(.tertiary)
                 }
                 .tint(baseWeight >= LongTermMemory.defaultBaseWeight ? Theme.accent : Theme.warning)
-                .accessibilityLabel("基础权重")
+                .accessibilityLabel(L("基础权重"))
                 .accessibilityValue(String(format: "%.1f 倍", baseWeight))
 
                 HStack(spacing: 6) {
@@ -1339,7 +1339,7 @@ private struct MemoryEditorSheet: View {
                     Text("保存后综合权重约 \(String(format: "%.2f", estimatedWeight))")
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
-                        .help("按当前基础权重与保存时刷新的更新时间估算")
+                        .help(L("按当前基础权重与保存时刷新的更新时间估算"))
                 }
                 Text("核心记忆优先占用注入名额（最多 \(ChatEngine.longTermMemoryLimit) 条），"
                     + "核心之间也按综合权重排序；保存会刷新更新时间，时间衰减从头计算。")
@@ -1359,15 +1359,15 @@ private struct MemoryEditorSheet: View {
 
             HStack {
                 if !isNew {
-                    Button("删除", systemImage: "trash", role: .destructive) {
+                    Button(L("删除"), systemImage: "trash", role: .destructive) {
                         confirmDelete = true
                     }
                     .buttonStyle(.glass)
                 }
                 Spacer()
-                Button("取消") { dismiss() }
+                Button(L("取消")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button("保存") { save() }
+                Button(L("保存")) { save() }
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.accent)
                     .keyboardShortcut(.defaultAction)
@@ -1378,13 +1378,13 @@ private struct MemoryEditorSheet: View {
         .frame(width: 560)
         .background(.regularMaterial)
         .confirmationDialog("删除这条长期记忆？", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("删除", role: .destructive) {
+            Button(L("删除"), role: .destructive) {
                 onDelete(original)
                 dismiss()
             }
-            Button("取消", role: .cancel) {}
+            Button(L("取消"), role: .cancel) {}
         } message: {
-            Text("删除后无法恢复，但不会影响微信聊天记录。")
+            Text(L("删除后无法恢复，但不会影响微信聊天记录。"))
         }
     }
 
@@ -1444,13 +1444,13 @@ private struct MemoryCleanupSheet: View {
                     .font(.system(size: 22))
                     .foregroundStyle(Theme.danger)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("清理记忆库").font(.headline)
-                    Text("此操作不可撤销").font(.caption).foregroundStyle(.secondary)
+                    Text(L("清理记忆库")).font(.headline)
+                    Text(L("此操作不可撤销")).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
             }
 
-            Text("删除本地 SQLite 中保存的聊天记录。微信端的消息不会受影响。")
+            Text(L("删除本地 SQLite 中保存的聊天记录。微信端的消息不会受影响。"))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1480,7 +1480,7 @@ private struct MemoryCleanupSheet: View {
 
             HStack {
                 Spacer()
-                Button("取消") { dismiss() }
+                Button(L("取消")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button(isBusy ? "清理中…" : "确认清理") {
                     onClear(scope)
@@ -1508,8 +1508,8 @@ private struct MemoryCleanupSheet: View {
                     .font(.system(size: 13))
                     .foregroundStyle(scope == target ? Theme.danger : Color.secondary)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(.callout)
-                    Text(detail).font(.caption2).foregroundStyle(.secondary)
+                    Text(L(title)).font(.callout)
+                    Text(L(detail)).font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
             }
