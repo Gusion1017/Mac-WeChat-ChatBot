@@ -207,14 +207,14 @@ struct ProviderEditorSheet: View {
 
             HStack(spacing: 16) {
                 Stepper(
-                    "最大 \(draft.maxTokens) tokens",
+                    Lf("最大 %d tokens", draft.maxTokens),
                     value: $draft.maxTokens,
                     in: 64...32_000,
                     step: 128
                 )
                 .font(.callout)
                 Stepper(
-                    "超时 \(Int(draft.timeoutSeconds)) 秒",
+                    Lf("超时 %d 秒", Int(draft.timeoutSeconds)),
                     value: $draft.timeoutSeconds,
                     in: 5...300,
                     step: 5

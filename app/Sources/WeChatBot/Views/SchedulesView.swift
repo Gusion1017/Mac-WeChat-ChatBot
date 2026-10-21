@@ -223,7 +223,7 @@ struct ScheduleEditorSheet: View {
             HStack(spacing: 10) {
                 IconTile(symbol: "calendar.badge.clock", tint: Theme.info, size: 30)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(isNew ? "新建定时任务" : "编辑定时任务").font(.headline)
+                    Text(L(isNew ? "新建定时任务" : "编辑定时任务")).font(.headline)
                     Text(L("按计划向指定会话发送消息"))
                         .font(.caption)
                         .foregroundStyle(.secondary)

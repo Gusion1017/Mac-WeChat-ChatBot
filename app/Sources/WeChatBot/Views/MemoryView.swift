@@ -559,6 +559,14 @@ struct MemoryView: View {
         let importanceGrowth = String(format: "%.2f", LongTermMemory.importanceGrowth)
         let usageGrowth = String(format: "%.2f", LongTermMemory.usageGrowth)
         let halfLifeDays = Int(LongTermMemory.halfLifeDays)
+        if L10n.language == "en" {
+            return """
+            Weight = Base weight × Importance × Usage boost × Time decay
+            Importance = 1 + \(importanceGrowth) × log₂(1 + merged count)
+            Usage boost = 1 + \(usageGrowth) × min(recalls, \(LongTermMemory.usageCap))
+            Time decay = 0.5^(days since last update/recall / \(halfLifeDays))
+            """
+        }
         return """
         权重 = 基础权重 × 重要度 × 使用强化 × 时间衰减
         重要度 = 1 + \(importanceGrowth) × log₂(1 + 合并条数)
@@ -1230,7 +1238,7 @@ private struct MemoryEditorSheet: View {
                     .font(.system(size: 22))
                     .foregroundStyle(isCore ? Theme.violet : Theme.accent)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(isNew ? "新增长期记忆" : "编辑长期记忆").font(.headline)
+                    Text(L(isNew ? "新增长期记忆" : "编辑长期记忆")).font(.headline)
                     Text(L("核心记忆在所属会话内优先注入并可自由调整权重；关联“全局记忆”时对所有会话生效"))
                         .font(.caption)
                         .foregroundStyle(.secondary)

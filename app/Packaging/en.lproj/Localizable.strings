@@ -627,6 +627,7 @@
 "私聊回复已关闭" = "Direct message replies are off";
 "群聊·所有消息" = "Group chat · All messages";
 "自研研究与实现" = "In-house research & implementation";
+"超时 %d 秒" = "Timeout %d s";
 "运行日志已清空" = "Logs cleared";
 "还原失败：%@" = "Restore failed: %@";
 "还没有定时任务" = "No Schedules Yet";
@@ -797,6 +798,7 @@
 "开始从官方备份恢复微信…" = "Restoring WeChat from the official backup…";
 "按计划向指定会话发送消息" = "Send messages to a chat on a schedule";
 "新会话没有单独指定时使用" = "Used when a new conversation doesn't specify one";
+"最大 %d tokens" = "Max %d tokens";
 "未检测到微信，请检查路径" = "WeChat not found; check the path";
 "检测微信并安装 Hook" = "Detect WeChat and install the Hook";
 "正在连接 bridge…" = "Connecting to bridge…";
