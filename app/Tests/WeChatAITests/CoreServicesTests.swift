@@ -90,6 +90,60 @@ final class CoreServicesTests: XCTestCase {
         XCTAssertEqual(prompt.count, 3)
         XCTAssertEqual(prompt.first?.isCore, true)
         XCTAssertEqual(Set(prompt.map(\.summary)), Set(["旧记忆", "新记忆", "核心设定：用户叫小林"]))
+
+        // 基础权重可由用户自由调整：范围收敛、持久化，并参与核心记忆之间的排序。
+        XCTAssertEqual(LongTermMemory.clampBaseWeight(0.01), 0.1)
+        XCTAssertEqual(LongTermMemory.clampBaseWeight(99), 10.0)
+        XCTAssertEqual(LongTermMemory.clampBaseWeight(.nan), 1.0)
+        let lowCore = LongTermMemory(
+            conversationID: "",
+            summary: "核心低权重",
+            isCore: true,
+            baseWeight: 0.5,
+            createdAt: now.addingTimeInterval(-86_400),
+            updatedAt: now.addingTimeInterval(-86_400)
+        )
+        let highCore = LongTermMemory(
+            conversationID: "",
+            summary: "核心高权重",
+            isCore: true,
+            baseWeight: 4.0,
+            createdAt: now.addingTimeInterval(-86_400),
+            updatedAt: now.addingTimeInterval(-86_400)
+        )
+        XCTAssertTrue(highCore.hasCustomBaseWeight)
+        XCTAssertFalse(core.hasCustomBaseWeight)
+        try await store.upsertMemory(lowCore)
+        try await store.upsertMemory(highCore)
+        let weighted = try await store.fetchMemoriesForPrompt(conversationID: "c1", limit: 6, now: now)
+        XCTAssertEqual(
+            Array(weighted.prefix(2)).map(\.summary),
+            ["核心高权重", "核心低权重"],
+            "同一更新时间的核心记忆按基础权重排序"
+        )
+        let persisted = try await store.fetchMemories().first { $0.summary == "核心高权重" }
+        XCTAssertEqual(persisted?.baseWeight ?? 0, 4.0, accuracy: 0.000001)
+
+        // 核心记忆超过注入上限时，按综合权重保留权重更高的前 6 条。
+        for index in 0..<7 {
+            try await store.upsertMemory(LongTermMemory(
+                conversationID: "c3",
+                summary: "核心 #\(index)",
+                isCore: true,
+                baseWeight: Double(index + 1),
+                createdAt: now.addingTimeInterval(-86_400),
+                updatedAt: now.addingTimeInterval(-86_400)
+            ))
+        }
+        let capped = try await store.fetchMemoriesForPrompt(
+            conversationID: "c3",
+            limit: ChatEngine.longTermMemoryLimit,
+            now: now
+        )
+        XCTAssertEqual(capped.count, ChatEngine.longTermMemoryLimit)
+        XCTAssertFalse(capped.contains { $0.summary == "核心 #0" }, "权重最低的核心记忆应被注入上限挤出")
+        XCTAssertTrue(capped.contains { $0.summary == "核心 #6" })
+
         let search = try await store.fetchMemories(search: "新记忆")
         XCTAssertEqual(search.map(\.summary), ["新记忆"])
     }
@@ -1378,43 +1432,125 @@ final class CoreServicesTests: XCTestCase {
         settings.bot.groupTriggers = [.pat]
         settings.bot.cooldownSeconds = 0
         settings.bot.maxRepliesPerMinute = 0
+        settings.bot.selfMentionNames = ["g1@chatroom": "测试机器人"]
         let conversation = Conversation(id: "g1@chatroom", kind: .group, title: "测试群")
         let engine = RuleEngine()
 
-        func context(text: String, rawJSON: String?) -> RuleEngine.Context {
+        func context(text: String, rawJSON: String?,
+                     selfID: String = "wxid_bot") -> RuleEngine.Context {
             let message = ChatMessage(
-                id: UUID().uuidString, conversationID: conversation.id, senderID: "u1",
+                id: UUID().uuidString, conversationID: conversation.id, senderID: "wxid_friend",
                 senderName: "小明", direction: .incoming, text: text,
                 timestamp: Date(), rawJSON: rawJSON
             )
             return RuleEngine.Context(
                 conversation: conversation, message: message, settings: settings,
-                selfID: "self"
+                selfID: selfID
             )
         }
 
-        // 中文系统模板。
-        XCTAssertTrue(engine.evaluate(context(text: "\"小明\" 拍了拍我", rawJSON: nil)).shouldReply)
-        // 部分版本下发 raw sysmsg XML，JSON 转义后不包含中文模板。
-        XCTAssertTrue(engine.evaluate(context(
-            text: "",
-            rawJSON: "{\"msg_type\":10000,\"raw_message\":\"<sysmsg type=\\\"pat\\\">\"}"
+        // 4.1.15.55 实测形态：appmsg type=62 + <patinfo> target=self。
+        let appmsg = #"{"msg_type":49,"raw_message":"<msg><appmsg><type>62</type><title>&quot;小明&quot; 拍了拍 &quot;测试机器人&quot;</title><patinfo><fromusername>wxid_friend</fromusername><chatusername>g1@chatroom</chatusername><pattedusername>wxid_bot</pattedusername><template>&quot;小明&quot; 拍了拍 &quot;测试机器人&quot;</template></patinfo></appmsg></msg>"}"#
+        XCTAssertTrue(engine.evaluate(context(text: "\"小明\" 拍了拍我", rawJSON: appmsg)).shouldReply)
+
+        // 4.1.12 sysmsg pat + pattedusername=self。
+        let sysmsg = #"{"msg_type":10000,"raw_message":"<sysmsg type=\"pat\"><pat><fromusername>wxid_friend</fromusername><chatusername>g1@chatroom</chatusername><pattedusername>wxid_bot</pattedusername><template>&quot;小明&quot; 拍了拍 &quot;测试机器人&quot;</template></pat></sysmsg>"}"#
+        let sysmsgMatched = engine.evaluate(context(text: "", rawJSON: sysmsg))
+        XCTAssertTrue(sysmsgMatched.shouldReply)
+        XCTAssertEqual(sysmsgMatched.triggerLabel, "群聊·拍一拍")
+
+        // hook 新增的结构化字段：没有可解析 XML 也能识别。
+        let structured = #"{"pat_from_wxid":"wxid_friend","pat_chat_wxid":"g1@chatroom","pat_target_wxid":"wxid_bot"}"#
+        XCTAssertTrue(engine.evaluate(context(text: "", rawJSON: structured)).shouldReply)
+
+        // 没有结构化目标时，标题命中已学到的机器人群昵称才触发。
+        let noTarget = #"{"msg_type":49,"raw_message":"<msg><appmsg><type>62</type><patinfo><fromusername>wxid_friend</fromusername><chatusername>g1@chatroom</chatusername><template>&quot;小明&quot; 拍了拍 &quot;测试机器人&quot;</template></patinfo></appmsg></msg>"}"#
+        XCTAssertTrue(engine.evaluate(context(text: "", rawJSON: noTarget)).shouldReply)
+
+        // 拍别人不触发（即使事件里永远带 self_id）。
+        let otherTarget = #"{"msg_type":49,"raw_message":"<msg><appmsg><type>62</type><patinfo><fromusername>wxid_friend</fromusername><chatusername>g1@chatroom</chatusername><pattedusername>wxid_someone_else</pattedusername><template>&quot;小明&quot; 拍了拍 &quot;别人&quot;</template></patinfo></appmsg></msg>"}"#
+        XCTAssertFalse(engine.evaluate(context(text: "", rawJSON: otherTarget)).shouldReply)
+
+        // 纯文本消息里提到「拍了拍」不是拍一拍（rawJSON 没有 patinfo / type 62 / sysmsg）。
+        XCTAssertFalse(engine.evaluate(context(text: "\"小明\" 拍了拍我", rawJSON: nil)).shouldReply)
+        XCTAssertFalse(engine.evaluate(context(text: "我刚才拍了拍他", rawJSON: nil)).shouldReply)
+        XCTAssertFalse(engine.evaluate(context(
+            text: "我刚才拍了拍他",
+            rawJSON: #"{"raw_message":"我刚才拍了拍他"}"#
         )).shouldReply)
-        // 4.1.15.55 实测形态：appmsg type=49 + <type>62</type>，文本已被 hook 提取为 title。
-        XCTAssertTrue(engine.evaluate(context(
-            text: "\"小明\" 拍了拍我",
-            rawJSON: "{\"msg_type\":49,\"raw_message\":\"<msg><appmsg><type>62</type><title>\\\"小明\\\" 拍了拍我</title></appmsg></msg>\"}"
-        )).shouldReply)
-        // 本地化 title 不含中文模板时，仍靠 <type>62</type> 识别。
-        XCTAssertTrue(engine.evaluate(context(
-            text: "",
-            rawJSON: "{\"msg_type\":49,\"raw_message\":\"<msg><appmsg><type>62</type><title>nudged</title></appmsg></msg>\"}"
-        )).shouldReply)
+
+        // 没有 target 且对不上机器人昵称/selfID 时不触发。
+        settings.bot.selfMentionNames = nil
+        XCTAssertFalse(engine.evaluate(context(text: "\"小明\" 拍了拍我", rawJSON: noTarget)).shouldReply)
         // 普通消息不应触发。
         XCTAssertFalse(engine.evaluate(context(text: "大家好", rawJSON: nil)).shouldReply)
         // 未勾选「关键词」时，关键词消息不触发。
         settings.bot.keywords = ["天气"]
         XCTAssertFalse(engine.evaluate(context(text: "今天天气如何", rawJSON: nil)).shouldReply)
+    }
+
+    /// 回归：拍别人 / 纯文本提到「拍了拍」都不应唤醒机器人。
+    func testGroupPatTriggerRequiresBotAsTarget() {
+        var settings = AppSettings.default
+        settings.bot.groupTriggers = [.pat]
+        settings.bot.cooldownSeconds = 0
+        settings.bot.maxRepliesPerMinute = 0
+        let conversation = Conversation(id: "g1@chatroom", kind: .group, title: "测试群")
+        let engine = RuleEngine()
+
+        func context(text: String, rawJSON: String?) -> RuleEngine.Context {
+            let message = ChatMessage(
+                id: UUID().uuidString, conversationID: conversation.id, senderID: "wxid_friend",
+                senderName: "小明", direction: .incoming, text: text,
+                timestamp: Date(), rawJSON: rawJSON
+            )
+            return RuleEngine.Context(
+                conversation: conversation, message: message, settings: settings,
+                selfID: "wxid_bot"
+            )
+        }
+
+        let targetSelf = #"{"msg_type":49,"raw_message":"<msg><appmsg><type>62</type><patinfo><fromusername>wxid_friend</fromusername><chatusername>g1@chatroom</chatusername><pattedusername>WXID_BOT</pattedusername><template>nudged</template></patinfo></appmsg></msg>"}"#
+        let matched = engine.evaluate(context(text: "", rawJSON: targetSelf))
+        XCTAssertTrue(matched.shouldReply, "目标比对忽略大小写")
+        XCTAssertEqual(matched.triggerLabel, "群聊·拍一拍")
+
+        let targetOther = #"{"msg_type":49,"raw_message":"<msg><appmsg><type>62</type><patinfo><fromusername>wxid_friend</fromusername><chatusername>g1@chatroom</chatusername><pattedusername>wxid_someone_else</pattedusername><template>&quot;小明&quot; 拍了拍 &quot;别人&quot;</template></patinfo></appmsg></msg>"}"#
+        XCTAssertFalse(engine.evaluate(context(text: "", rawJSON: targetOther)).shouldReply)
+
+        // 没有目标：群聊里「拍了拍我」不能硬猜成机器人。
+        let patMeNoTarget = #"{"msg_type":10000,"raw_message":"<sysmsg type=\"pat\"><pat><fromusername>wxid_friend</fromusername><chatusername>g1@chatroom</chatusername><template>&quot;小明&quot; 拍了拍我</template></pat></sysmsg>"}"#
+        XCTAssertFalse(engine.evaluate(context(text: "小明 拍了拍我", rawJSON: patMeNoTarget)).shouldReply)
+
+        // 没有目标：模板里出现 selfID 或已学到的群昵称才命中。
+        let mentionsSelfID = #"{"msg_type":10000,"raw_message":"<sysmsg type=\"pat\"><pat><fromusername>wxid_friend</fromusername><chatusername>g1@chatroom</chatusername><template>&quot;小明&quot; 拍了拍 wxid_bot</template></pat></sysmsg>"}"#
+        XCTAssertTrue(engine.evaluate(context(text: "", rawJSON: mentionsSelfID)).shouldReply)
+
+        settings.bot.selfMentionNames = ["g1@chatroom": "测试机器人"]
+        let mentionsName = #"{"msg_type":10000,"raw_message":"<sysmsg type=\"pat\"><pat><fromusername>wxid_friend</fromusername><chatusername>g1@chatroom</chatusername><template>&quot;小明&quot; 拍了拍 &quot;测试机器人&quot;</template></pat></sysmsg>"}"#
+        XCTAssertTrue(engine.evaluate(context(text: "", rawJSON: mentionsName)).shouldReply)
+    }
+
+    /// 私聊不做群聊触发方式过滤：replyToDirect 为真时，拍一拍照常回复。
+    func testDirectPatMeStillReplies() {
+        var settings = AppSettings.default
+        settings.bot.cooldownSeconds = 0
+        settings.bot.maxRepliesPerMinute = 0
+        let conversation = Conversation(id: "wxid_friend", kind: .direct, title: "小明")
+        let rawJSON = #"{"msg_type":10000,"raw_message":"<sysmsg type=\"pat\"><pat><fromusername>wxid_friend</fromusername><template>&quot;小明&quot; 拍了拍我</template></pat></sysmsg>"}"#
+        let message = ChatMessage(
+            id: "m-pat-direct", conversationID: conversation.id, senderID: "wxid_friend",
+            senderName: "小明", direction: .incoming, text: "\"小明\" 拍了拍我",
+            timestamp: Date(), rawJSON: rawJSON
+        )
+        let ctx = RuleEngine.Context(
+            conversation: conversation, message: message, settings: settings,
+            selfID: "wxid_bot"
+        )
+        XCTAssertTrue(RuleEngine().evaluate(ctx).shouldReply)
+        XCTAssertTrue(PatMessage.isDirectedAtBot(
+            message, conversation: conversation, selfID: "wxid_bot", selfMentionName: nil
+        ))
     }
 
     func testGroupTriggerMultiSelectAndAlwaysExclusive() {
@@ -1425,11 +1561,14 @@ final class CoreServicesTests: XCTestCase {
         settings.bot.maxRepliesPerMinute = 0
         let conversation = Conversation(id: "g1@chatroom", kind: .group, title: "测试群")
         let engine = RuleEngine()
+        // 真实拍一拍事件：patinfo target=self，正文被 hook 提取为 title。
+        let patJSON = #"{"msg_type":49,"raw_message":"<msg><appmsg><type>62</type><patinfo><fromusername>wxid_friend</fromusername><chatusername>g1@chatroom</chatusername><pattedusername>self</pattedusername><template>&quot;小明&quot; 拍了拍我</template></patinfo></appmsg></msg>"}"#
 
-        func context(_ text: String) -> RuleEngine.Context {
+        func context(_ text: String, rawJSON: String? = nil) -> RuleEngine.Context {
             let message = ChatMessage(
                 id: UUID().uuidString, conversationID: conversation.id, senderID: "u1",
-                senderName: "小明", direction: .incoming, text: text, timestamp: Date()
+                senderName: "小明", direction: .incoming, text: text, timestamp: Date(),
+                rawJSON: rawJSON
             )
             return RuleEngine.Context(
                 conversation: conversation, message: message, settings: settings,
@@ -1439,7 +1578,7 @@ final class CoreServicesTests: XCTestCase {
 
         // @ + 拍一拍同时生效。
         XCTAssertTrue(engine.evaluate(context("@self 你好")).shouldReply)
-        XCTAssertTrue(engine.evaluate(context("\"小明\" 拍了拍我")).shouldReply)
+        XCTAssertTrue(engine.evaluate(context("\"小明\" 拍了拍我", rawJSON: patJSON)).shouldReply)
         // 未勾选关键词时不触发。
         XCTAssertFalse(engine.evaluate(context("今天天气如何")).shouldReply)
         XCTAssertFalse(engine.evaluate(context("大家好")).shouldReply)
@@ -1447,7 +1586,7 @@ final class CoreServicesTests: XCTestCase {
         // 勾选关键词后同样生效。
         settings.bot.groupTriggers = [.keyword, .pat]
         XCTAssertTrue(engine.evaluate(context("今天天气如何")).shouldReply)
-        XCTAssertTrue(engine.evaluate(context("\"小明\" 拍了拍我")).shouldReply)
+        XCTAssertTrue(engine.evaluate(context("\"小明\" 拍了拍我", rawJSON: patJSON)).shouldReply)
         XCTAssertFalse(engine.evaluate(context("@self 你好")).shouldReply)
 
         // 「所有消息」与其它方式互斥，即使配置里同时出现也按独占处理。

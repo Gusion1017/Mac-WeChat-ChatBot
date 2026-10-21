@@ -25,6 +25,20 @@ struct SelfRoutingRepairResult: Sendable, Equatable {
     var didChange: Bool { movedMessages > 0 || removedSelfConversation }
 }
 
+/// 历史「误归类会话」修复结果（自己/占位会话、伪群会话）。
+struct MisroutedConversationRepairResult: Sendable, Equatable {
+    /// 按 `raw_json` 明确推导出目标后搬走的消息条数。
+    var movedMessages: Int = 0
+    /// 受影响的目标会话 + 修正过 kind 的会话（不含被删除的会话，见 `removedConversationIDs`）。
+    var affectedConversationIDs: [String] = []
+    /// 搬空后被删除的嫌疑会话。
+    var removedConversationIDs: [String] = []
+    /// 修正了会话类型（伪群 → 私聊、群 ID → 群聊）的会话数。
+    var fixedKinds: Int = 0
+
+    var didChange: Bool { movedMessages > 0 || !removedConversationIDs.isEmpty || fixedKinds > 0 }
+}
+
 enum MemoryStoreError: LocalizedError {
     case openFailed(String)
     case sqlite(String)
@@ -208,6 +222,15 @@ actor MemoryStore {
             last_summarized_rowid INTEGER NOT NULL DEFAULT 0,
             updated_at REAL NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS contact_directory (
+            username TEXT PRIMARY KEY NOT NULL,
+            display TEXT NOT NULL,
+            nickname TEXT,
+            remark TEXT,
+            kind TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        );
         """)
 
         // v3: per-conversation working hours stored as nullable JSON
@@ -319,7 +342,7 @@ actor MemoryStore {
     /// 修复规则（只动 `conversation_id == 当前账号` 的会话，幂等、可重复执行）：
     ///   - 目标会话 = raw_json 的 `group_id`（群）或 `self_id`（私聊对方）；
     ///   - 消息改为 outgoing / sender=自己 / status=sent，并搬到目标会话；
-    ///   - 目标会话不存在时创建（群名「群聊 …」/ filehelper → 文件传输助手）；
+    ///   - 目标会话不存在时创建（标题留空，由 `ConversationName` 生成可读展示名）；
     ///   - 重算目标会话的 last_message_at / preview；
     ///   - 自己会话清空后删除（含 memories/memory_state 残留）。
     ///
@@ -360,13 +383,21 @@ actor MemoryStore {
                   let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
                 continue
             }
-            let groupID = (object["group_id"] as? String) ?? ""
-            let peerID = (object["target_id"] as? String)
-                ?? (object["self_id"] as? String)
-                ?? ""
+            // 只有合法 `@chatroom` 群 ID 才能当群目标；旧 hook 写进 group_id 的
+            // 私聊 wxid 会在这里被忽略，让下面的私聊兜底接管。
+            let rawGroupID = Self.routingString(object["group_id"]) ?? ""
+            let groupID = ConversationIdentity.isGroupID(rawGroupID) ? rawGroupID : ""
+            // 私聊兜底：target_id 优先，其次旧事件的 self_id；必须像真实对象且不是自己，
+            // 避免再次创建 `wxid_self` / 非法群会话。
+            let peerID = [Self.routingString(object["target_id"]), Self.routingString(object["self_id"])]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first {
+                    ConversationIdentity.isPlausiblePeerID($0)
+                        && !Self.isSameID($0, effectiveSelfID)
+                } ?? ""
             let target = !groupID.isEmpty ? groupID : peerID
             // 目标为空或就是自己（真正的「自己和自己」会话）时保持原样。
-            guard !target.isEmpty, target != effectiveSelfID else { continue }
+            guard !target.isEmpty, !Self.isSameID(target, effectiveSelfID) else { continue }
             moves.append(Move(
                 messageID: messageID,
                 targetID: target,
@@ -395,7 +426,7 @@ actor MemoryStore {
                 sqlite3_clear_bindings(insertConversation)
                 try bind(insertConversation, 1, move.targetID)
                 try bind(insertConversation, 2, move.targetIsGroup ? ConversationKind.group.rawValue : ConversationKind.direct.rawValue)
-                try bind(insertConversation, 3, Self.directConversationTitle(for: move.targetID, isGroup: move.targetIsGroup))
+                try bind(insertConversation, 3, "")
                 try stepDone(insertConversation)
             }
 
@@ -429,6 +460,345 @@ actor MemoryStore {
         )
     }
 
+    // MARK: - Misrouted conversation repair
+
+    /// 一条待搬移的消息及其归位后的字段。
+    private struct MisroutedMove {
+        var messageID: String
+        var targetID: String
+        var targetKind: ConversationKind
+        var direction: ChatDirection
+        var senderID: String
+        var senderName: String
+        var status: DeliveryStatus
+    }
+
+    /// 一次性修复「误归类会话」：自己 wxid 会话、字面量 `wxid_self`/`self` 占位会话，
+    /// 以及 `kind=group` 但 ID 不是 `@chatroom` 的伪群会话（旧 hook 把私聊拍一拍的
+    /// wxid 当群 ID 写入 `group_id`）。
+    ///
+    /// 安全阀：
+    /// - 只扫描上述嫌疑会话，健康会话一律不碰；
+    /// - 只搬 `raw_json` 能明确推导出目标（`@chatroom` 群 ID 或可辨认的私聊对象）的消息，
+    ///   目标等于当前会话/自己、或推导不出来的消息原样保留；
+    /// - 搬完重算预览、删除搬空的会话（含 memories/memory_state），并把剩余嫌疑会话的
+    ///   kind 归一化（伪群 → 私聊，`@chatroom` → 群聊）；幂等。
+    func repairMisroutedConversations(selfID: String) throws -> MisroutedConversationRepairResult {
+        let storedSelfID = selfID.trimmingCharacters(in: .whitespacesAndNewlines)
+        try ensureOpen()
+
+        let inferredSelfID = try inferAccountIDFromRawEvents()
+        let effectiveSelfID = (inferredSelfID ?? storedSelfID)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !effectiveSelfID.isEmpty else { return MisroutedConversationRepairResult() }
+        // 传入账号本身是占位值时无法可靠判定消息方向（区分不了「自己发出」与
+        // 「对方发来」），先不动数据；等 `get_login_info` 的权威账号到达后再修。
+        if inferredSelfID == nil, ConversationIdentity.isPlaceholderSelfID(effectiveSelfID) {
+            return MisroutedConversationRepairResult()
+        }
+
+        let suspicious = try suspiciousMisroutedConversations(effectiveSelfID: effectiveSelfID)
+        guard !suspicious.isEmpty else { return MisroutedConversationRepairResult() }
+
+        var moves: [MisroutedMove] = []
+        for conversation in suspicious {
+            moves.append(contentsOf: try misroutedMoves(
+                from: conversation,
+                effectiveSelfID: effectiveSelfID
+            ))
+        }
+
+        var targetKinds: [String: ConversationKind] = [:]
+        for move in moves {
+            targetKinds[move.targetID] = move.targetKind
+        }
+
+        var affected = Set(moves.map(\.targetID))
+        var removedConversationIDs: [String] = []
+        var fixedKinds = 0
+        // 已存在的目标会话若 kind 与推导结果不一致（旧 bug 可能把好友建成伪群、
+        // 或把群建成私聊），搬入前一并修正；公众号等明确类型不覆盖。
+        // 目标本身也是嫌疑会话时交给下面的 kind 归一化统一处理，避免重复计数。
+        let suspiciousIDs = Set(suspicious.map(\.id))
+        var targetKindFixes: [String: ConversationKind] = [:]
+        for (targetID, kind) in targetKinds where !suspiciousIDs.contains(targetID) {
+            guard let existing = try conversation(id: targetID),
+                  existing.kind != kind,
+                  existing.kind != .official else { continue }
+            targetKindFixes[targetID] = kind
+        }
+        try transaction {
+            // 目标会话不存在时创建，标题留空交给 `ConversationName` 生成可读展示名。
+            let insert = try prepare("""
+            INSERT OR IGNORE INTO conversations (id, kind, title) VALUES (?, ?, ?);
+            """)
+            defer { sqlite3_finalize(insert) }
+            for (targetID, kind) in targetKinds.sorted(by: { $0.key < $1.key }) {
+                sqlite3_reset(insert)
+                sqlite3_clear_bindings(insert)
+                try bind(insert, 1, targetID)
+                try bind(insert, 2, kind.rawValue)
+                try bind(insert, 3, "")
+                try stepDone(insert)
+            }
+
+            if !targetKindFixes.isEmpty {
+                let fixTargetKind = try prepare("UPDATE conversations SET kind = ? WHERE id = ?;")
+                defer { sqlite3_finalize(fixTargetKind) }
+                for (targetID, kind) in targetKindFixes.sorted(by: { $0.key < $1.key }) {
+                    sqlite3_reset(fixTargetKind)
+                    sqlite3_clear_bindings(fixTargetKind)
+                    try bind(fixTargetKind, 1, kind.rawValue)
+                    try bind(fixTargetKind, 2, targetID)
+                    try stepDone(fixTargetKind)
+                    fixedKinds += 1
+                }
+            }
+
+            let update = try prepare("""
+            UPDATE messages
+            SET conversation_id = ?, direction = ?, sender_id = ?, sender_name = ?, status = ?
+            WHERE id = ?;
+            """)
+            defer { sqlite3_finalize(update) }
+            for move in moves {
+                sqlite3_reset(update)
+                sqlite3_clear_bindings(update)
+                try bind(update, 1, move.targetID)
+                try bind(update, 2, move.direction.rawValue)
+                try bind(update, 3, move.senderID)
+                try bind(update, 4, move.senderName)
+                try bind(update, 5, move.status.rawValue)
+                try bind(update, 6, move.messageID)
+                try stepDone(update)
+            }
+
+            // 搬空的嫌疑会话直接删除（含 memories / memory_state 残留）。
+            for conversation in suspicious where try removeConversationIfEmpty(conversation.id) {
+                removedConversationIDs.append(conversation.id)
+            }
+
+            // kind 归一化：`@chatroom` → 群聊，其余 → 私聊。只处理仍然存在的嫌疑会话。
+            let removed = Set(removedConversationIDs)
+            let fixKind = try prepare("UPDATE conversations SET kind = ? WHERE id = ?;")
+            defer { sqlite3_finalize(fixKind) }
+            for conversation in suspicious where !removed.contains(conversation.id) {
+                // 部分消息被搬走但会话仍有留存消息：预览也要重算。
+                affected.insert(conversation.id)
+                let expected: ConversationKind = ConversationIdentity.isGroupID(conversation.id)
+                    ? .group
+                    : .direct
+                guard conversation.kind != expected else { continue }
+                sqlite3_reset(fixKind)
+                sqlite3_clear_bindings(fixKind)
+                try bind(fixKind, 1, expected.rawValue)
+                try bind(fixKind, 2, conversation.id)
+                try stepDone(fixKind)
+                fixedKinds += 1
+                affected.insert(conversation.id)
+            }
+
+            // 搬入消息会改变目标会话预览；kind 改动/留存消息的嫌疑会话也顺带刷新。
+            try refreshConversationPreviewRows(conversationIDs: affected)
+        }
+
+        guard !moves.isEmpty || !removedConversationIDs.isEmpty || fixedKinds > 0 else {
+            return MisroutedConversationRepairResult()
+        }
+        return MisroutedConversationRepairResult(
+            movedMessages: moves.count,
+            affectedConversationIDs: affected.sorted(),
+            removedConversationIDs: removedConversationIDs.sorted(),
+            fixedKinds: fixedKinds
+        )
+    }
+
+    /// 嫌疑会话：自己 wxid 会话、`wxid_self`/`self` 占位会话、kind=group 但 ID 非群 ID。
+    private func suspiciousMisroutedConversations(effectiveSelfID: String) throws -> [Conversation] {
+        let statement = try prepare("SELECT id, kind, title FROM conversations;")
+        defer { sqlite3_finalize(statement) }
+        var result: [Conversation] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let id = try text(statement, 0)
+            let kind = ConversationKind(rawValue: try text(statement, 1)) ?? .direct
+            let title = try text(statement, 2)
+            let isSelfConversation = Self.isSameID(id, effectiveSelfID)
+            let isPlaceholderSelf = ConversationIdentity.isPlaceholderSelfID(id)
+            let isFakeGroup = kind == .group && !ConversationIdentity.isGroupID(id)
+            guard isSelfConversation || isPlaceholderSelf || isFakeGroup else { continue }
+            result.append(Conversation(id: id, kind: kind, title: title))
+        }
+        return result
+    }
+
+    /// 逐条推导嫌疑会话里能明确归位的消息；推导不出或目标就是当前会话时跳过。
+    private func misroutedMoves(
+        from conversation: Conversation,
+        effectiveSelfID: String
+    ) throws -> [MisroutedMove] {
+        let statement = try prepare("""
+        SELECT id, sender_id, sender_name, raw_json
+        FROM messages WHERE conversation_id = ? ORDER BY timestamp ASC;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, conversation.id)
+
+        var moves: [MisroutedMove] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let messageID = try text(statement, 0)
+            let currentSenderID = try text(statement, 1)
+            let currentSenderName = try text(statement, 2)
+            guard let raw = optionalText(statement, 3),
+                  let object = Self.rawObject(raw),
+                  let target = Self.relocationTarget(
+                    for: object,
+                    sourceID: conversation.id,
+                    selfID: effectiveSelfID
+                  ) else { continue }
+
+            let outgoing = Self.rawIndicatesOutgoing(object, selfID: effectiveSelfID)
+            let movedSenderID: String
+            let movedSenderName: String
+            let status: DeliveryStatus
+            if outgoing {
+                movedSenderID = effectiveSelfID
+                movedSenderName = "我"
+                status = .sent
+            } else {
+                let rawSenderID = [Self.routingString(object["sender_wxid"]),
+                                   Self.routingString(object["user_id"])]
+                    .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .first { !$0.isEmpty } ?? ""
+                movedSenderID = rawSenderID.isEmpty ? currentSenderID : rawSenderID
+                let rawNickname = (object["sender"] as? [String: Any])
+                    .flatMap { Self.routingString($0["nickname"]) }?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if Self.isReadableSenderName(
+                    currentSenderName,
+                    senderID: movedSenderID,
+                    sourceID: conversation.id,
+                    selfID: effectiveSelfID
+                ) {
+                    movedSenderName = currentSenderName
+                } else if Self.isReadableSenderName(
+                    rawNickname,
+                    senderID: movedSenderID,
+                    sourceID: conversation.id,
+                    selfID: effectiveSelfID
+                ) {
+                    movedSenderName = rawNickname
+                } else {
+                    movedSenderName = currentSenderName
+                }
+                status = .received
+            }
+
+            moves.append(MisroutedMove(
+                messageID: messageID,
+                targetID: target.id,
+                targetKind: target.kind,
+                direction: outgoing ? .outgoing : .incoming,
+                senderID: movedSenderID,
+                senderName: movedSenderName,
+                status: status
+            ))
+        }
+        return moves
+    }
+
+    /// 目标推导：优先 `@chatroom` 群（group_id / to_wxid / pat_chat_wxid），
+    /// 其次私聊对象（from_wxid、to_wxid、target_id/self_id）。
+    private static func relocationTarget(
+        for object: [String: Any],
+        sourceID: String,
+        selfID: String
+    ) -> (id: String, kind: ConversationKind)? {
+        let groupFields = ["group_id", "to_wxid", "pat_chat_wxid"]
+        for field in groupFields {
+            guard let raw = routingString(object[field]) else { continue }
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard ConversationIdentity.isGroupID(value) else { continue }
+            // raw 明确指向当前会话：已经在正确群里，保持原样。
+            if isSameID(value, sourceID) { return nil }
+            if isSameID(value, selfID) { continue }
+            return (value, .group)
+        }
+
+        // 私聊对象兜底：可辨认、不是自己、且不是当前会话。
+        let peerFields = ["from_wxid", "to_wxid", "target_id", "self_id"]
+        for field in peerFields {
+            guard let raw = routingString(object[field]) else { continue }
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard ConversationIdentity.isPlausiblePeerID(value),
+                  !isSameID(value, selfID),
+                  !isSameID(value, sourceID) else { continue }
+            return (value, .direct)
+        }
+        return nil
+    }
+
+    /// 方向判定：显式 `is_self`，或 from/sender_wxid 等于当前账号。
+    private static func rawIndicatesOutgoing(_ object: [String: Any], selfID: String) -> Bool {
+        if boolValue(object["is_self"]) == true { return true }
+        for key in ["from_wxid", "sender_wxid"] {
+            if let value = routingString(object[key]), isSameID(value, selfID) { return true }
+        }
+        return false
+    }
+
+    private static func rawObject(_ raw: String) -> [String: Any]? {
+        guard let data = raw.data(using: .utf8) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private static func routingString(_ value: Any?) -> String? {
+        switch value {
+        case let string as String:
+            return string
+        case let number as NSNumber:
+            return number.stringValue
+        default:
+            return nil
+        }
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool? {
+        // JSONSerialization 的 true/false 是 NSNumber(__NSCFBoolean)；只接受 0/1，
+        // 避免把普通数字误当布尔（与 `OneBotEventParser` 保持一致）。
+        if let number = value as? NSNumber {
+            switch number.intValue {
+            case 0: return false
+            case 1: return true
+            default: return nil
+            }
+        }
+        return value as? Bool
+    }
+
+    private static func isSameID(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare(rhs.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame
+    }
+
+    /// 昵称是否可读（不是「我/自己」、裸 wxid、群 ID、占位自己、会话/账号 ID）。
+    private static func isReadableSenderName(
+        _ name: String,
+        senderID: String,
+        sourceID: String,
+        selfID: String
+    ) -> Bool {
+        let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return false }
+        if value == "我" || value == "自己" { return false }
+        if ConversationIdentity.isPlaceholderSelfID(value) { return false }
+        if ConversationIdentity.isGroupID(value) { return false }
+        let lower = value.lowercased()
+        if lower.hasPrefix("wxid_") || lower.hasPrefix("gh_") { return false }
+        if !senderID.isEmpty, lower == senderID.lowercased() { return false }
+        if lower == sourceID.lowercased() || lower == selfID.lowercased() { return false }
+        return true
+    }
+
     /// 从历史事件反推当前账号 wxid。
     ///
     /// 普通入站消息的 `self_id` 恒为当前账号，而 `user_id` 是不同好友/群成员；
@@ -451,7 +821,12 @@ actor MemoryStore {
             let sender = (object["user_id"] as? String)
                 ?? ((object["sender"] as? [String: Any])?["user_id"] as? String)
                 ?? ""
-            guard !candidate.isEmpty, candidate != sender else { continue }
+            // 旧 bridge/设置把 self_id 污染成 `wxid_self`/`self` 时，绝不能把它
+            // 反推成账号；群 ID 也不是账号。
+            guard !candidate.isEmpty,
+                  !ConversationIdentity.isPlaceholderSelfID(candidate),
+                  !ConversationIdentity.isGroupID(candidate),
+                  candidate != sender else { continue }
             counts[candidate, default: 0] += 1
             if !sender.isEmpty { senders[candidate, default: []].insert(sender) }
         }
@@ -475,10 +850,41 @@ actor MemoryStore {
         return top
     }
 
-    private static func directConversationTitle(for targetID: String, isGroup: Bool) -> String {
-        if isGroup { return "群聊 \(targetID)" }
-        if targetID == "filehelper" { return "文件传输助手" }
-        return targetID
+    /// 清理旧版本写入的裸 ID 标题（`wxid_*` / `*@chatroom` / `wxid==id` / 「群聊 <id>」）。
+    ///
+    /// 旧 App 直接把事件里的 wxid 写成 `conversations.title`，这些值会渗透到列表、
+    /// AI 提示词与日志。展示层已兜底，这里把库里也恢复为「空标题 = 自动名称」。
+    /// 只清理占位值，用户重命名或真实昵称保持不变；幂等，返回更新的行数。
+    func repairPlaceholderConversationTitles() throws -> Int {
+        try ensureOpen()
+        let select = try prepare("SELECT id, kind, title FROM conversations;")
+        defer { sqlite3_finalize(select) }
+
+        var targets: [String] = []
+        while sqlite3_step(select) == SQLITE_ROW {
+            let id = try text(select, 0)
+            let kind = ConversationKind(rawValue: try text(select, 1)) ?? .direct
+            let title = try text(select, 2)
+            guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            if ConversationName.isPlaceholderTitle(title, conversationID: id, kind: kind) {
+                targets.append(id)
+            }
+        }
+        guard !targets.isEmpty else { return 0 }
+
+        let update = try prepare("UPDATE conversations SET title = '' WHERE id = ?;")
+        defer { sqlite3_finalize(update) }
+        var changed = 0
+        try transaction {
+            for id in targets {
+                sqlite3_reset(update)
+                sqlite3_clear_bindings(update)
+                try bind(update, 1, id)
+                try stepDone(update)
+                changed += 1
+            }
+        }
+        return changed
     }
 
     /// Assumes an open database and an active transaction.
@@ -1288,6 +1694,76 @@ actor MemoryStore {
         defer { sqlite3_finalize(statement) }
         try bind(statement, 1, Int32(max(1, keep)))
         try stepDone(statement)
+    }
+
+    // MARK: - Contact directory
+
+    /// 最近一次成功抓取并缓存的通讯录目录；没有缓存时返回 nil。
+    ///
+    /// 缓存只存成功快照（失败目录不落库），`kind` 决定条目回到 `users` 还是 `groups`。
+    func loadContactDirectory() throws -> ContactDirectorySnapshot? {
+        try ensureOpen()
+        let statement = try prepare("""
+        SELECT username, display, nickname, remark, kind, updated_at FROM contact_directory;
+        """)
+        defer { sqlite3_finalize(statement) }
+        var users: [String: ContactDirectoryEntry] = [:]
+        var groups: [String: ContactDirectoryEntry] = [:]
+        var generatedAt: Date?
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let username = try text(statement, 0)
+            let entry = ContactDirectoryEntry(
+                display: try text(statement, 1),
+                nickname: optionalText(statement, 2),
+                remark: optionalText(statement, 3)
+            )
+            if (try text(statement, 4)) == ConversationKind.group.rawValue {
+                groups[username] = entry
+            } else {
+                users[username] = entry
+            }
+            let updatedAt = date(statement, 5)
+            generatedAt = max(generatedAt ?? updatedAt, updatedAt)
+        }
+        guard !(users.isEmpty && groups.isEmpty) else { return nil }
+        return ContactDirectorySnapshot(ok: true, generatedAt: generatedAt, users: users, groups: groups)
+    }
+
+    /// 事务内全量替换通讯录目录缓存。
+    ///
+    /// 失败态快照（`ok == false`）直接忽略，避免一次拿不到 DB key 就把可用缓存清空；
+    /// 读不到目录时 App 行为与没有该功能时完全一致。
+    func replaceContactDirectory(_ snapshot: ContactDirectorySnapshot) throws {
+        guard snapshot.ok else { return }
+        try ensureOpen()
+        let updatedAt = (snapshot.generatedAt ?? Date()).timeIntervalSince1970
+        let buckets: [(ConversationKind, [String: ContactDirectoryEntry])] = [
+            (.direct, snapshot.users),
+            (.group, snapshot.groups)
+        ]
+        try transaction {
+            try execute("DELETE FROM contact_directory;")
+            let statement = try prepare("""
+            INSERT OR REPLACE INTO contact_directory
+                (username, display, nickname, remark, kind, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """)
+            defer { sqlite3_finalize(statement) }
+            for (kind, entries) in buckets {
+                for (username, entry) in entries {
+                    guard !username.isEmpty else { continue }
+                    sqlite3_reset(statement)
+                    sqlite3_clear_bindings(statement)
+                    try bind(statement, 1, username)
+                    try bind(statement, 2, entry.display)
+                    try bind(statement, 3, entry.nickname)
+                    try bind(statement, 4, entry.remark)
+                    try bind(statement, 5, kind.rawValue)
+                    try bind(statement, 6, updatedAt)
+                    try stepDone(statement)
+                }
+            }
+        }
     }
 
     // MARK: - Schedules

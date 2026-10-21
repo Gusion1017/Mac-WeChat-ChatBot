@@ -994,7 +994,7 @@ struct SettingsView: View {
 
             SettingsSection(
                 title: "自研研究与实现",
-                footer: "Hook 地址移植、4.1.15 收发适配、R3 原生发送与真机验证均为本项目自研；上游仅提供基线脚本、地址查找工具与 OneBot 协议实现。"
+                footer: "Hook 地址移植、4.1.15 收发适配、R3 原生发送、SQLCipher4 通讯录解密与真机验证均为本项目自研；上游仅提供基线脚本、地址查找工具与 OneBot 协议实现。"
             ) {
                 researchRow(
                     "微信 4.1.15.55（270135）地址移植",
@@ -1032,6 +1032,20 @@ struct SettingsView: View {
                 )
                 SettingsDivider()
                 researchRow(
+                    "通讯录真实昵称/群名与群成员群昵称（SQLCipher4 进程内解密）",
+                    "入站事件只有 wxid，昵称/群名/群昵称在加密通讯录里。4.1+ 进程内不缓存 raw key：Hook 系统 CommonCrypto 的 CCCryptorCreate 捕获 32B AES key 并用页 1 试解密校验，同时捕获登录期 CCKeyDerivationPBKDF（SHA512 × 256000 轮）；按 4096B 页、IV 16B / MAC 64B 格式解密 contact.db，按 salt/checksum 合并 WAL 当前代帧，进程内 SqliteDatabase 查询后立即删除临时明文库；再解析 chat_room.ext_buffer protobuf 取群成员群昵称（群聊优先于通讯录昵称）。真机 0.06s 返回 20+ 位联系人、群名与 9 名群成员，会话标题落库为真实昵称/群名",
+                    symbol: "person.text.rectangle",
+                    tint: Theme.info
+                )
+                SettingsDivider()
+                researchRow(
+                    "通讯录密钥捕获与降级",
+                    "密钥只存在于 Hook 内存与 0600 的 db-keys.json：bridge 启动时回灌、WS 回包剥离 keys；未拿到 key 时目录请求按 60s 重试并静默降级为可读兜底名，不阻塞收发；在微信里打开一次通讯录/聊天即可触发页读捕获",
+                    symbol: "key.horizontal",
+                    tint: Theme.violet
+                )
+                SettingsDivider()
+                researchRow(
                     "安全边界与复盘方法",
                     "拒绝伪造 map 节点（C2 已证伪）、不在 owl coroutine 上执行 JS、不做 mid-function PC 跳转；崩溃报告/canary 复盘 + 只读真机探针 + 离线渲染/逻辑测试",
                     symbol: "shield.lefthalf.filled",
@@ -1040,7 +1054,7 @@ struct SettingsView: View {
                 SettingsDivider()
                 researchRow(
                     "分析工具链（自建/复用）",
-                    "Capstone 反汇编、addrfind 地址移植、pointer_owner 解 chained fixups、frida-python 只读探针；研究证据保留在 _research/（地址/反汇编/崩溃复盘/真机日志）",
+                    "Capstone 反汇编、addrfind 地址移植、pointer_owner 解 chained fixups、frida-python 只读探针；SQLCipher 页格式/WAL 校验和与 CommonCrypto Hook 探针；研究证据保留在 _research/（地址/反汇编/崩溃复盘/真机日志）",
                     symbol: "wrench.adjustable",
                     tint: Theme.info
                 )

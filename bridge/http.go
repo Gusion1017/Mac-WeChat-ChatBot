@@ -50,11 +50,10 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 		if v.Type == "text" {
 			sendContent += v.Data.Text
 		} else if v.Type == "at" {
-			if req.GroupID != "" {
-				if nicknameInter, ok := userID2NicknameMap.Load(req.GroupID + "_" + v.Data.QQ); ok {
-					sendContent += fmt.Sprintf("@%s\u2005", nicknameInter.(string))
-					atUserID += v.Data.QQ + ","
-				}
+			// 群成员缓存未命中时回退通讯录昵称（docs/hook-contact-directory.md §4）。
+			if nickname, ok := resolveAtNickname(req.GroupID, v.Data.QQ); ok {
+				sendContent += fmt.Sprintf("@%s\u2005", nickname)
+				atUserID += v.Data.QQ + ","
 			}
 
 		} else if v.Type == "image" || v.Type == "video" || v.Type == "record" || v.Type == "voice" || v.Type == "file" {
@@ -75,6 +74,27 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 				ResultChan: ch,
 			}
 			msgChan <- msg
+			resultChans = append(resultChans, ch)
+		} else if v.Type == "pat" {
+			// 拍一拍：群聊 data.qq 是群内被拍成员；私聊默认拍会话对方。
+			target := ""
+			if v.Data != nil {
+				target = v.Data.QQ
+			}
+			if target == "" && req.GroupID == "" {
+				target = req.UserID
+			}
+			if target == "" {
+				Error("拍一拍目标为空")
+				continue
+			}
+			ch := make(chan error, 1)
+			msgChan <- &SendMsg{
+				UserId:     target,
+				GroupID:    req.GroupID,
+				Type:       "pat",
+				ResultChan: ch,
+			}
 			resultChans = append(resultChans, ch)
 		} else if v.Type == "reply" {
 			if v.Data.ReplyMessage == nil {
@@ -264,4 +284,3 @@ func extractFileName(s string) string {
 	}
 	return s
 }
-

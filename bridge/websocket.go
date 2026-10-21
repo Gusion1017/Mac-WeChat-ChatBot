@@ -2,18 +2,43 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
-	
+
 	"github.com/gorilla/websocket"
 )
 
 var upgrader = websocket.Upgrader{}
 var conn *websocket.Conn
+
+// wsWriteMu 串行化 WebSocket 写：gorilla/websocket 只允许一个并发 writer。
+// 通讯录目录动作的同步回包与事件推送来自不同 goroutine，没有这把锁会触发
+// "concurrent write to websocket connection" 并把连接打掉（2026-10-21 真机）。
+var wsWriteMu sync.Mutex
+
+func wsWriteJSON(v any) error {
+	wsWriteMu.Lock()
+	defer wsWriteMu.Unlock()
+	if conn == nil {
+		return errors.New("连接为空")
+	}
+	return conn.WriteJSON(v)
+}
+
+func wsWriteMessage(messageType int, data []byte) error {
+	wsWriteMu.Lock()
+	defer wsWriteMu.Unlock()
+	if conn == nil {
+		return errors.New("连接为空")
+	}
+	return conn.WriteMessage(messageType, data)
+}
 
 type OneBotWSMsg struct {
 	Action string    `json:"action"`
@@ -35,7 +60,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	
+
 	for {
 		m := new(OneBotWSMsg)
 		_, msgByte, err := conn.ReadMessage()
@@ -43,17 +68,17 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			Error("读取失败", "err", err)
 			break
 		}
-		
+
 		Info("收到消息", "msg", string(msgByte))
 		err = json.Unmarshal(msgByte, m)
 		if err != nil {
 			Error("解析失败", "err", err)
 			continue
 		}
-		
+
 		switch m.Action {
 		case "get_login_info":
-			err = conn.WriteJSON(map[string]any{
+			err = wsWriteJSON(map[string]any{
 				"echo":   m.Echo,
 				"status": "ok",
 				"data": map[string]any{
@@ -67,7 +92,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		case "get_group_member_info":
 			nickname, _ := userID2NicknameMap.Load(m.Params.GroupID + "_" + m.Params.UserID)
-			err = conn.WriteJSON(map[string]any{
+			err = wsWriteJSON(map[string]any{
 				"echo":   m.Echo,
 				"status": "ok",
 				"data": map[string]any{
@@ -78,17 +103,38 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				Error("写入失败", "err", err)
 				break
 			}
+		case "get_contact_directory":
+			// 通讯录目录：hook 在微信进程内解密 contact.db 后返回 JSON，原样放进 data；
+			// 失败（未捕获 DB key / 解密失败 / 未实现）只回 failed，不影响消息链路。
+			directory, contactErr := refreshContactDirectory()
+			resp := map[string]any{
+				"echo":   m.Echo,
+				"status": "ok",
+				"data":   directory.publicCopy(),
+			}
+			if contactErr != nil {
+				Warn("获取通讯录目录失败", "err", contactErr)
+				resp = map[string]any{
+					"echo":   m.Echo,
+					"status": "failed",
+					"error":  contactErr.Error(),
+				}
+			}
+			if err = wsWriteJSON(resp); err != nil {
+				Error("写入失败", "err", err)
+				break
+			}
 		case "send_private_msg", "send_group_msg":
 			err = SendWS(m.Params)
 			if err != nil {
 				Error("发送失败", "err", err)
 				break
 			}
-			
+
 		}
-		
+
 	}
-	
+
 }
 
 func SendWebSocketMsg(jsonData []byte) {
@@ -97,14 +143,14 @@ func SendWebSocketMsg(jsonData []byte) {
 			Error("ws panic", "err", r, "stack", string(debug.Stack()))
 		}
 	}()
-	
+
 	if conn == nil {
 		Error("连接为空")
 		return
 	}
-	
+
 	time.Sleep(time.Duration(config.SendInterval) * time.Millisecond)
-	
+
 	jsonReq, err := HandleMsg(jsonData)
 	if err != nil {
 		Error("JSON 序列化失败", "err", err)
@@ -113,9 +159,9 @@ func SendWebSocketMsg(jsonData []byte) {
 	if jsonReq == nil {
 		return
 	}
-	
+
 	Info("发送数据", "msg", string(jsonReq))
-	err = conn.WriteMessage(websocket.TextMessage, jsonReq)
+	err = wsWriteMessage(websocket.TextMessage, jsonReq)
 	if err != nil {
 		Error("发送消息失败", "err", err)
 		return
@@ -139,18 +185,16 @@ func SendWS(req *WSParams) error {
 			Error("JSON 反序列化失败", "err", err)
 			return err
 		}
-		
+
 		for _, v := range msgs {
 			if v.Type == "text" {
 				sendContent += v.Data.Text
 			} else if v.Type == "at" {
-				if req.GroupID != "" {
-					if nicknameInter, ok := userID2NicknameMap.Load(req.GroupID + "_" + v.Data.QQ); ok {
-						sendContent += fmt.Sprintf("@%s\u2005", nicknameInter.(string))
-						atUserID += v.Data.QQ + ","
-					}
+				// 群成员缓存未命中时回退通讯录昵称（docs/hook-contact-directory.md §4）。
+				if nickname, ok := resolveAtNickname(req.GroupID, v.Data.QQ); ok {
+					sendContent += fmt.Sprintf("@%s\u2005", nickname)
+					atUserID += v.Data.QQ + ","
 				}
-				
 			} else if v.Type == "image" || v.Type == "video" {
 				msgChan <- &SendMsg{
 					UserId:  req.UserID,
@@ -158,10 +202,25 @@ func SendWS(req *WSParams) error {
 					Content: v.Data.File,
 					Type:    v.Type,
 				}
+			} else if v.Type == "pat" {
+				target := ""
+				if v.Data != nil {
+					target = v.Data.QQ
+				}
+				if target == "" && req.GroupID == "" {
+					target = req.UserID
+				}
+				if target != "" {
+					msgChan <- &SendMsg{
+						UserId:  target,
+						GroupID: req.GroupID,
+						Type:    "pat",
+					}
+				}
 			}
 		}
 	}
-	
+
 	if sendContent != "" {
 		msgChan <- &SendMsg{
 			UserId:  req.UserID,
@@ -171,7 +230,7 @@ func SendWS(req *WSParams) error {
 			AtUser:  strings.TrimRight(atUserID, ","),
 		}
 	}
-	
+
 	return nil
 }
 
@@ -181,8 +240,8 @@ func testWebSocket(w http.ResponseWriter, r *http.Request) {
 		Error("读取消息失败", "err", err)
 		return
 	}
-	
-	err = conn.WriteMessage(websocket.TextMessage, jsonData)
+
+	err = wsWriteMessage(websocket.TextMessage, jsonData)
 	if err != nil {
 		Error("发送消息失败", "err", err)
 		return

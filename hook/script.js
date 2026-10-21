@@ -239,6 +239,7 @@ function selectProtoHexForSend() {
     if (sendMsgType === "img") return imgProtoHexGlobal;
     if (sendMsgType === "video") return videoProtoHexGlobal;
     if (sendMsgType === "reply") return replyProtoHexGlobal;
+    if (sendMsgType === "pat") return patProtoHexGlobal;
     if (sendMsgType === "file") return fileProtoHexGlobal;
     if (sendMsgType === "fileupload") return fileUploadProtoHexGlobal;
     if (sendMsgType === "appattach") return appAttachProtoHexGlobal;
@@ -379,6 +380,7 @@ function initAddresses() {
     }
     setImmediate(setupDownloadFileDynamic);
     setImmediate(attachMessageFinalizer);
+    setImmediate(contactSetupHooks);
     setImmediate(setReceiver);
 }
 
@@ -412,13 +414,20 @@ function generateAESKey() {
 
 const MAX_FRIDA_MESSAGE_BYTES = 4 * 1024 * 1024;
 
+// 轻量可读性探测（2026-10-21 性能修复）。
+// 不要改回 Process.findRangeByAddress：Frida 17 每次调用都会遍历进程内存映射
+// (mach_vm_region_recurse) 并对命中区间查 proc_info(PROC_PIDREGIONPATHINFO)，
+// 在微信这种数百 MB、上万 mapping 的进程里单次 20~50ms。Message finalizer 每条
+// 消息要探测 10+ 个指针，历史回放（上滑聊天记录）时会把微信自己的消息线程按
+// 「约 1 条/秒」拖住。这里直接试读 1 字节：非法地址由 Frida 转成可捕获异常，
+// 调用方已有 try/catch 兜底；跨页/字符串长度越界仍由后续读取的 try/catch 处理。
 function isReadablePointer(addr) {
     try {
         if (!addr || addr.isNull()) {
             return false;
         }
-        const range = Process.findRangeByAddress(addr);
-        return range !== null && range.protection.indexOf('r') !== -1;
+        addr.readU8();
+        return true;
     } catch (e) {
         return false;
     }
@@ -493,6 +502,14 @@ function parseMentionList(msgSource) {
     return mentions;
 }
 
+// 微信群 ID 契约：一律以 @chatroom 结尾（大小写不敏感）。hook 侧判群和清洗
+// 拍一拍 <chatusername> 都用它：私聊时该字段是 wxid，直接当群 ID 会为好友
+// 伪造出一个「群」会话（2026-10-21 修复）。
+function isChatroomID(value) {
+    if (!value || typeof value !== "string") return false;
+    return /@chatroom$/i.test(value);
+}
+
 // 微信「拍一拍」在 4.1.15 以 appmsg（type=49，appmsg/type=62）下发，正文在 <title> 里。
 // 提取标题后作为消息文本，聊天列表/规则引擎都能直接看到「拍了拍」。
 function extractWeChatPatTitle(content) {
@@ -504,12 +521,48 @@ function extractWeChatPatTitle(content) {
     }
     var match = content.match(/<title>([\s\S]*?)<\/title>/);
     if (!match || !match[1]) return null;
-    var title = match[1]
-        .replace(/&quot;/g, '"')
+    var title = decodeXmlText(match[1]);
+    return title.length > 0 ? title : null;
+}
+
+function decodeXmlText(value) {
+    if (!value) return "";
+    return String(value)
         .replace(/&lt;/g, "<")
         .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
         .replace(/&amp;/g, "&");
-    return title.length > 0 ? title : null;
+}
+
+// 从 appmsg/patinfo（4.1.15）或 sysmsg/pat（4.1.12 及更早）解析「谁拍了谁」。
+// 规则层必须用 target_wxid 判断是否拍的是机器人：只看标题里的「拍了拍」会把
+// 群里拍别人的消息也当成唤醒（2026-10-21 修复）。
+function extractWeChatPatInfo(content) {
+    if (!content || typeof content !== "string") return null;
+    var block = null;
+    var infoMatch = content.match(/<patinfo>([\s\S]*?)<\/patinfo>/i);
+    if (infoMatch) {
+        block = infoMatch[1];
+    } else {
+        var patMatch = content.match(/<pat>([\s\S]*?)<\/pat>/i) ||
+            content.match(/<patmsg>([\s\S]*?)<\/patmsg>/i);
+        if (patMatch) block = patMatch[1];
+    }
+    if (!block) return null;
+    function pick(name) {
+        var match = block.match(new RegExp("<" + name + "[^>]*>([\\s\\S]*?)</" + name + ">", "i"));
+        return match && match[1] ? decodeXmlText(match[1]).trim() : "";
+    }
+    var target = pick("pattedusername");
+    if (!target) return null;
+    return {
+        from_wxid: pick("fromusername"),
+        chat_wxid: pick("chatusername"),
+        target_wxid: target,
+        suffix: pick("patsuffix"),
+        template: pick("template")
+    };
 }
 
 function attachMessageFinalizer() {
@@ -530,25 +583,41 @@ function attachMessageFinalizer() {
                     if (mode !== 1) return;
                     var obj = this.context.x0;
                     if (!isReadablePointer(obj)) return;
+                    // 定长字段先读并按 serverId 去重：历史回放时同一条消息可能被重复
+                    // finalize，重复命中直接返回，不再做字符串拷贝/正则/JSON。
+                    var type = obj.add(0x0c).readU32();
+                    var created = obj.add(0x114).readU32();
+                    var serverId = obj.add(0xf8).readU64().toString();
+                    if (serverId !== "0" && incomingMessageSeen[serverId]) return;
                     var from = readStdStringCompat(obj.add(0x18), 256);
                     var to = readStdStringCompat(obj.add(0x30), 256);
                     var content = readStdStringCompat(obj.add(0x130), 4 * 1024 * 1024);
                     if (from === null || to === null || content === null) return;
                     if (!from || !to) return;
-                    // 群消息的真实发送者 wxid 在 +0x48；@ 目标列表在 +0x160 的 <atuserlist>。
-                    var member = readStdStringCompat(obj.add(0x48), 256) || "";
-                    var msgSource = readStdStringCompat(obj.add(0x160), 64 * 1024) || "";
-                    var mentions = parseMentionList(msgSource);
-                    var type = obj.add(0x0c).readU32();
-                    var created = obj.add(0x114).readU32();
-                    var serverId = obj.add(0xf8).readU64().toString();
-                    if (serverId !== "0" && incomingMessageSeen[serverId]) return;
                     if (serverId !== "0") incomingMessageSeen[serverId] = true;
                     var group = "";
                     var user = from;
                     var text = content;
                     var nickname = from;
-                    if (from.indexOf("@chatroom") >= 0) {
+                    var member = "";
+                    var msgSource = "";
+                    var mentions = [];
+                    // 普通消息不做 patinfo 正则；4.1.15 拍一拍是 type=49，旧版 sysmsg
+                    // 则含 patinfo/pattedusername 标记。用轻量 indexOf 先筛。
+                    var patInfo = null;
+                    if (type === 49 || content.indexOf("patinfo") >= 0 ||
+                        content.indexOf("pattedusername") >= 0 || content.indexOf("patmsg") >= 0) {
+                        patInfo = extractWeChatPatInfo(content);
+                    }
+                    // 判群：from 或 to 任一以 @chatroom 结尾。入站群消息 from=群；
+                    // 自己发出的群消息 from=自己、to=群。只有 from 是群时才需要读
+                    // 群成员/正文前缀；仅 to 是群时只置 group，不做成员解析。
+                    if (isChatroomID(from)) {
+                        // 群消息的真实发送者 wxid 在 +0x48；@ 目标列表在 +0x160 的
+                        // <atuserlist>。私聊不需要这两次字符串读取（历史回放时省开销）。
+                        member = readStdStringCompat(obj.add(0x48), 256) || "";
+                        msgSource = readStdStringCompat(obj.add(0x160), 64 * 1024) || "";
+                        mentions = parseMentionList(msgSource);
                         group = from;
                         if (member.indexOf("wxid_") === 0) user = member;
                         var prefixes = [user + ": ", user + ":\n"];
@@ -569,6 +638,23 @@ function attachMessageFinalizer() {
                             }
                         }
                         if (!nickname || nickname === from) nickname = user;
+                    } else if (isChatroomID(to)) {
+                        // 自己发出的群消息：from=自己、to=群；不能按私聊处理，
+                        // 否则会被归进「自己 wxid」的会话（2026-10-21 修复）。
+                        group = to;
+                    }
+                    // 拍一拍 appmsg 的 from/to 可能是群 ID（群内拍人），也可能是
+                    // 私聊双方的 wxid。真实拍人者/被拍者在 <patinfo> 里，优先采用，
+                    // 供 App 判定「是否拍的是机器人」。
+                    if (patInfo) {
+                        if (patInfo.from_wxid && patInfo.from_wxid.indexOf("wxid_") === 0) {
+                            user = patInfo.from_wxid;
+                            if (!member) member = user;
+                            nickname = user;
+                        }
+                        // 只有 <chatusername> 是合法群 ID 时才当群：私聊拍一拍里它是
+                        // wxid，旧逻辑会据此伪造群会话（2026-10-21 修复）。
+                        if (!group && isChatroomID(patInfo.chat_wxid)) group = patInfo.chat_wxid;
                     }
                     var shown = text;
                     if (type === 3) shown = "[图片]";
@@ -582,35 +668,42 @@ function attachMessageFinalizer() {
                     if (msgSource.indexOf("<atuserlist>") >= 0 && mentions.length === 0) {
                         console.log("[!] atuserlist 非空但未解析出目标: " + msgSource.substring(0, 240));
                     }
-                    console.log("[+] incoming message: type=" + type + " from=" + from +
+                    // 逐条日志在历史回放时每条会多一次 Frida IPC，默认关闭（HOOK_DEBUG=1 打开）。
+                    hookDebug("[+] incoming message: type=" + type + " from=" + from +
                         " group=" + group + " len=" + text.length + " id=" + serverId +
                         " mentions=" + mentions.length);
-                    send({
-                        type: "incoming_message",
-                        payload: {
-                            // self_id 仅作为兜底；bridge 会用当前账号把它改写成
-                            // 「自己」，并结合 from/to/sender_wxid 判定 is_self。
-                            self_id: to,
-                            user_id: user,
-                            group_id: group,
-                            from_wxid: from,
-                            to_wxid: to,
-                            sender_wxid: user,
-                            member_wxid: member,
-                            sender: { user_id: user, nickname: nickname },
-                            time: created * 1000,
-                            post_type: "message",
-                            message_id: serverId,
-                            message: [{ type: "text", data: { text: shown } }].concat(mentions.map(function (wxid) {
-                                return { type: "at", data: { qq: wxid } };
-                            })),
-                            mentions: mentions,
-                            raw_message: text,
-                            show_content: shown,
-                            message_type: group ? "group" : "private",
-                            msg_type: type
-                        }
-                    });
+                    var payload = {
+                        // self_id 仅作为兜底；bridge 会用当前账号把它改写成
+                        // 「自己」，并结合 from/to/sender_wxid 判定 is_self。
+                        self_id: to,
+                        user_id: user,
+                        group_id: group,
+                        from_wxid: from,
+                        to_wxid: to,
+                        sender_wxid: user,
+                        member_wxid: member,
+                        sender: { user_id: user, nickname: nickname },
+                        time: created * 1000,
+                        post_type: "message",
+                        message_id: serverId,
+                        message: [{ type: "text", data: { text: shown } }].concat(mentions.map(function (wxid) {
+                            return { type: "at", data: { qq: wxid } };
+                        })),
+                        mentions: mentions,
+                        raw_message: text,
+                        show_content: shown,
+                        message_type: group ? "group" : "private",
+                        msg_type: type
+                    };
+                    if (patInfo) {
+                        payload.pat_from_wxid = patInfo.from_wxid || user;
+                        // 契约：pat_chat_wxid 是群 ID（私聊为空），与 group 保持一致。
+                        payload.pat_chat_wxid = group;
+                        payload.pat_target_wxid = patInfo.target_wxid;
+                        if (patInfo.suffix) payload.pat_suffix = patInfo.suffix;
+                        if (patInfo.template) payload.pat_template = patInfo.template;
+                    }
+                    send({ type: "incoming_message", payload: payload });
                 } catch (e) {
                     console.log("[!] incoming message parse error: " + e);
                 }
@@ -859,6 +952,8 @@ var imgProtoHexGlobal = "";
 var videoProtoHexGlobal = "";
 // 回复消息protobuf全局变量 (从Go直接传入hex编码)
 var replyProtoHexGlobal = "";
+// 拍一拍 appmsg protobuf全局变量 (从Go直接传入hex编码)
+var patProtoHexGlobal = "";
 // 文件消息protobuf全局变量 (从Go直接传入hex编码)
 var fileProtoHexGlobal = "";
 var fileUploadProtoHexGlobal = "";
@@ -1408,6 +1503,12 @@ function attachReq2buf() {
                 console.log("[+] 发送回复消息成功! Req2Buf 已将 " +
                     (isReq2bufLayout415 ? "X8+0x70" : "X24+0x60") + " 指向新地址: " + sendReplyMessageAddr +
                     " (insertMsgAddr=" + insertMsgAddr + ")");
+            } else if (sendMsgType === "pat") {
+                // 拍一拍复用 sendappmsg 的 reply Message 结构（同一 CGI/opcode）。
+                insertMsgAddr.writePointer(sendReplyMessageAddr);
+                console.log("[+] 发送拍一拍消息成功! Req2Buf 已将 " +
+                    (isReq2bufLayout415 ? "X8+0x70" : "X24+0x60") + " 指向新地址: " + sendReplyMessageAddr +
+                    " (insertMsgAddr=" + insertMsgAddr + ")");
             } else if (sendMsgType === "voice") {
                 insertMsgAddr.writePointer(sendVoiceMessageAddr);
                 console.log("[+] 发送语音消息成功! Req2Buf 已将 " +
@@ -1764,11 +1865,12 @@ function triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex,
 
     // R3: 原生 task 构造 + slot13 提交; 不依赖 req2buf/StartTask 捕获与 Message 结构。
     if (r3ModeActive) {
-        if (msgType !== "text") {
-            console.error("[!] R3 模式当前只支持 text (收到 " + msgType + ")");
-            return "fail";
-        }
-        return r3SendTextMessage(taskId, protoHex);
+        if (msgType === "text") return r3SendTextMessage(taskId, protoHex);
+        // 拍一拍是实验路径：复用 newsendmsg 种子闭包构造 sendappmsg task，
+        // 只有运行期配置 r3AppMsgSend=true 才允许（App 在“R3 + 回拍”都开启时合并）。
+        if (msgType === "pat") return r3SendPatMessage(taskId, protoHex);
+        console.error("[!] R3 模式当前只支持 text/pat (收到 " + msgType + ")");
+        return "fail";
     }
 
     if (!taskId || !receiver) {
@@ -1792,6 +1894,8 @@ function triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex,
         "img":   { messageAddr: imgMessageAddr,   sendMessageAddr: sendImgMessageAddr,   cgiAddr: imgCgiAddr,   protoHexSetter: function(h) { imgProtoHexGlobal = h; } },
         "video": { messageAddr: videoMessageAddr, sendMessageAddr: sendVideoMessageAddr, cgiAddr: videoCgiAddr, protoHexSetter: function(h) { videoProtoHexGlobal = h; } },
         "reply": { messageAddr: replyMessageAddr, sendMessageAddr: sendReplyMessageAddr, cgiAddr: replyCgiAddr, protoHexSetter: function(h) { replyProtoHexGlobal = h; } },
+        // 拍一拍与 reply 共用 sendappmsg 的 Message 结构，仅 protobuf/appmsg XML 不同。
+        "pat":   { messageAddr: replyMessageAddr, sendMessageAddr: sendReplyMessageAddr, cgiAddr: replyCgiAddr, protoHexSetter: function(h) { patProtoHexGlobal = h; } },
         "voice": { messageAddr: voiceMessageAddr, sendMessageAddr: sendVoiceMessageAddr, cgiAddr: voiceCgiAddr, protoHexSetter: function(h) { voiceProtoHexGlobal = h; } },
         "file":  { messageAddr: fileMessageAddr,  sendMessageAddr: sendFileMessageAddr,  cgiAddr: fileCgiAddr,  protoHexSetter: function(h) { fileProtoHexGlobal = h; } },
         "fileupload": { messageAddr: fileUploadMessageAddr, sendMessageAddr: sendFileUploadMessageAddr, cgiAddr: fileUploadCgiAddr, protoHexSetter: function(h) { fileUploadProtoHexGlobal = h; } },
@@ -2144,6 +2248,11 @@ function triggerSendReplyMessage(taskId, sender, receiver, protoHex, payloadHex)
     return triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex, "reply");
 }
 
+// 拍一拍：bridge 构建 appmsg type=62 的 protobuf，这里沿用 sendappmsg 的发送路径。
+function triggerSendPatMessage(taskId, sender, receiver, protoHex, payloadHex) {
+    return triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex, "pat");
+}
+
 // -------------------------发送回复消息分区-------------------------
 
 // -------------------------发送语音消息分区-------------------------
@@ -2177,6 +2286,19 @@ var r3Cfg = {
     slot13Addr: "{{.slot13Addr}}",
     operatorNewAddr: "{{.operatorNewAddr}}",
     newsendmsgUrl: "{{.newsendmsgUrl}}",
+    appmsgUrl: "{{.appmsgUrl}}",
+    r3AppMsgSend: "{{.r3AppMsgSend}}",
+    sendPatTaskCtorAddr: "{{.sendPatTaskCtorAddr}}",
+    sendPatTaskVtable: "{{.sendPatTaskVtable}}",
+    sendPatClosureVtable: "{{.sendPatClosureVtable}}",
+    sendPatUrl: "{{.sendPatUrl}}",
+    sendPatOpcode: "{{.sendPatOpcode}}",
+    sendPatTaskSize: "{{.sendPatTaskSize}}",
+    r3PatSend: "{{.r3PatSend}}",
+    sendPatCopyAddr: "{{.sendPatCopyAddr}}",
+    sendPatRequestCtorAddr: "{{.sendPatRequestCtorAddr}}",
+    sendPatRequestType: "{{.sendPatRequestType}}",
+    protoParseAddr: "{{.protoParseAddr}}",
     closureCapture: "{{.r3ClosureCapture}}",
     slot13Capture: "{{.r3Slot13Capture}}",
     queueUntilSeed: "{{.r3QueueUntilSeed}}",
@@ -2204,6 +2326,19 @@ var r3State = {
     slot13Listener: null,
     slot13Calls: 0,
     slot13OpCounts: {},
+    sentTasks: {},
+    taskSeen: {},
+    patReqSeen: {},
+    pendingCaptures: [],
+    pendingResponses: [],
+    appmsgSeed: null,
+    patReqHooked: false,
+    patReqHookedQuiet: false,
+    patBuilderHooked: false,
+    patBuilderArgs: null,
+    patX2Copy: null,
+    patX3Copy: null,
+    patX4Ptr: null,
     pendingLog: null,
     captureTicks: 0,
     scanTicks: 0,
@@ -2240,6 +2375,32 @@ function r3Ready() {
     }
     cfg.newsendmsgUrl = (typeof r3Cfg.newsendmsgUrl === "string" &&
         r3Cfg.newsendmsgUrl.indexOf("/") === 0) ? r3Cfg.newsendmsgUrl : "/cgi-bin/micromsg-bin/newsendmsg";
+    cfg.appmsgUrl = (typeof r3Cfg.appmsgUrl === "string" &&
+        r3Cfg.appmsgUrl.indexOf("/") === 0) ? r3Cfg.appmsgUrl : "/cgi-bin/micromsg-bin/sendappmsg";
+    // 实验能力：复用 newsendmsg 种子构造 sendappmsg task。默认关闭，
+    // 由 App 运行期 JSON 在「R3 原生发送 + 被拍时回拍」同时开启时置 true。
+    cfg.appMsgSend = (r3Cfg.r3AppMsgSend === "true");
+    cfg.sendPatCtor = r3ParseAddr(r3Cfg.sendPatTaskCtorAddr);
+    cfg.sendPatVtable = r3ParseAddr(r3Cfg.sendPatTaskVtable);
+    cfg.sendPatClosureVtable = r3ParseAddr(r3Cfg.sendPatClosureVtable);
+    cfg.sendPatUrl = (typeof r3Cfg.sendPatUrl === "string" && r3Cfg.sendPatUrl.indexOf("/") === 0)
+        ? r3Cfg.sendPatUrl : "/cgi-bin/micromsg-bin/sendpat";
+    cfg.sendPatOpcode = (typeof r3Cfg.sendPatOpcode === "string")
+        ? parseInt(r3Cfg.sendPatOpcode, 16) : 0x351;
+    if (isNaN(cfg.sendPatOpcode)) cfg.sendPatOpcode = 0x351;
+    cfg.sendPatTaskSize = (typeof r3Cfg.sendPatTaskSize === "string")
+        ? parseInt(r3Cfg.sendPatTaskSize, 16) : 0xF8;
+    if (isNaN(cfg.sendPatTaskSize) || cfg.sendPatTaskSize < 0xE0) cfg.sendPatTaskSize = 0xF8;
+    cfg.sendPatCopy = r3ParseAddr(r3Cfg.sendPatCopyAddr);
+    if (cfg.sendPatCopy === null) cfg.sendPatCopy = 0x50eb5c0;
+    cfg.sendPatReqCtor = r3ParseAddr(r3Cfg.sendPatRequestCtorAddr);
+    if (cfg.sendPatReqCtor === null) cfg.sendPatReqCtor = 0x50ea7d4;
+    cfg.sendPatReqType = parseInt(r3Cfg.sendPatRequestType || "62", 10);
+    if (isNaN(cfg.sendPatReqType)) cfg.sendPatReqType = 62;
+    cfg.protoParse = r3ParseAddr(r3Cfg.protoParseAddr);
+    if (cfg.protoParse === null) cfg.protoParse = 0x5ab3ab8;
+    cfg.patSend = (r3Cfg.r3PatSend === "true") && cfg.sendPatCtor !== null &&
+        cfg.sendPatVtable !== null && cfg.sendPatClosureVtable !== null;
     cfg.closureCapture = (r3Cfg.closureCapture === "true");
     cfg.slot13Capture = (r3Cfg.slot13Capture === "true");
     cfg.queueUntilSeed = (r3Cfg.queueUntilSeed === "true");
@@ -2392,7 +2553,119 @@ function r3ScanMapOnce() {
 // slot13 捕获: 只读 onEnter(不写内存、不做 PC 跳转), 在调用线程上直接 __clone 闭包。
 // slot13 是 UI 提交的真实入口(0x46353A0 -> 0x4634710), 不在 owl coroutine 上;
 // 回调只做少量指针读取 + 一次 __clone, 日志延迟到 10ms 定时器里输出。
-function r3StartSlot13Capture() {
+// 捕获 sendpat 真实请求对象：高层构造器 0x3399258 会把 requestObject 复制进 B1
+// (0x50eb5c0)。记录其 vtable，供后续找到 New/ctor 并复用真实请求类型。
+function r3StartPatRequestCapture() {
+    if (r3State.patReqHooked) return;
+    try {
+        var addr = baseAddr.add(0x50eb5c0);
+        Interceptor.attach(addr, {
+            onEnter: function (args) {
+                try {
+                    var serializer = args[0];
+                    var req = args[1];
+                    if (!r3IsHeapPtr(req)) return;
+                    var vt = req.readPointer().toString();
+                    if (r3State.patReqSeen[vt]) return;
+                    r3State.patReqSeen[vt] = true;
+                    var line = "[capture] sendpat requestObj=" + req + " vtable=" + vt +
+                        " serializer=" + serializer;
+                    try {
+                        var mod = Process.findModuleByAddress(ptr(vt));
+                        if (mod) line += " module=" + mod.name + "@0x" + mod.base.toString(16);
+                    } catch (e) { }
+                    try {
+                        var s10 = readStdStringCompat(req.add(0x10), 256) || "";
+                        var s20 = readStdStringCompat(req.add(0x20), 256) || "";
+                        var p30 = req.add(0x30).readPointer();
+                        var u38 = req.add(0x38).readU32();
+                        function ptrStr(off) {
+                            try {
+                                var p = req.add(off).readPointer();
+                                if (p.isNull() || !r3IsHeapPtr(p)) return "";
+                                return readStdStringCompat(p, 256) || "";
+                            } catch (e) { return "?"; }
+                        }
+                        line += " s10=" + JSON.stringify(s10) + " s20=" + JSON.stringify(s20) +
+                            " p30=" + p30 + " u38=" + u38 +
+                            " str10=" + JSON.stringify(ptrStr(0x10)) +
+                            " str18=" + JSON.stringify(ptrStr(0x18)) +
+                            " str20=" + JSON.stringify(ptrStr(0x20)) +
+                            " str28=" + JSON.stringify(ptrStr(0x28));
+                        var dump = req.readByteArray(0x48);
+                        if (dump) {
+                            var arr = new Uint8Array(dump); var hex = "";
+                            for (var i = 0; i < arr.length; i++) hex += ("0" + arr[i].toString(16)).slice(-2);
+                            line += " objHex=" + hex;
+                        }
+                    } catch (eMem) { line += " memError=" + eMem.message; }
+                    if (r3State.pendingCaptures.length < 8) r3State.pendingCaptures.push(line);
+                } catch (e) {
+                    if (r3State.pendingCaptures.length < 8) {
+                        r3State.pendingCaptures.push("[capture] sendpat request inspect failed: " + e.message);
+                    }
+                }
+            }
+        });
+        r3State.patReqHooked = true;
+        if (!r3State.patReqHookedQuiet) console.log("[+] R3: sendpat request capture hooked");
+    } catch (e) {
+        console.error("[!] R3: sendpat request hook failed: " + e.message);
+    }
+}
+
+// 捕获 sendpat 高层构造器 0x3399258 的调用参数：
+// x0=service, x1=requestObject, x2=string, x3=context, x4=closure。
+function r3StartPatBuilderCapture() {
+    if (r3State.patBuilderHooked) return;
+    try {
+        Interceptor.attach(baseAddr.add(0x3399258), {
+            onEnter: function (args) {
+                try {
+                    var a0 = args[0].toString(), a1 = args[1].toString();
+                    var a2 = args[2].toString(), a3 = args[3].toString(), a4 = args[4].toString();
+                    r3State.patBuilderArgs = { a0: a0, a1: a1, a2: a2, a3: a3, a4: a4 };
+                    try {
+                        // 栈上的 x2(std::string)/x3(struct) 在真实调用期间复制到稳定内存；
+                        // x4 是真实 std::function/上下文，保留指针（不合成闭包）。
+                        r3State.patX2Copy = Memory.alloc(0x18);
+                        r3State.patX2Copy.writeByteArray(ptr(a2).readByteArray(0x18));
+                        r3State.patX3Copy = Memory.alloc(0x28);
+                        r3State.patX3Copy.writeByteArray(ptr(a3).readByteArray(0x28));
+                        r3State.patX4Ptr = ptr(a4);
+                    } catch (eClone) { }
+                    var line = "[capture] sendpat builder args x0=" + a0 + " x1=" + a1 +
+                        " x2=" + a2 + " x3=" + a3 + " x4=" + a4;
+                    if (r3State.classA) line += " classA=" + r3State.classA;
+                    try {
+                        var x4p = ptr(a4);
+                        var x4vt = x4p.readPointer();
+                        line += " x4vt=" + x4vt;
+                        var m4 = Process.findModuleByAddress(x4p);
+                        if (m4) line += " x4mod=" + m4.name + "@0x" + m4.base.toString(16);
+                        var d4 = x4p.readByteArray(0x40);
+                        if (d4) {
+                            var a4b = new Uint8Array(d4); var h4 = "";
+                            for (var i4 = 0; i4 < a4b.length; i4++) h4 += ("0" + a4b[i4].toString(16)).slice(-2);
+                            line += " x4hex=" + h4;
+                        }
+                    } catch (e4) { line += " x4err=" + e4.message; }
+                    if (r3State.pendingCaptures.length < 8) r3State.pendingCaptures.push(line);
+                } catch (e) {
+                    if (r3State.pendingCaptures.length < 8) {
+                        r3State.pendingCaptures.push("[capture] sendpat builder inspect failed: " + e.message);
+                    }
+                }
+            }
+        });
+        r3State.patBuilderHooked = true;
+        console.log("[+] R3: sendpat high-level builder hooked");
+    } catch (e) {
+        console.error("[!] R3: sendpat builder hook failed: " + e.message);
+    }
+}
+
+function r3StartSlot13Capture(quiet) {
     if (r3State.slot13Hooked) return;
     if (!r3State.cfg) return;
     try {
@@ -2405,7 +2678,82 @@ function r3StartSlot13Capture() {
                     r3State.slot13Calls++;
                     var op = task.add(0xC).readU32();
                     r3State.slot13OpCounts[op] = (r3State.slot13OpCounts[op] || 0) + 1;
-                    if (op !== 0x20A) return;
+                    // 诊断/取证：只记录 appmsg/非 newsendmsg 任务，避免在高频文本
+                    // 发送/启动同步流量里调用 JS/native（曾导致 bridge 启动卡住）。
+                    if (op !== 0x20A) {
+                        try {
+                            var vt = task.readPointer().toString();
+                            var url = readStdStringCompat(task.add(0x18), 512) || "";
+                            var closure2 = task.add(0x68).readPointer();
+                            var cvt2 = (closure2 && !closure2.isNull()) ? closure2.readPointer().toString() : "";
+                            var serVt = "";
+                            try { serVt = task.add(0x78).readPointer().toString(); } catch (e2) { serVt = ""; }
+                            var sig = op + "|" + vt + "|" + url + "|" + cvt2;
+                            if (!r3State.taskSeen[sig]) {
+                                r3State.taskSeen[sig] = true;
+                                // 不能在 slot13 onEnter 里 console.log（Frida IPC 可能与
+                                // bridge 的同步 RPC 互相等待）；交给 10ms 定时器输出。
+                                if (r3State.pendingCaptures.length < 8) {
+                                    var line = "[capture] slot13 task=" + task +
+                                        " op=0x" + op.toString(16) + " vtable=" + vt + " url=" + url +
+                                        " closureVtable=" + cvt2 + " serVt=" + serVt;
+                                    try {
+                                        var vtMod = Process.findModuleByAddress(task.readPointer());
+                                        if (vtMod) line += " vtModule=" + vtMod.name + "@0x" + vtMod.base.toString(16);
+                                        var cvtMod = Process.findModuleByAddress(ptr(cvt2));
+                                        if (cvtMod) line += " cvtModule=" + cvtMod.name + "@0x" + cvtMod.base.toString(16);
+                                    } catch (eMod) { }
+                                    r3State.pendingCaptures.push(line);
+                                    if (op === 0x351) {
+                                        try {
+                                            var ser = task.add(0x78);
+                                            var sVt = ser.readPointer();
+                                            var sizeFn = new NativeFunction(sVt.add(0x48).readPointer(), 'uint32', ['pointer']);
+                                            var protoLen = sizeFn(ser);
+                                            var protoHex = "";
+                                            if (protoLen > 0 && protoLen < 65536) {
+                                                var outBuf = Memory.alloc(protoLen);
+                                                var writeFn = new NativeFunction(sVt.add(0x58).readPointer(), 'pointer', ['pointer', 'pointer']);
+                                                writeFn(ser, outBuf);
+                                                var arr = new Uint8Array(outBuf.readByteArray(protoLen));
+                                                for (var bi = 0; bi < arr.length; bi++) {
+                                                    protoHex += ("0" + arr[bi].toString(16)).slice(-2);
+                                                }
+                                            }
+                                            var closure3 = task.add(0x68).readPointer();
+                                            var seedHex = "";
+                                            if (r3IsHeapPtr(closure3)) {
+                                                var cvt3 = closure3.readPointer();
+                                                var cloneFn3 = cvt3.add(0x10).readPointer();
+                                                var clone3 = new NativeFunction(cloneFn3, 'pointer', ['pointer'])(closure3);
+                                                if (clone3 && !clone3.isNull()) {
+                                                    r3State.appmsgSeed = clone3;
+                                                    seedHex = clone3.toString();
+                                                }
+                                            }
+                                            var extra = "";
+                                            try {
+                                                extra = " t10=" + task.add(0x10).readU32() +
+                                                    " b31=" + task.add(0x31).readU8() +
+                                                    " b33=" + task.add(0x33).readU8() +
+                                                    " s38=" + JSON.stringify(readStdStringCompat(task.add(0x38), 512) || "") +
+                                                    " b70=" + task.add(0x70).readU8() +
+                                                    " u74=" + task.add(0x74).readU32() +
+                                                    " b8vt=" + task.add(0xB8).readPointer();
+                                            } catch (eFields) { extra = " fields_error=" + eFields.message; }
+                                            r3State.pendingCaptures.push("[capture] sendpat protoLen=" + protoLen +
+                                                " protoHex=" + protoHex + " seed=" + seedHex + extra);
+                                        } catch (ePat) {
+                                            r3State.pendingCaptures.push("[capture] sendpat inspect failed: " + ePat.message);
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e4) {
+                            console.log("[capture] task inspect failed: " + e4.message);
+                        }
+                        return;
+                    }
                     var closure = task.add(0x68).readPointer();
                     if (!r3IsHeapPtr(closure)) return;
                     var cvt = closure.readPointer();
@@ -2428,7 +2776,7 @@ function r3StartSlot13Capture() {
             }
         });
         r3State.slot13Hooked = true;
-        console.log("[+] R3: slot13 捕获 hook 已安装 @ " + addr + " (只读 onEnter)");
+        if (!quiet) console.log("[+] R3: slot13 捕获 hook 已安装 @ " + addr + " (只读 onEnter)");
     } catch (e) {
         r3State.lastError = "slot13 hook: " + e.message;
         console.error("[!] R3: slot13 捕获 hook 安装失败: " + e.message);
@@ -2449,6 +2797,12 @@ function r3StartCaptureLoop() {
             if (r3State.pendingLog) {
                 console.log(r3State.pendingLog);
                 r3State.pendingLog = null;
+            }
+            while (r3State.pendingCaptures && r3State.pendingCaptures.length) {
+                console.log(r3State.pendingCaptures.shift());
+            }
+            while (r3State.pendingResponses && r3State.pendingResponses.length) {
+                console.log(r3State.pendingResponses.shift());
             }
             if (r3State.pendingSeedPersist) {
                 try {
@@ -2472,6 +2826,8 @@ function r3Init() {
     r3BuildFakeSerializer();
     r3TryResolve(true);
     if (r3State.cfg.slot13Capture) r3StartSlot13Capture();
+    if (r3State.cfg.patSend) r3StartPatRequestCapture();
+    if (r3State.cfg.patSend) r3StartPatBuilderCapture();
     if (r3State.cfg.closureCapture) r3StartCaptureLoop();
     console.log("[+] R3: init 完成 (capture=" + r3State.cfg.closureCapture +
         ", url=" + r3State.cfg.newsendmsgUrl + ")");
@@ -2534,10 +2890,118 @@ function r3SendTextMessage(taskId, protoHex, fromQueue) {
             "(或已有 clone) 才能自动化发送。");
         return "fail";
     }
+    return r3SendProtoTask(taskId, protoHex, 0x20A, r3State.cfg.newsendmsgUrl, "text");
+}
+
+// 拍一拍：4.1.15 独立 sendpat task（opcode 0x351）。
+// 种子来自真实手动拍一拍 task 的 hand-off 闭包（slot13 捕获，见 appmsgSeed）。
+function r3SendPatMessage(taskId, protoHex) {
+    if (!r3ModeActive) return "fail";
+    if (!r3State.cfg) r3Ready();
+    if (!r3State.cfg || !r3State.cfg.patSend) {
+        console.error("[!] R3 sendpat: 未启用 (r3PatSend=false 或缺少 sendpat 地址)");
+        return "fail";
+    }
+    if (!r3BuildFakeSerializer()) return "fail";
+    if (!r3TryResolve(true)) return "fail";
+    if (!r3State.appmsgSeed) {
+        console.error("[!] R3 sendpat: 尚无发送句柄; 请先在本机微信手动拍一次以捕获 sendpat 闭包。");
+        return "fail";
+    }
+    return r3SendProtoTask(taskId, protoHex, r3State.cfg.sendPatOpcode, r3State.cfg.sendPatUrl,
+        "sendpat", {
+            ctor: r3State.cfg.sendPatCtor,
+            vtable: r3State.cfg.sendPatVtable,
+            size: r3State.cfg.sendPatTaskSize,
+            seed: r3State.appmsgSeed,
+            closureVtable: r3State.cfg.sendPatClosureVtable,
+            parseIntoReal: true
+        });
+}
+
+// 构造 sendpat 真实请求 wrapper（vtable 0x9edcd38 / ctor 0x50ea7d4）：
+// +0x10=from, +0x18=chat, +0x20=patted, +0x28=clientMsgId, +0x38=62。
+function r3BuildSendPatRequest(sender, chat, patted) {
+    var cfg = r3State.cfg;
+    if (!cfg || !cfg.sendPatReqCtor) return null;
+    var opNew = new NativeFunction(baseAddr.add(cfg.operatorNewAddr), 'pointer', ['size_t']);
+    var obj = opNew(0x48);
+    if (!obj || obj.isNull()) return null;
+    new NativeFunction(baseAddr.add(cfg.sendPatReqCtor), 'void', ['pointer'])(obj);
+    var stringCtor = new NativeFunction(baseAddr.add(cfg.stringCtorAddr), 'pointer', ['pointer', 'pointer']);
+    function setStr(off, text) {
+        if (!text) return;
+        var strObj = Memory.alloc(0x18);
+        var cstr = Memory.allocUtf8String(text);
+        stringCtor(strObj, cstr);
+        obj.add(off).writePointer(strObj);
+    }
+    var chatOrTarget = chat || patted;
+    var clientMsgId = chatOrTarget + "_" + Math.floor(Date.now() / 1000) + "_" +
+        Math.floor(Math.random() * 1000) + "_" + Date.now();
+    setStr(0x10, sender);
+    setStr(0x18, chat);
+    setStr(0x20, patted);
+    setStr(0x28, clientMsgId);
+    obj.add(0x38).writeU32(cfg.sendPatReqType);
+    return obj;
+}
+
+function r3SendPatNative(taskId, sender, chat, patted, protoHex) {
+    if (!r3ModeActive) return "fail";
+    if (!r3State.cfg) r3Ready();
+    if (!r3State.cfg || !r3State.cfg.patSend) return "fail";
+    if (!r3TryResolve(true)) return "fail";
+    if (!r3State.appmsgSeed) {
+        console.error("[!] R3 sendpat: 尚无发送句柄; 请先在本机微信手动拍一次。");
+        return "fail";
+    }
+    if (!r3State.patX2Copy || !r3State.patX3Copy || !r3State.patX4Ptr) {
+        console.error("[!] R3 sendpat: 缺少真实高层构造器上下文; 请先手动拍一次。");
+        return "fail";
+    }
+    try {
+        var cfg = r3State.cfg;
+        var chatForReq = chat || patted;
+        var reqObj = r3BuildSendPatRequest(sender, chatForReq, patted);
+        if (!reqObj) throw new Error("构造 requestObject 失败");
+        var builderFn = new NativeFunction(baseAddr.add(0x3399258), 'int',
+            ['pointer', 'pointer', 'pointer', 'pointer', 'pointer']);
+        var service = r3State.classA.add(0x10);
+        var ret = builderFn(service, reqObj, r3State.patX2Copy, r3State.patX3Copy, r3State.patX4Ptr);
+        console.log("[+] R3 sendpat builder-real: service=" + service + " req=" + reqObj +
+            " x2=" + r3State.patX2Copy + " x3=" + r3State.patX3Copy +
+            " x4=" + r3State.patX4Ptr + " -> " + ret);
+        return ret ? "1" : "fail";
+    } catch (e) {
+        console.error("[!] R3 sendpat builder-real 失败: " + e.message + "\n" + (e.stack || ""));
+        return "fail";
+    }
+}
+
+// 拍一拍旧实验路径：复用 newsendmsg 种子构造 sendappmsg（真机未送达，保留作对照）。
+function r3SendAppMsgMessage(taskId, protoHex) {
+    if (!r3ModeActive) return "fail";
+    if (!r3State.cfg) r3Ready();
+    if (!r3State.cfg || !r3State.cfg.appMsgSend) {
+        console.error("[!] R3 appmsg: 未启用实验路径 (r3AppMsgSend=false)");
+        return "fail";
+    }
+    if (!r3BuildFakeSerializer()) return "fail";
+    if (!r3TryResolve(true)) return "fail";
+    if (!r3State.seed) {
+        console.error("[!] R3 appmsg: 尚无发送句柄(种子闭包); 请先在本机微信手动发一条文本。");
+        return "fail";
+    }
+    return r3SendProtoTask(taskId, protoHex, 0x6E, r3State.cfg.appmsgUrl, "appmsg");
+}
+
+// opcode: 0x20A=newsendmsg text / 0x6E=sendappmsg。url 来自运行期配置。
+function r3SendProtoTask(taskId, protoHex, opcode, url, label, opts) {
     var bytes = [];
     try { bytes = hexToByteArray(protoHex || ""); } catch (e) { bytes = []; }
-    if (!bytes.length) {
-        console.error("[!] R3: protoHex 为空");
+    if (!bytes.length && !(opts && opts.requestObject)) {
+        console.error("[!] R3 " + label + ": protoHex 为空");
         return "fail";
     }
     try {
@@ -2548,60 +3012,97 @@ function r3SendTextMessage(taskId, protoHex, fromQueue) {
             console.log("[+] R3: 发送前卸载 slot13 捕获 hook(避免 JS 重入)");
         }
         var cfg = r3State.cfg;
-        console.log("[r3] step1 proto bytes=" + bytes.length);
-        var buf = Memory.alloc(bytes.length);
-        buf.writeByteArray(bytes);
+        opts = opts || {};
+        var ctorAddr = opts.ctor || cfg.taskCtorAddr;
+        var taskVtable = opts.vtable || cfg.taskVtable;
+        var taskSize = opts.size || 0xE0;
+        var closureVtableAddr = opts.closureVtable || cfg.closureVtable;
+        var closureSeed = opts.seed || r3State.seed;
+        console.log("[r3] step1 (" + label + ") proto bytes=" + bytes.length);
+        var buf = bytes.length > 0 ? Memory.alloc(bytes.length) : ptr(0);
+        if (bytes.length > 0) buf.writeByteArray(bytes);
         r3State.protoBytes = bytes;
         r3State.protoLen = bytes.length;
 
         // 每次发送从 seed 克隆一个独立闭包: task 析构会销毁(+0x68 heap 形态)
-        var closureVtable = baseAddr.add(cfg.closureVtable);
+        var closureVtable = baseAddr.add(closureVtableAddr);
         var cloneFn = closureVtable.add(0x10).readPointer();
         console.log("[r3] step1b closureVtable=" + closureVtable + " slot0=" + closureVtable.readPointer() + " cloneFn=" + cloneFn);
-        var closure = new NativeFunction(cloneFn, 'pointer', ['pointer'])(r3State.seed);
+        var closure = new NativeFunction(cloneFn, 'pointer', ['pointer'])(closureSeed);
         if (!closure || closure.isNull()) throw new Error("闭包 clone 失败");
         console.log("[r3] step2 closure clone=" + closure);
 
-        // desc(0x38B): +0x00/+0x10=0x20A, +0x0C=1, +0x18=URL std::string, +0x30=1
+        // desc(0x38): +0x00/+0x10=opcode, +0x0C=1, +0x18=URL std::string, +0x30=1
         var desc = Memory.alloc(0x38);
-        desc.add(0x00).writeU32(0x20A);
+        desc.add(0x00).writeU32(opcode);
         desc.add(0x04).writeU32(0);
         desc.add(0x08).writeU32(0);
         desc.add(0x0C).writeU32(1);
-        desc.add(0x10).writeU32(0x20A);
+        desc.add(0x10).writeU32(opcode);
         desc.add(0x14).writeU32(0);
-        var urlCStr = Memory.allocUtf8String(cfg.newsendmsgUrl);
+        var urlCStr = Memory.allocUtf8String(url);
         new NativeFunction(baseAddr.add(cfg.stringCtorAddr), 'pointer', ['pointer', 'pointer'])(
             desc.add(0x18), urlCStr);
         desc.add(0x30).writeU8(1);
-        console.log("[r3] step3 desc=" + desc + " url=" + cfg.newsendmsgUrl);
+        console.log("[r3] step3 (" + label + ") desc=" + desc + " opcode=0x" + opcode.toString(16) + " url=" + url);
 
         // task := operator new(0xE0); ctor(task, desc)
         var operatorNew = new NativeFunction(baseAddr.add(cfg.operatorNewAddr), 'pointer', ['size_t']);
-        var task = operatorNew(0xE0);
-        if (!task || task.isNull()) throw new Error("operator new(0xE0) 失败");
-        console.log("[r3] step4 task=" + task);
-        new NativeFunction(baseAddr.add(cfg.taskCtorAddr), 'void', ['pointer', 'pointer'])(task, desc);
-        console.log("[r3] step5 ctor done");
+        var task = operatorNew(taskSize);
+        if (!task || task.isNull()) throw new Error("operator new(0x" + taskSize.toString(16) + ") 失败");
+        console.log("[r3] step4 (" + label + ") task=" + task + " size=0x" + taskSize.toString(16));
+        new NativeFunction(baseAddr.add(ctorAddr), 'void', ['pointer', 'pointer'])(task, desc);
+        console.log("[r3] step5 (" + label + ") ctor done");
         var tv = task.readPointer();
-        if (!tv.equals(baseAddr.add(cfg.taskVtable))) {
-            throw new Error("task vtable 不匹配: " + tv);
+        if (!tv.equals(baseAddr.add(taskVtable))) {
+            throw new Error("task vtable 不匹配: " + tv + " expect=" + baseAddr.add(taskVtable));
         }
 
-        // 只替换 B1(+0x78) 为 fake serializer; B2(+0xA8) 保留真实对象
-        // (req2buf encoder#2 会把它当作原生 protobuf 解析目标, 不跑 JS)
-        task.add(0x78).writePointer(r3State.fakeVt);
+        // sendpat 的 encoder 直接对 B1(+0x78) 调 SerializeAsString；
+        // 对它调原生 ParseFromArray 填入真实 protobuf，避免 fake serializer 兼容问题。
+        // 其它文本任务仍用 fake B1；B2 始终保留原生对象。
+        if (opts.requestObject) {
+            // 真实高层构造器路径：把请求 wrapper 复制进 B1 serializer。
+            var copyFn = new NativeFunction(baseAddr.add(cfg.sendPatCopy), 'void', ['pointer', 'pointer']);
+            copyFn(task.add(0x78), opts.requestObject);
+            console.log("[r3] step5b (" + label + ") copied requestObject=" + opts.requestObject);
+        } else if (opts.parseIntoReal) {
+            var parseFn = new NativeFunction(baseAddr.add(cfg.protoParse), 'int', ['pointer', 'pointer', 'int']);
+            var parsed = parseFn(task.add(0x78), buf, bytes.length);
+            if (!parsed) throw new Error("sendpat ParseFromArray 失败");
+            console.log("[r3] step5b (" + label + ") real B1 ParseFromArray ok len=" + bytes.length);
+        } else {
+            task.add(0x78).writePointer(r3State.fakeVt);
+        }
         task.add(0x68).writePointer(closure);
 
-        console.log("[r3] step6 fakeVt=" + r3State.fakeVt + " closure=" + closure + " -> calling slot13");
+        console.log("[r3] step6 (" + label + ") fakeVt=" + r3State.fakeVt + " closure=" + closure + " -> calling slot13");
         var slot13 = new NativeFunction(baseAddr.add(cfg.slot13Addr), 'int', ['pointer', 'pointer']);
         var ret = slot13(r3State.classA, task);
-        console.log("[+] R3: slot13(classA=" + r3State.classA + ", task=" + task + ") -> " + ret +
-            " (proto=" + bytes.length + "B, clone=" + closure + ", taskIdArg=" + taskId + ")");
+        // 诊断：记录任务 id，便于在 buf2resp 里确认 R3 任务是否真的发出/回包。
+        // slot13 可能把原生 taskId 写到 task+0x08；不确定时同时登记入参 taskId。
+        var nativeTaskId = 0;
+        try { nativeTaskId = task.add(0x08).readU32(); } catch (e) { nativeTaskId = 0; }
+        var now = Date.now();
+        r3State.sentTasks[taskId] = { label: label, at: now };
+        if (nativeTaskId > 0 && nativeTaskId !== taskId) {
+            r3State.sentTasks[nativeTaskId] = { label: label, at: now };
+        }
+        for (var k in r3State.sentTasks) {
+            if (now - r3State.sentTasks[k].at > 5 * 60 * 1000) delete r3State.sentTasks[k];
+        }
+        console.log("[+] R3 " + label + ": slot13(classA=" + r3State.classA + ", task=" + task + ") -> " + ret +
+            " (proto=" + bytes.length + "B, clone=" + closure + ", taskIdArg=" + taskId +
+            ", nativeTaskId=" + nativeTaskId + ")");
+        if (cfg.slot13Capture) {
+            setImmediate(function () {
+                try { r3StartSlot13Capture(true); } catch (e) { }
+            });
+        }
         return "1";
     } catch (e) {
-        r3State.lastError = "send: " + e.message;
-        console.error("[!] R3: 发送失败: " + e.message + "\n" + (e.stack || ""));
+        r3State.lastError = label + " send: " + e.message;
+        console.error("[!] R3 " + label + " 发送失败: " + e.message + "\n" + (e.stack || ""));
         return "fail";
     }
 }
@@ -2711,8 +3212,760 @@ function r3Status() {
         scanTicks: r3State.scanTicks,
         nullScans: r3State.nullScans,
         lastScan: r3State.lastScan,
+        appMsgSend: r3State.cfg ? !!r3State.cfg.appMsgSend : false,
         lastError: r3State.lastError
     });
+}
+
+// ===================== 通讯录（好友昵称/群名）分区 =====================
+// 微信 4.1.15 的入站事件只有 wxid，真实昵称/群名在 SQLCipher4 加密的
+// db_storage/contact/contact.db 里。这里在微信进程内：
+//   1) Hook 系统 CommonCrypto，捕获 SQLCipher 的 32 字节 enc_key
+//      （CCCryptorCreate / CCCrypt / CCCryptorCreateWithMode），
+//      以及登录期 CCKeyDerivationPBKDF 的 passphrase/派生 key；
+//   2) 用捕获的 key 在进程内解密 contact.db（含 WAL 当前代帧）到容器 tmp；
+//   3) 用 Frida 内置 SqliteDatabase 查询 contact 表，返回 wxid→昵称/备注、群→群名；
+//   4) 查完立即删除临时明文库。
+//
+// 页格式（4.1.15 实测）：4096 字节/页，reserve=80（IV16+HMAC64），AES-256-CBC；
+// 页 1 前 16 字节是 salt；其余页密文 [0,4016)、IV [4016,4032)、HMAC [4032,4096)。
+// 密钥只用页 1 试解密校验（SQLite format 3\0），不依赖 HMAC 实现。
+// 详见 docs/hook-contact-directory.md。
+var contactDirectoryEnabled = "{{.contactDirectory}}" === "true";
+var CONTACT_PAGE_SIZE = 4096;
+var CONTACT_RESERVE = 80;
+var CONTACT_CT_LEN = CONTACT_PAGE_SIZE - CONTACT_RESERVE; // 4016
+var CONTACT_SALT_LEN = 16;
+var CONTACT_IV_LEN = 16;
+var CONTACT_MAX_DB_BYTES = 64 * 1024 * 1024;
+var CONTACT_MAX_CANDIDATES = 128;
+var CONTACT_MAX_ENTRIES = 20000;
+var CONTACT_MAX_GROUP_MEMBERS = 2000;
+var CONTACT_SQLITE_HDR = [0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00];
+var contactState = {
+    installed: false,
+    ccCrypt: null,
+    pbkdf2: null,
+    unlinkFn: null,
+    inCrypto: false,
+    keysBySalt: {},      // saltHex -> keyHex（已用页 1 校验）
+    providedKeys: {},    // saltHex -> keyHex（bridge 从缓存回灌）
+    candidates: [],      // 未校验的 keyHex（AES 调用 / PBKDF2 输出）
+    candidateSet: {},
+    passphraseHex: null,
+    derivedBySalt: {},   // saltHex -> keyHex（PBKDF2 输出，已校验前）
+    lastError: null
+};
+
+function contactDebug() {
+    if (!HOOK_DEBUG) return;
+    try {
+        var parts = ["[contact]"];
+        for (var i = 0; i < arguments.length; i++) parts.push(arguments[i]);
+        console.log(parts.join(" "));
+    } catch (e) { /* 日志失败不影响 Hook */ }
+}
+
+function contactFindExport(name) {
+    try {
+        if (typeof Module.findGlobalExportByName === "function") {
+            var p = Module.findGlobalExportByName(name);
+            if (p) return p;
+        }
+    } catch (e) { /* 旧版 Frida 没有该 API */ }
+    try {
+        if (typeof Module.findExportByName === "function") {
+            var q = Module.findExportByName(null, name);
+            if (q) return q;
+        }
+    } catch (e) { }
+    try {
+        var m = Process.findModuleByName("libcommonCrypto.dylib");
+        if (m && typeof m.findExportByName === "function") {
+            var r = m.findExportByName(name);
+            if (r) return r;
+        }
+    } catch (e) { }
+    return null;
+}
+
+function contactHexToBytes(hex) {
+    var out = [];
+    for (var i = 0; i + 1 < hex.length; i += 2) out.push(parseInt(hex.substr(i, 2), 16));
+    return out;
+}
+
+function contactBytesToHex(bytes) {
+    var s = "";
+    for (var i = 0; i < bytes.length; i++) s += ("0" + bytes[i].toString(16)).slice(-2);
+    return s;
+}
+
+function contactPtrHex(p, len) {
+    if (!p || p.isNull() || len <= 0) return null;
+    try {
+        return contactBytesToHex(new Uint8Array(p.readByteArray(len)));
+    } catch (e) {
+        return null;
+    }
+}
+
+function contactU32BE(u8, off) {
+    return ((u8[off] << 24) | (u8[off + 1] << 16) | (u8[off + 2] << 8) | u8[off + 3]) >>> 0;
+}
+
+function contactU32LE(u8, off) {
+    return (u8[off] | (u8[off + 1] << 8) | (u8[off + 2] << 16) | (u8[off + 3] << 24)) >>> 0;
+}
+
+// 候选 key 去重；日志里绝不打印 key 本身。
+function contactNoteCandidate(hex, source) {
+    try {
+        if (!hex || hex.length !== 64) return;
+        if (contactState.candidateSet[hex]) return;
+        if (contactState.candidates.length >= CONTACT_MAX_CANDIDATES) return;
+        contactState.candidateSet[hex] = source || "aes";
+        contactState.candidates.push(hex);
+        contactDebug("新 key 候选 source=" + (source || "aes") + " total=" + contactState.candidates.length);
+    } catch (e) {
+        contactState.lastError = String(e);
+    }
+}
+
+function contactCaptureAesKey(keyPtr, keyLen, source) {
+    try {
+        if (!contactDirectoryEnabled || contactState.inCrypto) return;
+        if (keyLen !== 32) return;
+        contactNoteCandidate(contactPtrHex(keyPtr, 32), source);
+    } catch (e) {
+        contactState.lastError = String(e);
+    }
+}
+
+function contactSetupHooks() {
+    if (contactState.installed) return;
+    if (!contactDirectoryEnabled) {
+        console.log("[contact] 通讯录读取未启用（版本 JSON contactDirectory != true）");
+        return;
+    }
+    try {
+        if (typeof File === "undefined" || typeof SqliteDatabase === "undefined") {
+            console.log("[!] [contact] 当前 Frida 运行时不支持 File/SqliteDatabase，通讯录读取关闭");
+            return;
+        }
+        var cc = contactFindExport("CCCrypt");
+        if (!cc) {
+            console.log("[!] [contact] 找不到系统 CCCrypt，通讯录读取关闭");
+            return;
+        }
+        contactState.ccCrypt = new NativeFunction(cc, "int",
+            ["uint32", "uint32", "uint32", "pointer", "ulong", "pointer", "pointer", "ulong", "pointer", "ulong", "pointer"]);
+        var pbkdf2 = contactFindExport("CCKeyDerivationPBKDF");
+        if (pbkdf2) {
+            contactState.pbkdf2 = new NativeFunction(pbkdf2, "int",
+                ["uint32", "pointer", "ulong", "pointer", "ulong", "uint32", "uint32", "pointer", "ulong"]);
+        }
+        var create = contactFindExport("CCCryptorCreate");
+        var createMode = contactFindExport("CCCryptorCreateWithMode");
+        var crypt = contactFindExport("CCCrypt");
+        if (create) {
+            Interceptor.attach(create, {
+                onEnter: function (args) {
+                    try {
+                        var alg = args[1].toInt32();
+                        if (alg !== 0) return; // kCCAlgorithmAES
+                        contactCaptureAesKey(args[3], args[4].toInt32(), "create");
+                    } catch (e) { contactState.lastError = String(e); }
+                }
+            });
+        }
+        if (createMode) {
+            Interceptor.attach(createMode, {
+                onEnter: function (args) {
+                    try {
+                        if (args[2].toInt32() !== 0) return; // kCCAlgorithmAES
+                        contactCaptureAesKey(args[5], args[6].toInt32(), "createMode");
+                    } catch (e) { contactState.lastError = String(e); }
+                }
+            });
+        }
+        if (crypt) {
+            Interceptor.attach(crypt, {
+                onEnter: function (args) {
+                    try {
+                        if (args[1].toInt32() !== 0) return; // kCCAlgorithmAES
+                        contactCaptureAesKey(args[3], args[4].toInt32(), "crypt");
+                    } catch (e) { contactState.lastError = String(e); }
+                }
+            });
+        }
+        if (pbkdf2) {
+            // 登录期：rounds=256000 输出 32 字节 → passphrase 与 enc_key。
+            Interceptor.attach(pbkdf2, {
+                onEnter: function (args) {
+                    try {
+                        if (contactState.inCrypto) return;
+                        if (args[6].toInt32() !== 256000) return;
+                        if (args[2].toInt32() !== 32 || args[8].toInt32() !== 32) return;
+                        var pw = contactPtrHex(args[1], 32);
+                        var out = contactPtrHex(args[7], 32);
+                        var salt = contactPtrHex(args[3], 16);
+                        if (pw) contactState.passphraseHex = pw;
+                        if (out) contactNoteCandidate(out, "pbkdf2");
+                        if (salt && out) contactState.derivedBySalt[salt] = out;
+                        contactDebug("捕获 PBKDF2 passphrase/enc_key salt=" + (salt ? salt.substring(0, 8) : "?"));
+                    } catch (e) { contactState.lastError = String(e); }
+                }
+            });
+        }
+        contactState.installed = true;
+        console.log("[+] [contact] 通讯录 Hook 已安装（AES key + PBKDF2 passphrase 捕获）");
+    } catch (e) {
+        console.log("[!] [contact] Hook 安装失败: " + e);
+    }
+}
+
+function contactAesDecrypt(keyBuf, ctBytes, ivBytes) {
+    try {
+        var inBuf = Memory.alloc(ctBytes.length);
+        inBuf.writeByteArray(ctBytes);
+        var ivBuf = Memory.alloc(16);
+        ivBuf.writeByteArray(ivBytes);
+        var outBuf = Memory.alloc(ctBytes.length);
+        var moved = Memory.alloc(8);
+        moved.writeU64(0);
+        contactState.inCrypto = true;
+        var rc;
+        try {
+            rc = contactState.ccCrypt(1, 0, 0, keyBuf, 32, ivBuf, inBuf, ctBytes.length, outBuf, ctBytes.length, moved);
+        } finally {
+            contactState.inCrypto = false;
+        }
+        if (rc !== 0) return null;
+        return new Uint8Array(outBuf.readByteArray(ctBytes.length));
+    } catch (e) {
+        contactState.lastError = String(e);
+        return null;
+    }
+}
+
+function contactPage1MatchesKey(keyHex, page1) {
+    try {
+        var keyBuf = Memory.alloc(32);
+        keyBuf.writeByteArray(contactHexToBytes(keyHex));
+        var plain = contactAesDecrypt(keyBuf, page1.subarray(16, CONTACT_CT_LEN), page1.subarray(CONTACT_CT_LEN, CONTACT_CT_LEN + 16));
+        if (!plain) return false;
+        // 页 1 的明文中 [0,16) 是 "SQLite format 3\0"，但 SQLCipher 只加密
+        // [16,4016)，所以解密输出的 plain[0] 对应明文第 16 字节：页大小高位、
+        // 保留区大小等固定字段，用来校验 key 是否正确。
+        return plain[0] === 0x10 && plain[1] === 0x00 && plain[4] === 0x50;
+    } catch (e) {
+        contactState.lastError = String(e);
+        return false;
+    }
+}
+
+function contactDeriveKeyFromPassphrase(passphraseHex, saltHex) {
+    if (!contactState.pbkdf2) return null;
+    try {
+        var pw = Memory.alloc(32);
+        pw.writeByteArray(contactHexToBytes(passphraseHex));
+        var salt = Memory.alloc(16);
+        salt.writeByteArray(contactHexToBytes(saltHex));
+        var out = Memory.alloc(32);
+        contactState.inCrypto = true;
+        var rc;
+        try {
+            // CommonCrypto: kCCPBKDF2=2, kCCPRFHmacAlgSHA512=5
+            rc = contactState.pbkdf2(2, pw, 32, salt, 16, 5, 256000, out, 32);
+        } finally {
+            contactState.inCrypto = false;
+        }
+        if (rc !== 0) return null;
+        return contactBytesToHex(new Uint8Array(out.readByteArray(32)));
+    } catch (e) {
+        contactState.lastError = String(e);
+        return null;
+    }
+}
+
+// 用页 1 校验并缓存某个 DB 的 key。
+function contactResolveKeyByPage1(page1) {
+    try {
+        if (!page1 || page1.length < CONTACT_PAGE_SIZE) return null;
+        var salt = contactBytesToHex(page1.subarray(0, 16));
+        var cached = contactState.keysBySalt[salt];
+        if (cached && contactPage1MatchesKey(cached, page1)) return { salt: salt, keyHex: cached };
+        var provided = contactState.providedKeys[salt];
+        if (provided && contactPage1MatchesKey(provided, page1)) {
+            contactState.keysBySalt[salt] = provided;
+            return { salt: salt, keyHex: provided };
+        }
+        var derived = contactState.derivedBySalt[salt];
+        if (derived && contactPage1MatchesKey(derived, page1)) {
+            contactState.keysBySalt[salt] = derived;
+            return { salt: salt, keyHex: derived };
+        }
+        for (var i = 0; i < contactState.candidates.length; i++) {
+            var candidate = contactState.candidates[i];
+            if (contactPage1MatchesKey(candidate, page1)) {
+                contactState.keysBySalt[salt] = candidate;
+                contactDebug("页 1 校验通过 salt=" + salt.substring(0, 8) + " source=candidate");
+                return { salt: salt, keyHex: candidate };
+            }
+        }
+        if (contactState.passphraseHex) {
+            var k = contactDeriveKeyFromPassphrase(contactState.passphraseHex, salt);
+            if (k && contactPage1MatchesKey(k, page1)) {
+                contactState.keysBySalt[salt] = k;
+                contactDebug("页 1 校验通过 salt=" + salt.substring(0, 8) + " source=passphrase");
+                return { salt: salt, keyHex: k };
+            }
+        }
+        return null;
+    } catch (e) {
+        contactState.lastError = String(e);
+        return null;
+    }
+}
+
+function contactDecryptPageAt(u8, offset, pgno, keyBuf) {
+    try {
+        var ctOff, ctLen, ivOff;
+        if (pgno === 1) {
+            ctOff = offset + CONTACT_SALT_LEN;
+            ctLen = CONTACT_CT_LEN - CONTACT_SALT_LEN; // 4000
+            ivOff = offset + CONTACT_CT_LEN;
+        } else {
+            ctOff = offset;
+            ctLen = CONTACT_CT_LEN; // 4016
+            ivOff = offset + CONTACT_CT_LEN;
+        }
+        var ct = u8.subarray(ctOff, ctOff + ctLen);
+        var iv = u8.subarray(ivOff, ivOff + 16);
+        var plain = contactAesDecrypt(keyBuf, ct, iv);
+        if (!plain) return null;
+        var page = new Uint8Array(CONTACT_PAGE_SIZE);
+        page.set(plain, pgno === 1 ? CONTACT_SALT_LEN : 0);
+        if (pgno === 1) {
+            for (var i = 0; i < 16; i++) page[i] = CONTACT_SQLITE_HDR[i];
+        }
+        return page;
+    } catch (e) {
+        contactState.lastError = String(e);
+        return null;
+    }
+}
+
+// SQLite WAL 校验和：8 字节一组，按本机字节序读 u32；
+// magic 低 bit=1 表示异序（byte-swapped），与 sqlite walChecksumBytes 一致。
+function contactWalChecksum(u8, offset, len, s1, s2, bigEndCksum) {
+    var end = offset + len;
+    for (var i = offset; i < end; i += 8) {
+        var w0 = bigEndCksum ? contactU32BE(u8, i) : contactU32LE(u8, i);
+        var w1 = bigEndCksum ? contactU32BE(u8, i + 4) : contactU32LE(u8, i + 4);
+        s1 = (s1 + w0 + s2) >>> 0;
+        s2 = (s2 + w1 + s1) >>> 0;
+    }
+    return [s1, s2];
+}
+
+// 把 WAL 中「当前代」已提交帧合并进 pages。旧代帧（salt 不匹配/校验和断链）忽略。
+function contactApplyWal(dbPath, keyBuf, pages) {
+    var wal;
+    try {
+        wal = new Uint8Array(File.readAllBytes(dbPath + "-wal"));
+    } catch (e) {
+        return 0; // 没有 WAL 或不可读：主库已是最新
+    }
+    if (wal.length < 32 + 24 + CONTACT_PAGE_SIZE) return 0;
+    try {
+        var magic = contactU32BE(wal, 0);
+        if (contactU32BE(wal, 8) !== CONTACT_PAGE_SIZE) return 0;
+        if (magic !== 0x377f0682 && magic !== 0x377f0683) return 0;
+        var bigEndCksum = (magic & 1) === 1;
+        var hs1 = contactU32BE(wal, 16), hs2 = contactU32BE(wal, 20);
+        var hc1 = contactU32BE(wal, 24), hc2 = contactU32BE(wal, 28);
+        var headerCk = contactWalChecksum(wal, 0, 24, 0, 0, bigEndCksum);
+        if (headerCk[0] !== hc1 || headerCk[1] !== hc2) {
+            contactDebug("WAL 头校验失败，忽略 WAL");
+            return 0;
+        }
+        var frames = [];
+        var cs1 = hc1, cs2 = hc2;
+        var off = 32;
+        var lastCommit = -1;
+        while (off + 24 + CONTACT_PAGE_SIZE <= wal.length) {
+            var pgno = contactU32BE(wal, off);
+            var ntrunc = contactU32BE(wal, off + 4);
+            var fs1 = contactU32BE(wal, off + 8);
+            var fs2 = contactU32BE(wal, off + 12);
+            var fc1 = contactU32BE(wal, off + 16);
+            var fc2 = contactU32BE(wal, off + 20);
+            if (fs1 !== hs1 || fs2 !== hs2) break; // 上一代残留帧
+            var ck = contactWalChecksum(wal, off, 16, cs1, cs2, bigEndCksum);
+            ck = contactWalChecksum(wal, off + 24, CONTACT_PAGE_SIZE, ck[0], ck[1], bigEndCksum);
+            if (ck[0] !== fc1 || ck[1] !== fc2) break;
+            frames.push({ pgno: pgno, offset: off + 24 });
+            if (ntrunc !== 0) lastCommit = frames.length - 1;
+            cs1 = fc1;
+            cs2 = fc2;
+            off += 24 + CONTACT_PAGE_SIZE;
+        }
+        if (lastCommit < 0) return 0;
+        var applied = 0;
+        for (var i = 0; i <= lastCommit; i++) {
+            var f = frames[i];
+            if (f.pgno < 1 || f.pgno > 200000) continue;
+            var plain = contactDecryptPageAt(wal, f.offset, f.pgno, keyBuf);
+            if (plain) {
+                pages[f.pgno] = plain;
+                applied++;
+            }
+        }
+        if (applied > 0) contactDebug("WAL 已合并帧 " + applied + "/" + frames.length);
+        return applied;
+    } catch (e) {
+        contactState.lastError = String(e);
+        return 0;
+    }
+}
+
+function contactDecryptDatabase(dbBytes, keyHex, dbPath) {
+    try {
+        var keyBuf = Memory.alloc(32);
+        keyBuf.writeByteArray(contactHexToBytes(keyHex));
+        var pageCount = Math.floor(dbBytes.length / CONTACT_PAGE_SIZE);
+        if (pageCount <= 0) return null;
+        var pages = new Array(pageCount + 1);
+        var bad = 0;
+        for (var p = 1; p <= pageCount; p++) {
+            var page = contactDecryptPageAt(dbBytes, (p - 1) * CONTACT_PAGE_SIZE, p, keyBuf);
+            if (!page) bad++;
+            pages[p] = page;
+        }
+        if (!pages[1]) return null;
+        var walApplied = contactApplyWal(dbPath, keyBuf, pages);
+        var total = 0;
+        for (var k in pages) {
+            if (pages[k] && parseInt(k, 10) > total) total = parseInt(k, 10);
+        }
+        var out = new Uint8Array(total * CONTACT_PAGE_SIZE);
+        for (var i = 1; i <= total; i++) {
+            if (pages[i]) out.set(pages[i], (i - 1) * CONTACT_PAGE_SIZE);
+        }
+        return { bytes: out, pages: total, bad: bad, walApplied: walApplied };
+    } catch (e) {
+        contactState.lastError = String(e);
+        return null;
+    }
+}
+
+function contactTempDir(dbStoragePath) {
+    var idx = dbStoragePath.indexOf("/Documents/");
+    if (idx > 0) return dbStoragePath.substring(0, idx) + "/tmp";
+    return null;
+}
+
+function contactWriteTempDb(bytes, dbStoragePath) {
+    try {
+        var dir = contactTempDir(dbStoragePath);
+        if (!dir) return null;
+        var path = dir + "/wechatai-contact-" + Process.id + "-" + Date.now().toString(36) + ".db";
+        File.writeAllBytes(path, bytes.buffer);
+        return path;
+    } catch (e) {
+        contactState.lastError = String(e);
+        return null;
+    }
+}
+
+function contactUnlink(path) {
+    try {
+        if (!path) return;
+        if (!contactState.unlinkFn) {
+            var p = contactFindExport("unlink");
+            if (p) contactState.unlinkFn = new NativeFunction(p, "int", ["pointer"]);
+        }
+        if (contactState.unlinkFn) {
+            contactState.unlinkFn(Memory.allocUtf8String(path));
+        }
+    } catch (e) { /* 清理失败不影响结果 */ }
+}
+
+function contactCleanupTempDb(path) {
+    if (!path) return;
+    contactUnlink(path);
+    contactUnlink(path + "-wal");
+    contactUnlink(path + "-shm");
+    contactUnlink(path + "-journal");
+}
+
+// 群成员「群昵称」解析：chat_room.ext_buffer 是 protobuf：
+//   field 1 (repeated) Member { 1: username, 2: group_nickname, 3: flags(varint), 4: inviter }
+// 同一个人在群里的显示名可能和通讯录昵称/备注不同（如好友昵称 "小明"、
+// 群昵称 "群里的昵称"），群聊场景应优先用群昵称。
+function contactUtf8(u8) {
+    var out = "";
+    var i = 0;
+    while (i < u8.length) {
+        var c = u8[i++];
+        if (c < 0x80) {
+            out += String.fromCharCode(c);
+        } else if (c >= 0xc0 && c < 0xe0) {
+            if (i >= u8.length) break;
+            out += String.fromCharCode(((c & 0x1f) << 6) | (u8[i++] & 0x3f));
+        } else if (c >= 0xe0 && c < 0xf0) {
+            if (i + 1 >= u8.length) break;
+            out += String.fromCharCode(((c & 0x0f) << 12) | ((u8[i++] & 0x3f) << 6) | (u8[i++] & 0x3f));
+        } else if (c >= 0xf0) {
+            if (i + 2 >= u8.length) break;
+            var cp = (((c & 0x07) << 18) | ((u8[i++] & 0x3f) << 12) |
+                ((u8[i++] & 0x3f) << 6) | (u8[i++] & 0x3f)) - 0x10000;
+            out += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
+        }
+    }
+    return out;
+}
+
+function contactParseGroupMembers(hex) {
+    var members = {};
+    if (!hex || hex.length < 6 || hex.length % 2 !== 0) return members;
+    var bytes;
+    try {
+        bytes = new Uint8Array(contactHexToBytes(hex));
+    } catch (e) {
+        return members;
+    }
+    var count = 0;
+    function readVarint(buf, pos) {
+        var value = 0, shift = 0, b;
+        do {
+            if (pos >= buf.length || shift > 49) throw new Error("varint");
+            b = buf[pos++];
+            value += (b & 0x7f) * Math.pow(2, shift);
+            shift += 7;
+        } while (b & 0x80);
+        return [value, pos];
+    }
+    function readBytes(buf, pos) {
+        var r = readVarint(buf, pos);
+        var len = r[0];
+        pos = r[1];
+        if (len < 0 || pos + len > buf.length) throw new Error("len");
+        return [buf.subarray(pos, pos + len), pos + len];
+    }
+    try {
+        var pos = 0;
+        while (pos < bytes.length && count < CONTACT_MAX_GROUP_MEMBERS) {
+            var tr = readVarint(bytes, pos);
+            var key = tr[0];
+            pos = tr[1];
+            var field = Math.floor(key / 8), wire = key % 8;
+            if (field !== 1 || wire !== 2) break; // 成员列表之后是房间级字段，不再需要
+            var sr = readBytes(bytes, pos);
+            var msg = sr[0];
+            pos = sr[1];
+            var mp = 0, username = "", display = "";
+            while (mp < msg.length) {
+                var mr = readVarint(msg, mp);
+                var mk = mr[0];
+                mp = mr[1];
+                var mf = Math.floor(mk / 8), mw = mk % 8;
+                if (mw === 2) {
+                    var vr = readBytes(msg, mp);
+                    var val = vr[0];
+                    mp = vr[1];
+                    if (mf === 1) username = contactUtf8(val);
+                    else if (mf === 2) display = contactUtf8(val);
+                } else if (mw === 0) {
+                    var skip = readVarint(msg, mp);
+                    mp = skip[1];
+                } else if (mw === 5) {
+                    mp += 4;
+                } else if (mw === 1) {
+                    mp += 8;
+                } else {
+                    break;
+                }
+                if (username.length > 128) break;
+            }
+            if (username) {
+                // 未设置群昵称时 display 留空：调用方（bridge）回退到通讯录显示名，
+                // 不能把 wxid 当成群昵称写进 sender.nickname。
+                members[username] = {
+                    display: display,
+                    nickname: display,
+                    remark: "",
+                    alias: ""
+                };
+                count++;
+            }
+        }
+    } catch (e) {
+        contactDebug("群昵称解析失败: " + e);
+    }
+    return members;
+}
+
+function contactQueryDirectory(dbPath) {
+    var users = {};
+    var groups = {};
+    var count = 0;
+    var db = null;
+    try {
+        db = SqliteDatabase.open(dbPath);
+        var stmt = db.prepare("SELECT username, nick_name, remark, alias, delete_flag FROM contact;");
+        var row = stmt.step();
+        while (row && count < CONTACT_MAX_ENTRIES) {
+            var username = row[0] ? String(row[0]) : "";
+            var deleted = row[4] ? Number(row[4]) : 0;
+            if (username && !deleted) {
+                var nick = row[1] ? String(row[1]) : "";
+                var remark = row[2] ? String(row[2]) : "";
+                var alias = row[3] ? String(row[3]) : "";
+                var entry = {
+                    display: remark || nick || alias || username,
+                    nickname: nick,
+                    remark: remark,
+                    alias: alias
+                };
+                if (username.indexOf("@chatroom") >= 0) groups[username] = entry;
+                else users[username] = entry;
+                count++;
+            }
+            row = stmt.step();
+        }
+        // 群昵称：同一个人在群里的显示名可能与通讯录不同，群聊优先用群昵称。
+        var roomStmt = db.prepare("SELECT username, hex(ext_buffer) FROM chat_room WHERE username IS NOT NULL;");
+        var roomRow = roomStmt.step();
+        var roomCount = 0;
+        while (roomRow && roomCount < CONTACT_MAX_ENTRIES) {
+            var roomID = roomRow[0] ? String(roomRow[0]) : "";
+            if (roomID) {
+                var members = contactParseGroupMembers(roomRow[1] ? String(roomRow[1]) : "");
+                if (Object.keys(members).length > 0) {
+                    if (!groups[roomID]) {
+                        groups[roomID] = {
+                            display: roomID,
+                            nickname: "",
+                            remark: "",
+                            alias: ""
+                        };
+                    }
+                    groups[roomID].members = members;
+                }
+                roomCount++;
+            }
+            roomRow = roomStmt.step();
+        }
+    } finally {
+        try {
+            if (db) db.close();
+        } catch (e) { }
+    }
+    return { users: users, groups: groups, count: count };
+}
+
+function getContactDirectory(dbStoragePath) {
+    var startedAt = Date.now();
+    try {
+        if (!contactDirectoryEnabled) return JSON.stringify({ ok: false, reason: "unsupported" });
+        if (!contactState.installed) contactSetupHooks();
+        if (!contactState.installed || !contactState.ccCrypt) return JSON.stringify({ ok: false, reason: "unsupported" });
+        var base = String(dbStoragePath || "").replace(/\/+$/, "");
+        if (!base) return JSON.stringify({ ok: false, reason: "db_missing" });
+        var contactPath = base + "/contact/contact.db";
+        var dbBytes;
+        try {
+            dbBytes = new Uint8Array(File.readAllBytes(contactPath));
+        } catch (e) {
+            return JSON.stringify({ ok: false, reason: "db_missing" });
+        }
+        if (dbBytes.length < CONTACT_PAGE_SIZE || dbBytes.length > CONTACT_MAX_DB_BYTES) {
+            return JSON.stringify({ ok: false, reason: "db_missing" });
+        }
+        var resolved = contactResolveKeyByPage1(dbBytes.subarray(0, CONTACT_PAGE_SIZE));
+        if (!resolved) {
+            console.log("[!] [contact] 缺少 contact.db 密钥（需登录期 Hook 或打开一次通讯录/聊天触发页读）");
+            return JSON.stringify({ ok: false, reason: "key_missing" });
+        }
+        var dec = contactDecryptDatabase(dbBytes, resolved.keyHex, contactPath);
+        if (!dec) return JSON.stringify({ ok: false, reason: "decrypt_failed" });
+        var tmpPath = contactWriteTempDb(dec.bytes, base);
+        if (!tmpPath) return JSON.stringify({ ok: false, reason: "decrypt_failed" });
+        var directory = null;
+        try {
+            directory = contactQueryDirectory(tmpPath);
+        } finally {
+            contactCleanupTempDb(tmpPath);
+        }
+        if (!directory) return JSON.stringify({ ok: false, reason: "decrypt_failed" });
+        var keys = {};
+        keys.contact = { salt: resolved.salt, key: resolved.keyHex };
+        try {
+            var sessionBytes = new Uint8Array(File.readAllBytes(base + "/session/session.db"));
+            if (sessionBytes.length >= CONTACT_PAGE_SIZE) {
+                var sessionKey = contactResolveKeyByPage1(sessionBytes.subarray(0, CONTACT_PAGE_SIZE));
+                if (sessionKey) keys.session = { salt: sessionKey.salt, key: sessionKey.keyHex };
+            }
+        } catch (e) { /* session.db 可选 */ }
+        var result = {
+            ok: true,
+            generated_at: Date.now(),
+            wal_applied: dec.walApplied,
+            users: directory.users,
+            groups: directory.groups,
+            keys: keys
+        };
+        var memberTotal = 0;
+        for (var gid in directory.groups) {
+            if (directory.groups[gid].members) memberTotal += Object.keys(directory.groups[gid].members).length;
+        }
+        contactDebug("目录完成 users=" + Object.keys(directory.users).length +
+            " groups=" + Object.keys(directory.groups).length +
+            " members=" + memberTotal +
+            " wal=" + dec.walApplied + " ms=" + (Date.now() - startedAt));
+        return JSON.stringify(result);
+    } catch (e) {
+        contactState.lastError = String(e);
+        return JSON.stringify({ ok: false, reason: "decrypt_failed", message: String(e) });
+    }
+}
+
+function setDbKeys(keysJson) {
+    var accepted = 0;
+    try {
+        var obj = JSON.parse(String(keysJson || "{}"));
+        for (var k in obj) {
+            if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+            var item = obj[k];
+            if (!item || !item.salt || !item.key) continue;
+            if (String(item.key).length !== 64 || String(item.salt).length !== 32) continue;
+            contactState.providedKeys[String(item.salt)] = String(item.key);
+            contactNoteCandidate(String(item.key), "provided");
+            accepted++;
+        }
+        contactDebug("回灌 DB key 缓存 accepted=" + accepted);
+        return JSON.stringify({ ok: true, accepted: accepted });
+    } catch (e) {
+        contactState.lastError = String(e);
+        return JSON.stringify({ ok: false, reason: "bad_json" });
+    }
+}
+
+function getDbKeyStatus() {
+    try {
+        return JSON.stringify({
+            installed: contactState.installed,
+            validated: Object.keys(contactState.keysBySalt).length,
+            candidates: contactState.candidates.length,
+            passphrase: !!contactState.passphraseHex,
+            last_error: contactState.lastError
+        });
+    } catch (e) {
+        return JSON.stringify({ installed: false, error: String(e) });
+    }
 }
 
 rpc.exports = {
@@ -2736,6 +3989,9 @@ rpc.exports = {
     r3Status: r3Status,
     r3ScanOnce: r3ScanOnce,
     r3MapDump: r3MapDump,
+    getContactDirectory: getContactDirectory,
+    setDbKeys: setDbKeys,
+    getDbKeyStatus: getDbKeyStatus,
 };
 
 // -------------------------发送图片消息分区-------------------------
@@ -2758,6 +4014,23 @@ function setReceiver() {
 			var respTaskId = this.context.sp.add(0x140).readS32();
 			const currentPtr = this.context.x20;
 			const x2 = this.context.x0.toInt32();
+            // R3 诊断: 只读记录异步发送任务是否收到回包（slot13 返回 0 不代表服务端已接收）。
+            var r3Sent = (r3State && r3State.sentTasks) ? r3State.sentTasks[respTaskId] : null;
+            if (r3Sent) {
+                delete r3State.sentTasks[respTaskId];
+                var head = [];
+                try {
+                    if (isReadablePointer(currentPtr) && x2 > 0 && x2 <= 64) {
+                        var headBuf = readByteArrayIfReadable(currentPtr, x2);
+                        if (headBuf) head = Array.prototype.slice.call(new Uint8Array(headBuf), 0, Math.min(16, x2));
+                    }
+                } catch (e) { }
+                if (r3State.pendingResponses.length < 8) {
+                    r3State.pendingResponses.push("[+] R3 " + r3Sent.label + " response: taskId=" +
+                        respTaskId + " len=" + x2 + " head=" + head.join(","));
+                }
+                return;
+            }
             // 先处理我们发送任务的ack: 无论响应数据是否可读, 清理动作都必须执行
             // (错误响应往往指针不可读, 在校验前早退会跳过清理留下悬空伪造指针)
             var pendingEntry = finishPendingBuf2RespTask(respTaskId);

@@ -73,6 +73,14 @@ type WechatMessage struct {
 	// TargetID 是会话目标：私聊=对方 wxid，群聊=群 ID。自消息的 sender 仍是
 	// 自己，单靠 user_id 无法确定会话，App 需要用 target_id 归位。
 	TargetID string `json:"target_id,omitempty"`
+	// 拍一拍（appmsg type=62 / 旧版 sysmsg type=pat）的结构化解析结果。
+	// 这些字段必须显式声明，否则 HandleMsg 反序列化再序列化时会静默丢弃；
+	// 规则层用 target 判断是否拍的是机器人，不能只看正文有没有「拍了拍」。
+	PatFromWXID   string `json:"pat_from_wxid,omitempty"`
+	PatChatWXID   string `json:"pat_chat_wxid,omitempty"`
+	PatTargetWXID string `json:"pat_target_wxid,omitempty"`
+	PatSuffix     string `json:"pat_suffix,omitempty"`
+	PatTemplate   string `json:"pat_template,omitempty"`
 }
 
 type Sender struct {

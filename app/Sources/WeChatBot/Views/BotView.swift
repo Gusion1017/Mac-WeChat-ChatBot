@@ -149,6 +149,53 @@ struct BotView: View {
                     }
                 }
                 SettingsDivider()
+                SettingsRow(
+                    title: "拍一拍回复",
+                    subtitle: "别人拍机器人时，发送自定义文字和/或 AI 回复，可 @ 拍的人；不再回拍。",
+                    symbol: "hand.tap.fill",
+                    tint: Theme.info
+                ) {
+                    Toggle("拍一拍回复", isOn: patReplyBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                if store.settings.bot.patReplyEnabled {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("发送自定义文字", isOn: patFixedTextBinding)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                        if store.settings.bot.patFixedTextEnabled {
+                            VStack(alignment: .leading, spacing: 8) {
+                                TextField("AI 前文字（留空不发送）", text: patBeforeTextBinding)
+                                TextField("AI 后文字（留空不发送）", text: patAfterTextBinding)
+                                Text("自定义文字支持 {name} 占位符（替换为对方昵称）。")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .textFieldStyle(.roundedBorder)
+                        }
+                        Toggle("附带 AI 回复", isOn: patAIBinding)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                        Toggle("群聊被拍后 @ 拍的人", isOn: patMentionBinding)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                        if store.settings.bot.patMentionPatterEnabled {
+                            Text("仅群聊生效；@ 附在第一条回复前（自定义前文字 → AI 首段 → 自定义后文字）。bridge 解析不到群昵称时按普通文本发送。")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        if store.settings.bot.patFixedTextEnabled || store.settings.bot.patAIEnabled {
+                            Text("发送顺序：自定义文字（前）→ AI 回复 → 自定义文字（后）；AI 失败时仍发送文字。")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                }
+                SettingsDivider()
                 VStack(alignment: .leading, spacing: 7) {
                     HStack {
                         Text("群聊关键词")
@@ -458,6 +505,66 @@ struct BotView: View {
             get: { store.settings[keyPath: keyPath] },
             set: { newValue in
                 store.settings[keyPath: keyPath] = newValue
+                store.persist()
+            }
+        )
+    }
+
+    private var patReplyBinding: Binding<Bool> {
+        Binding(
+            get: { store.settings.bot.patReplyEnabled },
+            set: { enabled in
+                store.settings.bot.patReplyEnabled = enabled
+                store.persist()
+            }
+        )
+    }
+
+    private var patFixedTextBinding: Binding<Bool> {
+        Binding(
+            get: { store.settings.bot.patFixedTextEnabled },
+            set: { enabled in
+                store.settings.bot.patFixedTextEnabled = enabled
+                store.persist()
+            }
+        )
+    }
+
+    private var patAIBinding: Binding<Bool> {
+        Binding(
+            get: { store.settings.bot.patAIEnabled },
+            set: { enabled in
+                store.settings.bot.patAIEnabled = enabled
+                store.persist()
+            }
+        )
+    }
+
+    private var patMentionBinding: Binding<Bool> {
+        Binding(
+            get: { store.settings.bot.patMentionPatterEnabled },
+            set: { enabled in
+                store.settings.bot.patMentionPatterEnabled = enabled
+                store.persist()
+            }
+        )
+    }
+
+    private var patBeforeTextBinding: Binding<String> {
+        Binding(
+            get: { store.settings.bot.patBeforeText },
+            set: { text in
+                store.settings.bot.patBeforeText = text
+                store.persist()
+            }
+        )
+    }
+
+    private var patAfterTextBinding: Binding<String> {
+        Binding(
+            get: { store.settings.bot.patAfterText },
+            set: { text in
+                store.settings.bot.patAfterText = text
                 store.persist()
             }
         )

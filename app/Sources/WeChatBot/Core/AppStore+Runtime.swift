@@ -85,6 +85,10 @@ final class RuntimeCoordinator {
     private var inFlightConversations: Set<String> = []
     private var memoryMaintenanceInFlight: Set<String> = []
     private var lastSchedulerTasks: [ScheduledTask] = []
+    /// 最近一次可用的通讯录目录（内存副本）；数据库缓存由 `MemoryStore` 负责。
+    /// nil / `ok == false` 时行为与没有该功能完全一致：会话标题继续走 `ConversationName` 兜底。
+    private var contactDirectory: ContactDirectorySnapshot?
+    private var lastContactDirectoryFailureReason: String?
 
     /// Conversations whose newest message page is loaded synchronously at launch.
     /// The rest are filled in by a low-priority background prefetch after first paint.
@@ -294,12 +298,16 @@ final class RuntimeCoordinator {
             selfID = id
         }
         await repairSelfRoutingIfNeeded()
+        await repairMisroutedConversationsIfNeeded()
+        await repairConversationTitlesIfNeeded()
 
         do {
             store.conversations = try await memory.fetchConversations(limit: 300)
         } catch {
             log(.warning, "Database", "读取会话失败：\(error.localizedDescription)")
         }
+        // 通讯录缓存要在会话加载之后应用：它只补占位标题，不覆盖用户重命名。
+        await loadCachedContactDirectory()
 
         // Preload the newest page for the most recent conversations so the UI has
         // content immediately. One batched SQL query replaces the old N+1 pattern
@@ -368,6 +376,31 @@ final class RuntimeCoordinator {
             + (result.removedSelfConversation ? "，删除「自己」会话" : ""))
     }
 
+    /// 修复旧 hook 造成的「误归类会话」：自己 wxid 会话、`wxid_self` 占位会话、
+    /// 以及 kind=group 但 ID 不是 `@chatroom` 的伪群会话。
+    /// 只搬 `raw_json` 能明确推导目标的消息；幂等，selfID 为空时也能跑
+    /// （内部会从历史事件反推账号）。
+    private func repairMisroutedConversationsIfNeeded() async {
+        guard let result = try? await memory.repairMisroutedConversations(selfID: selfID),
+              result.didChange else { return }
+        var summary = "已修复历史误归类会话：移动 \(result.movedMessages) 条消息，"
+            + "影响 \(result.affectedConversationIDs.count) 个会话"
+        if result.fixedKinds > 0 {
+            summary += "，修正 \(result.fixedKinds) 个会话类型"
+        }
+        if !result.removedConversationIDs.isEmpty {
+            summary += "，删除 \(result.removedConversationIDs.count) 个空会话"
+        }
+        log(.info, "Database", summary)
+    }
+
+    /// 清理旧版本写入的裸 ID 标题（wxid / `xxx@chatroom` / 「群聊 <id>」）。
+    /// 展示层本来就会忽略这类标题，这里让数据库也保持干净（AI 提示词、日志、导出都不再带 wxid）。
+    private func repairConversationTitlesIfNeeded() async {
+        guard let count = try? await memory.repairPlaceholderConversationTitles(), count > 0 else { return }
+        log(.info, "Database", "已清理 \(count) 个会话的 ID 标题，改为可读名称")
+    }
+
     /// 采纳 bridge `get_login_info` 返回的权威账号 wxid。
     private func adoptSelfID(_ raw: String) async {
         let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -377,9 +410,25 @@ final class RuntimeCoordinator {
         try? await memory.setSetting(key: "onebot.self_id", value: id)
         log(.info, "Bot", "已确认登录账号：\(id)")
         // selfID 从空/错误值变成正确值时，补跑一次修复并刷新 UI。
+        var repaired = false
         if let result = try? await memory.repairSelfRoutedMessages(selfID: id), result.didChange {
             log(.info, "Database", "已修复历史自消息归属：移动 \(result.movedMessages) 条，"
                 + "影响 \(result.affectedConversationIDs.count) 个会话")
+            repaired = true
+        }
+        if let result = try? await memory.repairMisroutedConversations(selfID: id), result.didChange {
+            var summary = "已修复历史误归类会话：移动 \(result.movedMessages) 条消息，"
+                + "影响 \(result.affectedConversationIDs.count) 个会话"
+            if result.fixedKinds > 0 {
+                summary += "，修正 \(result.fixedKinds) 个会话类型"
+            }
+            if !result.removedConversationIDs.isEmpty {
+                summary += "，删除 \(result.removedConversationIDs.count) 个空会话"
+            }
+            log(.info, "Database", summary)
+            repaired = true
+        }
+        if repaired {
             await reloadConversationsAndMessages()
         }
         if previous != id {
@@ -496,13 +545,14 @@ final class RuntimeCoordinator {
         guard is415 else { return [:] }
         if store.settings.hook.enableNativeSend {
             log(.info, "Hook", "微信 4.1.15.55：启用 R3 原生发送（首次使用前需在本机微信手动发一条消息以捕获发送句柄）")
-            return [
+            var overrides = [
                 "enableSend": "true",
                 "req2bufSendMode": "r3",
                 "r3ClosureCapture": "true",
                 "r3Slot13Capture": "true",
                 "r3QueueUntilSeed": "true"
             ]
+            return overrides
         } else {
             log(.warning, "Hook", "微信 4.1.15.55：R3 原生发送已关闭，主动发送不可用（接收不受影响）")
             return [
@@ -586,6 +636,11 @@ final class RuntimeCoordinator {
                 await self?.adoptSelfID(userID)
             }
         }
+        client.onContactDirectory = { [weak self] snapshot in
+            Task { @MainActor [weak self] in
+                await self?.handleContactDirectory(snapshot)
+            }
+        }
         oneBotClient = client
         startedOneBotConfiguration = configuration
         client.start()
@@ -650,17 +705,92 @@ final class RuntimeCoordinator {
         }
     }
 
+    // MARK: Contact directory
+
+    /// 启动时恢复上次成功的通讯录目录，并立即把缓存名落到占位标题的会话上。
+    /// 缓存不存在/损坏时静默跳过：读不到目录时行为与现在完全一致。
+    private func loadCachedContactDirectory() async {
+        guard let cached = try? await memory.loadContactDirectory(), cached.ok else { return }
+        contactDirectory = cached
+        log(.debug, "Directory", "已加载通讯录缓存：\(cached.users.count) 位联系人 / \(cached.groups.count) 个群")
+        await applyContactDirectoryToConversationTitles()
+    }
+
+    /// 收到 bridge 目录快照。成功时更新内存/DB 缓存并补会话标题；
+    /// 失败时只记一条去重日志（同一 reason 不重复刷屏），消息链路完全不受影响。
+    private func handleContactDirectory(_ snapshot: ContactDirectorySnapshot) async {
+        guard snapshot.ok else {
+            let reason = snapshot.reason ?? "unknown"
+            guard lastContactDirectoryFailureReason != reason else { return }
+            lastContactDirectoryFailureReason = reason
+            log(.debug, "Directory", "通讯录目录暂不可用（\(reason)），继续使用兜底名称")
+            return
+        }
+        lastContactDirectoryFailureReason = nil
+        guard contactDirectory != snapshot else { return }
+        let isFirstSnapshot = contactDirectory?.ok != true
+        contactDirectory = snapshot
+        do {
+            try await memory.replaceContactDirectory(snapshot)
+        } catch {
+            log(.warning, "Database", "写入通讯录目录缓存失败：\(error.localizedDescription)")
+        }
+        let summary = "\(snapshot.users.count) 位联系人 / \(snapshot.groups.count) 个群"
+        if isFirstSnapshot {
+            log(.info, "Directory", "已获取通讯录：\(summary)")
+        } else {
+            log(.debug, "Directory", "通讯录目录已刷新：\(summary)")
+        }
+        await applyContactDirectoryToConversationTitles()
+    }
+
+    /// 只给标题为空/占位（`ConversationName.isPlaceholderTitle`）的会话补目录名。
+    /// 用户重命名后（非占位标题）绝不覆盖；目录缺失/失败时什么都不做。
+    private func applyContactDirectoryToConversationTitles() async {
+        guard let directory = contactDirectory, directory.ok else { return }
+        let resolved = ContactDirectoryTitles.updatedConversations(store.conversations, directory: directory)
+        guard !resolved.isEmpty else { return }
+        let names = Dictionary(uniqueKeysWithValues: resolved.map { ($0.id, $0.title) })
+
+        // 先同步更新内存（UI 立即可见），再 await 持久化；期间事件可能改动会话列表，
+        // 因此以「当前列表 + 仍是占位标题」为准逐个应用，绝不整体覆盖。
+        var conversations = store.conversations
+        var changed: [Conversation] = []
+        for index in conversations.indices {
+            let id = conversations[index].id
+            guard let name = names[id],
+                  ConversationName.isPlaceholderTitle(
+                      conversations[index].title,
+                      conversationID: id,
+                      kind: conversations[index].kind
+                  ) else { continue }
+            conversations[index].title = name
+            changed.append(conversations[index])
+        }
+        guard !changed.isEmpty else { return }
+        store.conversations = conversations
+
+        do {
+            try await memory.upsertConversations(changed)
+            log(.info, "Directory", "已用通讯录名称补齐 \(changed.count) 个会话标题")
+        } catch {
+            log(.warning, "Database", "写入通讯录会话标题失败：\(error.localizedDescription)")
+        }
+    }
+
     private func handle(event: OneBotEvent) async {
         let conversationID = event.conversationID
         guard !conversationID.isEmpty else { return }
         let receivedAt = Date()
         rolloverStatsIfNeeded()
 
-        if !event.selfID.isEmpty,
+        // 当前账号的权威来源是 bridge get_login_info（onLoginInfo）。只有在还没有
+        // 任何 selfID 时才用事件兜底；否则错误/测试事件的 self_id 会覆盖真实账号，
+        // 进而让拍一拍目标比对、自消息判定全部失效（2026-10-21 真机问题）。
+        if selfID.isEmpty,
+           !event.selfID.isEmpty,
            event.selfID != event.groupID,
-           event.selfID != selfID,
            // 旧 bridge 的自消息可能把 self_id 写成对方 wxid；不要把它学成自己。
-           // 当前账号的权威来源是 bridge get_login_info（onLoginInfo）。
            !store.conversations.contains(where: { $0.id == event.selfID && $0.kind == .direct }) {
             selfID = event.selfID
             try? await memory.setSetting(key: "onebot.self_id", value: selfID)
@@ -720,26 +850,50 @@ final class RuntimeCoordinator {
 
     private func upsertConversation(for event: OneBotEvent) -> Conversation {
         let existingIndex = store.conversations.firstIndex { $0.id == event.conversationID }
+        // 目录名比事件里的 sender.nickname 更权威；只在标题仍是占位值时使用。
+        let directoryTitle = ContactDirectoryTitles.title(
+            for: event.conversationID,
+            kind: event.conversationKind,
+            in: contactDirectory
+        )
         var conversation: Conversation
         if let index = existingIndex {
             conversation = store.conversations[index]
-        } else {
-            let title: String
-            if event.isGroup {
-                title = "群聊 \(event.groupID ?? event.conversationID)"
-            } else {
-                title = event.senderName.isEmpty ? event.conversationID : event.senderName
+            if let directoryTitle,
+               ConversationName.isPlaceholderTitle(
+                   conversation.title,
+                   conversationID: conversation.id,
+                   kind: conversation.kind
+               ) {
+                conversation.title = directoryTitle
             }
+        } else {
+            // 新建会话时目录已有名字就直接写入，避免先闪一下兜底名；
+            // 没有目录时标题留空，交给展示层兜底（微信只下发 wxid）。
             conversation = Conversation(
                 id: event.conversationID,
                 kind: event.conversationKind,
-                title: title
+                title: directoryTitle ?? ""
             )
         }
+        let learnedName = ConversationName.learnedSenderName(
+            event.senderName,
+            conversationID: event.conversationID,
+            senderID: event.userID,
+            selfID: selfID
+        )
         if event.isGroup {
-            if !event.senderName.isEmpty { conversation.subtitle = event.senderName }
-        } else if !event.senderName.isEmpty {
-            conversation.title = event.senderName
+            // 群名不在事件里，只更新「最近发言人」副标题，且拒绝 wxid。
+            if !event.isSelf, let learnedName { conversation.subtitle = learnedName }
+        } else if !event.isSelf,
+                  ConversationName.isPlaceholderTitle(
+                    conversation.title,
+                    conversationID: conversation.id,
+                    kind: conversation.kind
+                  ),
+                  let learnedName {
+            // 只有标题还是占位值时才学习昵称：用户重命名后不会被后续消息覆盖。
+            conversation.title = learnedName
         }
         // 历史回放/补同步会带来很旧的 timestamp：不能让会话预览与排序倒退，
         // 也不能把旧消息算成未读。只有比当前记录更新的事件才推进预览。
@@ -1051,6 +1205,37 @@ final class RuntimeCoordinator {
         inFlightConversations.insert(conversation.id)
         defer { inFlightConversations.remove(conversation.id) }
 
+        // 拍一拍回复优先：不再回拍，只发送自定义文字和/或 AI 回复；
+        // 只有「没发出任何内容、需要回退」时才继续普通 AI 流程。
+        // 群聊 @ 拍的人同样用于回退的普通 AI 回复，避免只开了 @ 没开文字/AI 时失效。
+        let isPatForBot = store.settings.bot.patReplyEnabled
+            && PatMessage.isDirectedAtBot(
+                message,
+                conversation: conversation,
+                selfID: selfID,
+                selfMentionName: store.settings.bot.selfMentionNames?[conversation.id]
+            )
+        let patMention = isPatForBot
+            ? PatMessage.replyMention(
+                message,
+                conversation: conversation,
+                selfID: selfID,
+                enabled: store.settings.bot.patMentionPatterEnabled
+            )
+            : nil
+        if isPatForBot {
+            if await handlePatReply(
+                conversation: conversation,
+                message: message,
+                evaluation: evaluation,
+                receivedAt: receivedAt,
+                mention: patMention
+            ) {
+                return
+            }
+            log(.warning, "Bot", "拍一拍回复未完成，回退为普通文字回复")
+        }
+
         // Publish progress before any async gate so a missing provider / credential is
         // visible in the UI as a failed step instead of silently producing no reply.
         let settingsProvider = store.settings.provider(id: evaluation.providerID)
@@ -1098,7 +1283,12 @@ final class RuntimeCoordinator {
                 history: history,
                 dryRun: store.settings.bot.dryRun
             )
-            await deliver(plan: plan, conversation: conversation, receivedAt: receivedAt)
+            await deliver(
+                plan: plan,
+                conversation: conversation,
+                receivedAt: receivedAt,
+                mention: patMention
+            )
             ruleEngine.noteReply(conversationID: conversation.id)
             log(.info, "AI", "\(conversation.displayTitle) 生成回复（\(Int(plan.latencyMs))ms，tokens \(plan.usage.totalTokens)，\(evaluation.triggerLabel)）")
         } catch {
@@ -1110,9 +1300,15 @@ final class RuntimeCoordinator {
         }
     }
 
-    private func deliver(plan: ChatReplyPlan, conversation: Conversation, receivedAt: Date) async {
+    private func deliver(
+        plan: ChatReplyPlan,
+        conversation: Conversation,
+        receivedAt: Date,
+        mention: PatMention? = nil
+    ) async {
         if plan.dryRun {
-            let text = "（dry-run）将回复：\(plan.fullText)"
+            var text = "（dry-run）将回复：\(plan.fullText)"
+            if mention != nil { text += "（第一条回复会 @ 拍的人）" }
             log(.info, "Bot", "\(text)（未实际发送）")
             let message = ChatMessage(
                 id: "dry-\(UUID().uuidString)",
@@ -1140,6 +1336,34 @@ final class RuntimeCoordinator {
             return
         }
 
+        let sentCount = await sendPlanSegments(plan, conversation: conversation, mention: mention)
+
+        guard sentCount > 0 else {
+            failReplyProgress(conversationID: conversation.id, error: "消息发送失败，详见运行日志")
+            return
+        }
+        let segmentCount = plan.segments.count
+        let note = sentCount == segmentCount
+            ? "已发送 \(sentCount) 段"
+            : "已发送 \(sentCount)/\(segmentCount) 段（部分失败）"
+        completeReplyProgress(conversationID: conversation.id, note: note)
+
+        store.stats.repliedToday += 1
+        store.stats.lastReplyAt = Date()
+        recordReplyLatency(plan.latencyMs)
+        let endToEndMs = Int(Date().timeIntervalSince(receivedAt) * 1000)
+        log(.info, "Bot", "回复投递完成：端到端 \(endToEndMs)ms（AI \(Int(plan.latencyMs))ms，拟人化 \(plan.delaysMs.first ?? 0)ms，bridge 环节见上一条）")
+        scheduleStatsPersist()
+    }
+
+    /// 按拟人化设置发送一段 AI 回复计划，返回成功段数。
+    /// 由普通回复和「拍一拍 AI 回复」共用，保留进度条阶段与分段延迟。
+    /// `mention` 只作用于第一条真正发出的消息（拍一拍回复 @ 拍的人）。
+    private func sendPlanSegments(
+        _ plan: ChatReplyPlan,
+        conversation: Conversation,
+        mention: PatMention? = nil
+    ) async -> Int {
         let humanize = store.settings.bot.humanize
         let segmentCount = plan.segments.count
         var sentCount = 0
@@ -1165,33 +1389,198 @@ final class RuntimeCoordinator {
                 segmentIndex: index + 1,
                 segmentCount: segmentCount
             )
-            let sent = await sendOutgoingText(segment, conversation: conversation)
+            let sent = await sendOutgoingText(
+                segment,
+                conversation: conversation,
+                mention: sentCount == 0 ? mention : nil
+            )
             if sent { sentCount += 1 }
         }
+        return sentCount
+    }
 
-        guard sentCount > 0 else {
-            failReplyProgress(conversationID: conversation.id, error: "消息发送失败，详见运行日志")
-            return
+    /// 别人拍一拍机器人后的回复：自定义文字（前）→ AI → 自定义文字（后）。
+    /// 不再发送原生拍一拍；AI 失败时仍发送自定义文字。
+    /// `mention` 为群聊 @ 拍的人的目标，只附在第一条真正发出的消息前。
+    private func handlePatReply(
+        conversation: Conversation,
+        message: ChatMessage,
+        evaluation: RuleEvaluation,
+        receivedAt: Date,
+        mention: PatMention?
+    ) async -> Bool {
+        let bot = store.settings.bot
+        let patName = message.displaySender
+        let fixedEnabled = bot.patFixedTextEnabled
+        let aiEnabled = bot.patAIEnabled
+        let beforeText = fixedEnabled ? PatTextTemplate.render(bot.patBeforeText, name: patName) : ""
+        let afterText = fixedEnabled ? PatTextTemplate.render(bot.patAfterText, name: patName) : ""
+
+        let patProvider = store.settings.provider(id: evaluation.providerID)
+        beginReplyProgress(
+            conversationID: conversation.id,
+            providerName: patProvider?.name,
+            model: patProvider?.model
+        )
+
+        if bot.dryRun {
+            var plan = "（dry-run）将回复拍一拍「\(patName)」"
+            if mention != nil { plan += "，第一条回复 @ 拍的人" }
+            if !beforeText.isEmpty { plan += "，AI 前文字「\(beforeText)」" }
+            if aiEnabled { plan += "，附带 AI 回复" }
+            if !afterText.isEmpty { plan += "，AI 后文字「\(afterText)」" }
+            log(.info, "Bot", "\(plan)（未实际发送）")
+            await appendSystemNotice(plan, conversationID: conversation.id)
+            completeReplyProgress(conversationID: conversation.id, note: "演练完成（未实际发送）")
+            return true
         }
-        let note = sentCount == segmentCount
-            ? "已发送 \(sentCount) 段"
-            : "已发送 \(sentCount)/\(segmentCount) 段（部分失败）"
-        completeReplyProgress(conversationID: conversation.id, note: note)
 
+        updateReplyProgress(conversationID: conversation.id, stage: .sending)
+        var pendingMention = mention
+        var sentAny = false
+        if !beforeText.isEmpty {
+            let sent = await sendOutgoingText(
+                beforeText,
+                conversation: conversation,
+                mention: pendingMention
+            )
+            if sent { pendingMention = nil }
+            sentAny = sent || sentAny
+        }
+
+        var aiLatency: Double?
+        if aiEnabled {
+            updateReplyProgress(conversationID: conversation.id, stage: .generating)
+            if let plan = await generatePatAIReply(
+                conversation: conversation, message: message, evaluation: evaluation
+            ) {
+                aiLatency = plan.latencyMs
+                updateReplyProgress(conversationID: conversation.id, stage: .sending)
+                let sent = await sendPlanSegments(
+                    plan,
+                    conversation: conversation,
+                    mention: pendingMention
+                )
+                if sent > 0 {
+                    pendingMention = nil
+                    sentAny = true
+                }
+            }
+        }
+
+        if !afterText.isEmpty {
+            let sent = await sendOutgoingText(
+                afterText,
+                conversation: conversation,
+                mention: pendingMention
+            )
+            sentAny = sent || sentAny
+        }
+
+        if sentAny {
+            finishPatReply(
+                conversation: conversation,
+                receivedAt: receivedAt,
+                aiLatencyMs: aiLatency,
+                note: aiEnabled ? "已发送拍一拍回复" : "已发送拍一拍自定义文字"
+            )
+            return true
+        }
+
+        log(.warning, "Bot", "拍一拍回复未发送：\(patName)")
+        return false
+    }
+
+    /// 拍一拍附带的 AI 回复：走与普通自动回复相同的 persona/provider/model 与上下文窗口。
+    /// 生成失败只记日志并返回 nil，不阻断固定文字/拍一拍。
+    private func generatePatAIReply(
+        conversation: Conversation,
+        message: ChatMessage,
+        evaluation: RuleEvaluation
+    ) async -> ChatReplyPlan? {
+        guard let settingsProvider = store.settings.provider(id: evaluation.providerID) else {
+            log(.warning, "AI", "拍一拍 AI 回复：未找到可用 AI 服务")
+            return nil
+        }
+        let credentialState = aiClient.credentialState(for: settingsProvider)
+        guard credentialState == .available else {
+            let reason: String
+            if case .unreadable(let status) = credentialState {
+                reason = "「\(settingsProvider.name)」的 API Key 无法从钥匙串读取（OSStatus \(status)）"
+            } else {
+                reason = "「\(settingsProvider.name)」未配置 API Key"
+            }
+            log(.warning, "AI", "拍一拍 AI 回复：\(reason)，本次跳过 AI 文字")
+            return nil
+        }
+        let persona = store.settings.persona(id: evaluation.personaID)
+        var provider = settingsProvider
+        if let model = evaluation.model, !model.isEmpty { provider.model = model }
+        if let personaModel = persona?.model, !personaModel.isEmpty { provider.model = personaModel }
+        let history = Array((store.messages[conversation.id] ?? []).suffix(ChatEngine.shortTermMemoryLimit))
+        do {
+            return try await chatEngine.generateReply(
+                conversation: conversation,
+                incoming: message,
+                settings: store.settings,
+                persona: persona,
+                provider: provider,
+                history: history,
+                dryRun: false
+            )
+        } catch {
+            store.stats.failedToday += 1
+            scheduleStatsPersist()
+            log(.error, "AI", "拍一拍 AI 回复生成失败：\(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func finishPatReply(
+        conversation: Conversation,
+        receivedAt: Date,
+        aiLatencyMs: Double?,
+        note: String
+    ) {
+        ruleEngine.noteReply(conversationID: conversation.id)
         store.stats.repliedToday += 1
         store.stats.lastReplyAt = Date()
-        recordReplyLatency(plan.latencyMs)
-        let endToEndMs = Int(Date().timeIntervalSince(receivedAt) * 1000)
-        log(.info, "Bot", "回复投递完成：端到端 \(endToEndMs)ms（AI \(Int(plan.latencyMs))ms，拟人化 \(plan.delaysMs.first ?? 0)ms，bridge 环节见上一条）")
+        if let aiLatencyMs { recordReplyLatency(aiLatencyMs) }
         scheduleStatsPersist()
+        completeReplyProgress(conversationID: conversation.id, note: note)
+        let endToEndMs = Int(Date().timeIntervalSince(receivedAt) * 1000)
+        log(.info, "Bot", "拍一拍回复完成：端到端 \(endToEndMs)ms（\(note)）")
     }
 
     // MARK: Sending
 
+    /// 会话内的系统提示（标为 system，不进入 AI 上下文，也不改写会话预览）。
+    private func appendSystemNotice(_ text: String, conversationID: String) async {
+        let notice = ChatMessage(
+            id: "sys-\(UUID().uuidString)",
+            conversationID: conversationID,
+            senderID: "system",
+            senderName: "系统",
+            direction: .system,
+            kind: .system,
+            text: text,
+            timestamp: Date(),
+            status: .sent
+        )
+        appendMessage(notice)
+        await persistMessage(notice)
+    }
+
     @discardableResult
-    func sendOutgoingText(_ text: String, conversation: Conversation) async -> Bool {
+    func sendOutgoingText(
+        _ text: String,
+        conversation: Conversation,
+        mention: PatMention? = nil
+    ) async -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
+        // bridge 会把 at 段拼成「@群昵称\u2005正文」；本地记录只在不伪造昵称时保留原文。
+        let displayText = mention?.localText(trimmed) ?? trimmed
         var message = ChatMessage(
             id: "local-\(UUID().uuidString)",
             conversationID: conversation.id,
@@ -1199,7 +1588,7 @@ final class RuntimeCoordinator {
             senderName: "我",
             direction: .outgoing,
             kind: .text,
-            text: trimmed,
+            text: displayText,
             timestamp: Date(),
             status: .pending
         )
@@ -1209,11 +1598,23 @@ final class RuntimeCoordinator {
         do {
             guard let client = oneBotClient else { throw OneBotError.notRunning }
             let sendStartedAt = Date()
-            try await client.sendText(
-                conversationID: conversation.id,
-                isGroup: conversation.kind == .group,
-                text: trimmed
-            )
+            if let mention, conversation.kind == .group {
+                try await client.send(
+                    conversationID: conversation.id,
+                    isGroup: true,
+                    segments: [
+                        OneBotSegment(type: "at", targetID: mention.userID),
+                        .text(trimmed)
+                    ],
+                    echoText: displayText
+                )
+            } else {
+                try await client.sendText(
+                    conversationID: conversation.id,
+                    isGroup: conversation.kind == .group,
+                    text: trimmed
+                )
+            }
             message.status = .sent
             updateMessage(message)
             let updatedConversation = updateConversationAfterSend(conversation: conversation, message: message)
@@ -1228,7 +1629,7 @@ final class RuntimeCoordinator {
                 log(.warning, "Database", "写入消息失败：\(error.localizedDescription)")
             }
             let bridgeRTT = Int(Date().timeIntervalSince(sendStartedAt) * 1000)
-            log(.info, "Bot", "已发送 \(conversation.kind.label)消息 → \(conversation.displayTitle)：\(trimmed.prefix(60))（bridge 往返 \(bridgeRTT)ms）")
+            log(.info, "Bot", "已发送 \(conversation.kind.label)消息 → \(conversation.displayTitle)：\(displayText.prefix(60))（bridge 往返 \(bridgeRTT)ms）")
             scheduleMemoryMaintenance(conversationID: conversation.id)
             return true
         } catch {
@@ -1362,7 +1763,7 @@ final class RuntimeCoordinator {
             conversation = existing
         } else {
             conversation = Conversation(id: conversationID, kind: conversationID.contains("@chatroom") ? .group : .direct,
-                                         title: conversationID)
+                                         title: "")
             store.conversations.insert(conversation, at: 0)
             await persistConversation(conversation)
         }
@@ -1514,6 +1915,9 @@ final class RuntimeCoordinator {
 
     func saveLongTermMemory(_ memory: LongTermMemory) async {
         do {
+            var memory = memory
+            // 编辑器已收敛范围，这里再兜底一次，避免其它调用方写入越界权重。
+            memory.baseWeight = LongTermMemory.clampBaseWeight(memory.baseWeight)
             try await self.memory.upsertMemory(memory)
             // Patch the observable list in place instead of re-fetching and re-sorting
             // 500 rows on every edit (which also invalidated the whole MemoryView).

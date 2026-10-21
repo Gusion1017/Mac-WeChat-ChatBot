@@ -64,6 +64,8 @@ enum ScheduleMath {
 struct ScheduleRow: View {
     let task: ScheduledTask
     var nextFire: Date?
+    /// 目标会话的展示名（调用方按当前会话解析，避免旧数据里的 wxid 标题直接露出）。
+    var conversationLabel: String?
     var onToggle: (Bool) -> Void
     var onEdit: () -> Void
     var onDelete: () -> Void
@@ -107,7 +109,7 @@ struct ScheduleRow: View {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 9) {
-                    Label(task.conversationTitle.isEmpty ? task.conversationID : task.conversationTitle,
+                    Label(conversationLabel ?? (task.conversationTitle.isEmpty ? task.conversationID : task.conversationTitle),
                           systemImage: "bubble.left")
                     if let nextFire {
                         Label("下次 \(UIFormat.relative(nextFire))", systemImage: "calendar.badge.clock")

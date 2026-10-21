@@ -60,14 +60,18 @@ struct OneBotEvent: Sendable {
     var mentions: [String]
     var mediaPath: String?
 
-    var isGroup: Bool { groupID?.isEmpty == false }
+    /// 只有合法 `@chatroom` 群 ID 才算群聊。旧 hook 曾把私聊拍一拍的 wxid
+    /// 写进 `group_id`，若仍按「非空即群」判定，会把消息记进伪群会话。
+    var isGroup: Bool { ConversationIdentity.isGroupID(groupID ?? "") }
 
     var conversationID: String {
-        if let groupID, !groupID.isEmpty { return groupID }
+        // 群 → 群 ID；自消息（私聊）→ target_id；其余 → 发送者 userID（空则 target_id）。
+        if let groupID, ConversationIdentity.isGroupID(groupID) { return groupID }
         // 自消息（自己发出的私聊）必须落进对方会话，而不是「自己 wxid」的会话。
         // 旧 bridge 没有 target_id 时退回 userID，并由启动时的一次性数据修复兜底。
         if isSelf, !targetID.isEmpty { return targetID }
-        return userID
+        if !userID.isEmpty { return userID }
+        return targetID
     }
 
     var conversationKind: ConversationKind {
@@ -172,6 +176,14 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
     var onLog: (@Sendable (LogLevel, String) -> Void)?
     /// 连接建立后向 bridge 询问 `get_login_info`，拿到权威的 self wxid。
     var onLoginInfo: (@Sendable (String) -> Void)?
+    /// 通讯录目录快照（`get_contact_directory` 回包）；`ok == false` 时表示暂时读不到。
+    var onContactDirectory: (@Sendable (ContactDirectorySnapshot) -> Void)?
+
+    /// 通讯录目录刷新节奏：拿到成功快照后 10 分钟刷新一次；失败时每 60 秒重试，
+    /// 连续 5 分钟拿不到就暂停（等重连后重新尝试），不阻塞消息链路。
+    static let contactDirectoryRefreshInterval: TimeInterval = 600
+    static let contactDirectoryRetryInterval: TimeInterval = 60
+    static let contactDirectoryRetryWindow: TimeInterval = 300
 
     private let configuration: Configuration
     private let stateQueue = DispatchQueue(label: "com.gusionw.wechatai.onebot.state")
@@ -189,6 +201,10 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
     private var connectTimeoutTask: Task<Void, Never>?
     private var seenMessageIDs: [String] = []
     private var outgoingEchoes: [(conversationID: String, text: String, date: Date)] = []
+    // 通讯录目录抓取（全部由 `stateQueue` 保护）。
+    private var contactDirectoryTask: Task<Void, Never>?
+    private var contactDirectoryReceivedOK = false
+    private var contactDirectoryFirstRequestAt: Date?
     private let httpSession: URLSession
 
     private let maxSeenMessages = 1024
@@ -209,6 +225,7 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
         pingTask?.cancel()
         reconnectTask?.cancel()
         connectTimeoutTask?.cancel()
+        contactDirectoryTask?.cancel()
         socket?.cancel(with: .goingAway, reason: nil)
         session?.invalidateAndCancel()
     }
@@ -243,6 +260,7 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
             self.pingTask = nil
             self.connectTimeoutTask?.cancel()
             self.connectTimeoutTask = nil
+            self.cancelContactDirectoryRequestsLocked()
             self.socket?.cancel(with: .goingAway, reason: nil)
             self.socket = nil
             self.session?.invalidateAndCancel()
@@ -390,6 +408,7 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
         receiveTask = nil
         pingTask?.cancel()
         pingTask = nil
+        cancelContactDirectoryRequestsLocked()
         socket?.cancel(with: .abnormalClosure, reason: nil)
         socket = nil
         session?.invalidateAndCancel()
@@ -431,13 +450,28 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
             data = nil
         }
         guard let data, !data.isEmpty else { return }
+        // 一帧只解析一次 JSON：动作回包（通讯录 / 登录信息）与消息事件共用同一对象。
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        // 通讯录目录回包（echo = contact-directory）不是消息事件。失败也回调，
+        // 让运行时能解释「为什么昵称仍是兜底名」，且绝不进入事件解析链路。
+        if let object, let snapshot = OneBotContactDirectory.parseReply(object: object) {
+            stateQueue.async { [weak self] in
+                self?.handleContactDirectoryReplyLocked(snapshot)
+            }
+            onContactDirectory?(snapshot)
+            return
+        }
         // get_login_info 的动作回包（{"status":"ok","data":{"user_id":...}}）不是消息事件，
         // 单独解析；否则会被当成「无法识别的帧」丢弃，self_id 只能靠启发式。
-        if let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+        if let object,
            let status = object["status"] as? String, status == "ok",
            let payload = object["data"] as? [String: Any],
            let userID = payload["user_id"] as? String, !userID.isEmpty {
             notifyLoginInfo(userID)
+            // 登录信息成功说明 bridge 已就绪：此时才开始要通讯录目录。
+            stateQueue.async { [weak self] in
+                self?.startContactDirectoryRequestsLocked()
+            }
             return
         }
         let events = OneBotEventParser.parse(data: data)
@@ -579,6 +613,79 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
 
     private func notifyLoginInfo(_ userID: String) {
         onLoginInfo?(userID)
+    }
+
+    // MARK: Contact directory
+
+    /// `get_login_info` 成功后在 `stateQueue` 上启动目录抓取：立即请求一次，
+    /// 成功前每 60 秒重试（最多 5 分钟），成功后每 10 分钟刷新；断开即取消。
+    ///
+    /// 定时器是「一次请求 + 一次延时」的事件驱动链，没有忙轮询；
+    /// 全部网络发送在 `Task` 里异步执行，不占主线程，也不阻塞 WS 收消息。
+    private func startContactDirectoryRequestsLocked() {
+        guard running, connected else { return }
+        contactDirectoryTask?.cancel()
+        contactDirectoryReceivedOK = false
+        contactDirectoryFirstRequestAt = nil
+        sendContactDirectoryRequestLocked()
+        scheduleContactDirectoryRequestLocked(after: Self.contactDirectoryRetryInterval)
+    }
+
+    private func handleContactDirectoryReplyLocked(_ snapshot: ContactDirectorySnapshot) {
+        guard running, connected else { return }
+        guard snapshot.ok, !contactDirectoryReceivedOK else { return }
+        // 首次成功：把 60 秒重试节奏换成 10 分钟刷新（取消尚未到点的重试）。
+        contactDirectoryReceivedOK = true
+        scheduleContactDirectoryRequestLocked(after: Self.contactDirectoryRefreshInterval)
+    }
+
+    private func sendContactDirectoryRequestLocked() {
+        guard running, connected, let socket else { return }
+        if contactDirectoryFirstRequestAt == nil {
+            contactDirectoryFirstRequestAt = Date()
+        }
+        let payload = OneBotContactDirectory.requestPayload()
+        Task {
+            try? await socket.send(.string(payload))
+        }
+    }
+
+    private func scheduleContactDirectoryRequestLocked(after delay: TimeInterval) {
+        contactDirectoryTask?.cancel()
+        let generation = generation
+        let nanos = UInt64(max(0, delay) * 1_000_000_000)
+        contactDirectoryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: nanos)
+            guard !Task.isCancelled, let self else { return }
+            self.stateQueue.async {
+                guard self.running, self.connected, self.generation == generation else { return }
+                self.performScheduledContactDirectoryRequestLocked()
+            }
+        }
+    }
+
+    private func performScheduledContactDirectoryRequestLocked() {
+        guard running, connected else { return }
+        if contactDirectoryReceivedOK {
+            sendContactDirectoryRequestLocked()
+            scheduleContactDirectoryRequestLocked(after: Self.contactDirectoryRefreshInterval)
+            return
+        }
+        if let first = contactDirectoryFirstRequestAt,
+           Date().timeIntervalSince(first) >= Self.contactDirectoryRetryWindow {
+            contactDirectoryFirstRequestAt = nil
+            notifyLog(.debug, "通讯录目录 \(Int(Self.contactDirectoryRetryWindow)) 秒内不可用，暂停自动重试")
+            return
+        }
+        sendContactDirectoryRequestLocked()
+        scheduleContactDirectoryRequestLocked(after: Self.contactDirectoryRetryInterval)
+    }
+
+    private func cancelContactDirectoryRequestsLocked() {
+        contactDirectoryTask?.cancel()
+        contactDirectoryTask = nil
+        contactDirectoryReceivedOK = false
+        contactDirectoryFirstRequestAt = nil
     }
 
     // MARK: URLSessionWebSocketDelegate

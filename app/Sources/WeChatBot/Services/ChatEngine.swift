@@ -32,6 +32,8 @@ final class ChatEngine: @unchecked Sendable {
     static let summaryBulletLimit = 5
     /// 同会话早期相关片段的召回条数上限。
     static let earlierRecallLimit = 3
+    /// 长期记忆注入提示词的最大条数（核心记忆优先占用名额，核心之间按综合权重排序）。
+    static let longTermMemoryLimit = 6
 
     private let memory: MemoryStore
     private let aiClient: AIClient
@@ -316,7 +318,7 @@ final class ChatEngine: @unchecked Sendable {
     private func recallLongTermMemory(conversation: Conversation) async -> String? {
         guard let memories = try? await memory.fetchMemoriesForPrompt(
             conversationID: conversation.id,
-            limit: 6
+            limit: Self.longTermMemoryLimit
         ), !memories.isEmpty else { return nil }
 
         // 召回即使用：best-effort 累加 access_count 并刷新 last_accessed_at，
@@ -336,7 +338,7 @@ final class ChatEngine: @unchecked Sendable {
             return "- [\(badge)·\(scope)·权重 \(memory.weightLabel)] \(memory.summary)"
         }
         return "长期记忆（核心/手写优先，自动总结仅供参考，冲突时以核心/手写为准；"
-            + "权重越高表示越近、越常用）：\n"
+            + "权重越高表示越重要、越近或越常用）：\n"
             + lines.joined(separator: "\n")
     }
 
@@ -436,7 +438,8 @@ final class ChatEngine: @unchecked Sendable {
         record.summary = finalSummary
         record.updatedAt = Date()
         record.sourceCount += overflow.messages.count
-        record.baseWeight = max(1.0, record.baseWeight)
+        // 保留用户可能手工调过的基础权重，只做范围收敛；自动总结不重置权重。
+        record.baseWeight = LongTermMemory.clampBaseWeight(record.baseWeight)
 
         do {
             try await memory.upsertMemory(record)
@@ -473,7 +476,8 @@ final class ChatEngine: @unchecked Sendable {
         if !mergedSummary.isEmpty { merged.summary = mergedSummary }
         merged.sourceCount = mergedSourceCount
         merged.updatedAt = Date()
-        merged.baseWeight = max(1.0, keeper.baseWeight)
+        // 保留用户可能手工调过的基础权重，只做范围收敛；合并不重置权重。
+        merged.baseWeight = LongTermMemory.clampBaseWeight(keeper.baseWeight)
 
         do {
             try await memory.upsertMemory(merged)

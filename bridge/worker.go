@@ -321,7 +321,7 @@ func SendWechatMsg(m *SendMsg) {
 
 	// R3 原生发送：slot13 已把任务交给微信 mars worker，结果不再走 buf2resp 相关通道。
 	// 继续等待只会 15s 后误报 "send timeout"（消息实际已送达），因此直接返回成功。
-	if r3SendMode.Load() && (m.Type == "text" || m.Type == "reply") {
+	if r3SendMode.Load() && (m.Type == "text" || m.Type == "reply" || m.Type == "pat") {
 		Info("R3 模式：任务已提交，跳过 buf2resp 等待", "task_id", currTaskId)
 		return
 	}

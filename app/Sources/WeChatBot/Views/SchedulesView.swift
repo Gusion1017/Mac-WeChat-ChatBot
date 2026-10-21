@@ -73,6 +73,7 @@ struct SchedulesView: View {
                             ScheduleRow(
                                 task: task,
                                 nextFire: task.nextFireAt ?? ScheduleMath.nextFire(for: task),
+                                conversationLabel: conversationLabel(for: task),
                                 onToggle: { enabled in setEnabled(task, enabled) },
                                 onEdit: {
                                     isEditingNew = false
@@ -139,6 +140,20 @@ struct SchedulesView: View {
         case .enabled: store.schedules.filter(\.enabled).count
         case .disabled: store.schedules.filter { !$0.enabled }.count
         }
+    }
+
+    /// 任务目标会话的展示名：优先按当前会话解析，避免旧任务里存下的 wxid 标题直接露出。
+    private func conversationLabel(for task: ScheduledTask) -> String? {
+        if let conversation = store.conversations.first(where: { $0.id == task.conversationID }) {
+            return conversation.displayTitle
+        }
+        guard !task.conversationID.isEmpty else { return nil }
+        let kind: ConversationKind = task.conversationID.contains("@chatroom") ? .group : .direct
+        return ConversationName.displayTitle(
+            kind: kind,
+            conversationID: task.conversationID,
+            storedTitle: task.conversationTitle
+        )
     }
 
     private func addTask() {
@@ -380,7 +395,15 @@ struct ScheduleEditorSheet: View {
         if usesManualConversation {
             return manualConversationTitle.isEmpty ? manualConversationID : manualConversationTitle
         }
-        return draft.conversationTitle.isEmpty ? draft.conversationID : draft.conversationTitle
+        if let conversation = store.conversations.first(where: { $0.id == draft.conversationID }) {
+            return conversation.displayTitle
+        }
+        guard !draft.conversationID.isEmpty else { return "未选择会话" }
+        return ConversationName.displayTitle(
+            kind: draft.conversationID.contains("@chatroom") ? .group : .direct,
+            conversationID: draft.conversationID,
+            storedTitle: draft.conversationTitle
+        )
     }
 
     private func toggleWeekday(_ value: Int) {
@@ -399,6 +422,9 @@ struct ScheduleEditorSheet: View {
         if usesManualConversation {
             candidate.conversationID = manualConversationID.trimmingCharacters(in: .whitespacesAndNewlines)
             candidate.conversationTitle = manualConversationTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if let conversation = store.conversations.first(where: { $0.id == candidate.conversationID }) {
+            // 保存时刷新展示名，避免旧任务把 wxid 标题一直留在数据库/列表里。
+            candidate.conversationTitle = conversation.displayTitle
         }
 
         guard !candidate.name.isEmpty else {

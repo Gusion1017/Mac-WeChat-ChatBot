@@ -535,7 +535,8 @@ struct MemoryView: View {
         VStack(alignment: .leading, spacing: 10) {
             Label("综合权重", systemImage: "scalemass")
                 .font(.headline)
-            Text("权重越高越优先进入提示词；核心记忆在所属会话内始终注入，不参与权重淘汰。")
+            Text("权重越高越优先进入提示词；核心记忆优先占用注入名额（最多 \(ChatEngine.longTermMemoryLimit) 条），"
+                + "核心之间也按权重排序。基础权重可在记忆编辑器中自由调整（0.1~10×）。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -545,7 +546,7 @@ struct MemoryView: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("编辑、合并或召回都会抬高权重；越近、越常用的记忆优先级越高。")
+            Text("编辑、合并或召回都会抬高权重；基础权重可手工调整并参与排序；越近、越常用的记忆优先级越高。")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1119,6 +1120,13 @@ private struct LongTermMemoryCard: View {
                     if memory.isCore {
                         PillLabel(text: "★ 核心", color: Theme.violet)
                     }
+                    if memory.hasCustomBaseWeight {
+                        PillLabel(
+                            text: "基础 ×\(String(format: "%.1f", memory.baseWeight))",
+                            color: Theme.info
+                        )
+                        .help("手工调整的基础权重，会改变该记忆的排序")
+                    }
                     PillLabel(text: "权重 \(memory.weightLabel)", color: Theme.success)
                     Spacer(minLength: 4)
                     Text(activitySummary)
@@ -1195,6 +1203,7 @@ private struct MemoryEditorSheet: View {
     @State private var summary: String
     @State private var conversationID: String
     @State private var isCore: Bool
+    @State private var baseWeight: Double
     @State private var confirmDelete = false
 
     init(
@@ -1212,6 +1221,7 @@ private struct MemoryEditorSheet: View {
         _summary = State(initialValue: original.summary)
         _conversationID = State(initialValue: original.conversationID)
         _isCore = State(initialValue: original.isCore)
+        _baseWeight = State(initialValue: LongTermMemory.clampBaseWeight(original.baseWeight))
     }
 
     var body: some View {
@@ -1222,7 +1232,7 @@ private struct MemoryEditorSheet: View {
                     .foregroundStyle(isCore ? Theme.violet : Theme.accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(isNew ? "新增长期记忆" : "编辑长期记忆").font(.headline)
-                    Text("核心记忆在所属会话内始终注入；关联“全局记忆”时对所有会话生效")
+                    Text("核心记忆在所属会话内优先注入并可自由调整权重；关联“全局记忆”时对所有会话生效")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1282,10 +1292,60 @@ private struct MemoryEditorSheet: View {
                     Toggle("核心记忆", isOn: $isCore)
                         .toggleStyle(.switch)
                         .tint(Theme.violet)
-                    Text("核心记忆在所属会话内始终注入，不受权重淘汰")
+                    Text("核心记忆优先注入；核心之间也按综合权重排序")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("基础权重").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    Text(String(format: "%.1f×", baseWeight))
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(hasCustomWeight ? Theme.accent : Color.secondary)
+                    Button("重置") { baseWeight = LongTermMemory.defaultBaseWeight }
+                        .buttonStyle(.plain)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(Theme.accent)
+                        .disabled(!hasCustomWeight)
+                        .help("恢复默认基础权重 1.0×")
+                }
+                Slider(
+                    value: $baseWeight,
+                    in: LongTermMemory.baseWeightRange,
+                    step: 0.1
+                ) {
+                    Text("基础权重")
+                } minimumValueLabel: {
+                    Text("0.1×").font(.system(size: 9)).foregroundStyle(.tertiary)
+                } maximumValueLabel: {
+                    Text("10×").font(.system(size: 9)).foregroundStyle(.tertiary)
+                }
+                .tint(baseWeight >= LongTermMemory.defaultBaseWeight ? Theme.accent : Theme.warning)
+                .accessibilityLabel("基础权重")
+                .accessibilityValue(String(format: "%.1f 倍", baseWeight))
+
+                HStack(spacing: 6) {
+                    ForEach(LongTermMemory.baseWeightPresets, id: \.self) { preset in
+                        FilterChip(
+                            title: String(format: "%.1f×", preset),
+                            isSelected: abs(baseWeight - preset) < 0.0001,
+                            action: { baseWeight = preset }
+                        )
+                    }
+                    Spacer(minLength: 4)
+                    Text("保存后综合权重约 \(String(format: "%.2f", estimatedWeight))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .help("按当前基础权重与保存时刷新的更新时间估算")
+                }
+                Text("核心记忆优先占用注入名额（最多 \(ChatEngine.longTermMemoryLimit) 条），"
+                    + "核心之间也按综合权重排序；保存会刷新更新时间，时间衰减从头计算。")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             InlineNotice(
@@ -1293,7 +1353,8 @@ private struct MemoryEditorSheet: View {
                 title: "综合权重",
                 message: "权重 = 基础权重 × 重要度(1 + 0.12 × log2(1 + 合并条数))"
                     + " × 使用强化(1 + 0.02 × 召回次数，最多 +40%)"
-                    + " × 0.5^(距最近更新/召回天数 / 30)。编辑或更新后权重会升高；越近、越常用的长期记忆优先级越高。"
+                    + " × 0.5^(距最近更新/召回天数 / 30)。基础权重可在上方自由调整；"
+                    + "保存会刷新更新时间，越近、越常用的长期记忆优先级越高。"
             )
 
             HStack {
@@ -1327,6 +1388,19 @@ private struct MemoryEditorSheet: View {
         }
     }
 
+    /// 基础权重是否偏离默认值。
+    private var hasCustomWeight: Bool {
+        abs(baseWeight - LongTermMemory.defaultBaseWeight) > 0.0001
+    }
+
+    /// 保存后的综合权重估算：沿用现有重要度/召回因子，更新时间按保存时刻计算。
+    private var estimatedWeight: Double {
+        var preview = original
+        preview.baseWeight = LongTermMemory.clampBaseWeight(baseWeight)
+        preview.updatedAt = Date()
+        return preview.timeWeight()
+    }
+
     private func save() {
         let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -1336,6 +1410,7 @@ private struct MemoryEditorSheet: View {
         updated.conversationTitle = conversations.first(where: { $0.id == conversationID })?.displayTitle
             ?? (conversationID.isEmpty ? "" : conversationID)
         updated.isCore = isCore
+        updated.baseWeight = LongTermMemory.clampBaseWeight(baseWeight)
         updated.updatedAt = Date()
         // 用户编辑后转为手动记忆，避免后续自动总结覆盖手写内容。
         updated.source = "manual"

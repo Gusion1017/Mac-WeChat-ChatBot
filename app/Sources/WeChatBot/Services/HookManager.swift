@@ -390,6 +390,30 @@ final class HookManager {
 
     // MARK: Bridge lifecycle
 
+    /// 只接受与当前 `image_path` 中账号目录一致的 selfID。
+    ///
+    /// 历史版本/测试事件曾把 `onebot.self_id` 污染成别的值（例如 `wxid_self`），
+    /// 启动 bridge 时又通过 `-self_id` 覆盖真实账号，导致 bridge 的 get_login_info
+    /// 也返回错误账号，拍一拍目标比对与自消息判定全部失效。
+    /// 路径形如 `.../xwechat_files/<wxid>_xxxx/temp`；无法从路径判断时保留原值。
+    nonisolated static func validatedSelfID(_ raw: String, imagePath: URL) -> String {
+        let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty else { return "" }
+        let components = imagePath.pathComponents
+        guard let index = components.firstIndex(of: "xwechat_files"),
+              components.indices.contains(index + 1) else {
+            return id
+        }
+        let accountDir = components[index + 1]
+        // 目录名形如 `<wxid>_<四位后缀>`；wxid 自身可能含一个 `_`，因此去掉最后一段。
+        let parts = accountDir.split(separator: "_")
+        let accountID = parts.count > 1
+            ? parts.dropLast().joined(separator: "_")
+            : accountDir
+        guard !accountID.isEmpty else { return id }
+        return accountID.caseInsensitiveCompare(id) == .orderedSame ? id : ""
+    }
+
     func startBridge(
         host: String,
         port: Int,
@@ -457,11 +481,15 @@ final class HookManager {
             // 本项目已有冷却/每分钟限流，这里收紧到 100ms 以降低端到端延迟。
             "-send_interval=100"
         ]
-        let trimmedSelfID = selfID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSelfID = Self.validatedSelfID(selfID, imagePath: imagePath)
         if !trimmedSelfID.isEmpty {
             // 多账号目录时 image_path 推导可能选错账号；App 已知账号时直接告诉 bridge，
             // 用于判定自消息方向与 target_id。
             arguments.append("-self_id=\(trimmedSelfID)")
+        } else if !selfID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // 历史值/测试事件可能把 self_id 污染成别的账号；与当前 image_path 不一致时
+            // 不要传给 bridge，让它从账号目录重新推导，再由 get_login_info 校正 App。
+            onLog?(.warning, "已忽略与 image_path 账号目录不一致的 self_id，bridge 将按目录重新推导")
         }
 
         let handle = ProcessRunner.launch(
@@ -586,10 +614,26 @@ final class HookManager {
             effect.state = .failed
             effect.detail = .set(line)
         }
-        // 4.1.15.55 R3 原生发送状态（来自 hook/script.js 的 console 日志）
+        // 4.1.15.55 R3 原生发送状态（来自 hook/script.js 的 console 日志 / bridge 日志）
         if line.contains("R3 原生发送模式") || line.contains("R3: init 完成") {
             effect.r3Active = true
             effect.detail = .setIfEmpty("R3 原生发送已启用，等待发送句柄")
+        }
+        // bridge/App 重启时句柄由 ~/Library/Caches/WeChatAI/r3-seed.json 恢复：
+        // JS 打印「从 bridge 恢复发送句柄」，bridge 打印「R3 发送句柄恢复（bridge 重启）」。
+        // 这两条日志过去没有解析，导致句柄其实已就绪、界面却仍提示「R3 等待信号」，
+        // 用户会误以为每次重启都要手动发一条消息（2026-10-21 修复）。
+        if line.contains("从 bridge 恢复发送句柄") || line.contains("R3 发送句柄恢复") {
+            effect.r3Active = true
+            effect.r3Seeded = true
+            effect.r3Queued = 0
+            effect.detail = .set("R3 发送句柄已从缓存恢复")
+        }
+        // 微信重启后 PID 变化，持久化句柄会过期；此时才需要人工发一条消息重新捕获。
+        if line.contains("R3 发送句柄记录已过期") || line.contains("R3 发送句柄已失效") {
+            effect.r3Active = true
+            effect.r3Seeded = false
+            effect.detail = .set("R3 等待信号：微信重启后请在本机微信手动发一条消息")
         }
         if line.contains("R3: slot13 捕获 newsendmsg 闭包") || line.contains("R3: 捕获 newsendmsg 闭包") {
             effect.r3Active = true
@@ -600,12 +644,12 @@ final class HookManager {
         if line.contains("尚无发送句柄") || line.contains("尚无真实 newsendmsg 闭包") {
             effect.r3Active = true
             effect.r3Seeded = false
-            effect.detail = .set("R3 等待信号：请在本机微信手动发一条消息以捕获发送句柄")
+            effect.detail = .set("R3 等待信号：微信重启后请在本机微信手动发一条消息以捕获发送句柄")
         }
         if line.contains("消息已排队") {
             effect.r3Active = true
             effect.r3Seeded = false
-            effect.detail = .setIfEmpty("R3 等待信号：请在本机微信手动发一条消息")
+            effect.detail = .setIfEmpty("R3 等待信号：微信重启后请在本机微信手动发一条消息")
         }
         return effect.isEmpty ? nil : effect
     }

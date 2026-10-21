@@ -46,7 +46,7 @@ func BuildTextMsgProto(receiver, content, atUser string) (string, error) {
 }
 
 // BuildSendPayload 构建MMStartTask的完整payload (0x1A0字节)，返回hex编码字符串
-// msgType: "text", "img", "video"
+// msgType: "text", "img", "video", "reply", "file", ...
 // 布局: [taskId(4字节)] + [payloadData(412字节)]，总长固定0x1A0字节
 // JS中的writePointer使用绝对偏移(0x18, 0xb8, 0x190)进行patch
 func BuildSendPayload(taskId int64, msgType string) string {

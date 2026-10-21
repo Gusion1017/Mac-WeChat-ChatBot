@@ -385,6 +385,11 @@ func loadJs() {
 	fridaScript = script
 	Info("✅ Frida 已就绪，微信控制通道已打通")
 
+	// 通讯录 DB key：回灌上次缓存的密钥，hook 可直接解密 contact.db，不必等
+	// 用户重新打开一次通讯录触发页读。密钥只在内存/Frida 间传递，不打印；
+	// 无缓存或失败只记日志，不影响启动。
+	restoreContactDBKeys()
+
 	// 4.1.15.55 R3：bridge 重启但微信未重启时，恢复上次捕获的发送句柄，避免回复排队。
 	// gadget 模式拿不到微信 PID，由 JS 用 Process.id 做新鲜度校验。
 	if rec, ok := loadR3SeedRecord(); ok {

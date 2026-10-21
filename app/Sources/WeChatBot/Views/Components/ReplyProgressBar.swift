@@ -169,7 +169,7 @@ struct ReplyProgressBar: View {
     private var r3Hint: String? {
         guard progress.stage == .sending, r3Active else { return nil }
         if !r3Seeded {
-            return "R3 发送句柄未就绪（请先在本机微信手动发一条消息）"
+            return "R3 发送句柄未就绪（微信重启后需在本机微信手动发一条消息）"
         }
         if r3Queued > 0 {
             return "R3 队列 \(r3Queued) 条"

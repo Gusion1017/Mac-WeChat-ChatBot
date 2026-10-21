@@ -35,8 +35,22 @@
   "slot13Addr": "0x4634710",
   "operatorNewAddr": "0x7140030",
   "newsendmsgUrl": "/cgi-bin/micromsg-bin/newsendmsg",
+  "appmsgUrl": "/cgi-bin/micromsg-bin/sendappmsg",
+  "r3AppMsgSend": "false",
   "r3ClosureCapture": "true",
   "r3MaxClones": "8",
   "r3Slot13Capture": "true",
-  "r3QueueUntilSeed": "false"
+  "r3QueueUntilSeed": "false",
+  "contactDirectory": "true",
+  "sendPatTaskCtorAddr": "0x3399420",
+  "sendPatTaskVtable": "0x9df5338",
+  "sendPatClosureVtable": "0x9df5390",
+  "sendPatUrl": "/cgi-bin/micromsg-bin/sendpat",
+  "sendPatOpcode": "0x351",
+  "sendPatTaskSize": "0xf8",
+  "r3PatSend": "false",
+  "protoParseAddr": "0x5ab3ab8",
+  "sendPatCopyAddr": "0x50eb5c0",
+  "sendPatRequestCtorAddr": "0x50ea7d4",
+  "sendPatRequestType": "62"
 }

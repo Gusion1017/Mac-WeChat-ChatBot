@@ -10,6 +10,7 @@ struct ConversationsView: View {
     @State private var draft = ""
     @State private var isSending = false
     @State private var workingHoursTarget: Conversation?
+    @State private var renameTarget: Conversation?
     /// Coalesces deferred programmatic scrolling (see `scheduleScrollToBottom`).
     @State private var autoScrollTask: Task<Void, Never>?
 
@@ -58,6 +59,11 @@ struct ConversationsView: View {
                 global: store.settings.bot.workingHours
             ) { hours in
                 setWorkingHours(hours, for: conversation)
+            }
+        }
+        .sheet(item: $renameTarget) { conversation in
+            ConversationRenameSheet(conversation: conversation) { name in
+                rename(conversation, to: name)
             }
         }
     }
@@ -190,12 +196,12 @@ struct ConversationsView: View {
                             .font(.system(size: 9))
                             .foregroundStyle(.tertiary)
                     }
-                    if let hours = conversation.workingHours {
-                        PillLabel(
-                            text: hours.enabled ? "自定义时段" : "不限时段",
-                            color: Theme.warning
-                        )
-                    }
+                    WorkingHoursBadge(
+                        workingHours: conversation.effectiveWorkingHours(
+                            global: store.settings.bot.workingHours
+                        ),
+                        isOverride: conversation.usesCustomWorkingHours
+                    )
                 }
                 HStack(spacing: 6) {
                     Text(conversation.id)
@@ -255,6 +261,20 @@ struct ConversationsView: View {
                         setWorkingHours(WorkingHours(enabled: false), for: conversation)
                     } label: {
                         Label("此会话不限制", systemImage: "infinity")
+                    }
+                }
+                Section("名称") {
+                    Button {
+                        renameTarget = conversation
+                    } label: {
+                        Label("重命名会话…", systemImage: "pencil")
+                    }
+                    if conversation.customTitle != nil {
+                        Button {
+                            rename(conversation, to: "")
+                        } label: {
+                            Label("恢复自动名称", systemImage: "arrow.uturn.backward")
+                        }
                     }
                 }
                 Section("会话") {
@@ -520,6 +540,19 @@ struct ConversationsView: View {
         guard var updated = store.conversations.first(where: { $0.id == conversation.id }) else { return }
         updated.isPinned.toggle()
         store.saveConversation(updated)
+    }
+
+    /// 保存用户起的会话名；空字符串表示恢复自动名称（见 `ConversationName`）。
+    private func rename(_ conversation: Conversation, to name: String) {
+        guard var updated = store.conversations.first(where: { $0.id == conversation.id }) else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.title = trimmed
+        store.saveConversation(updated)
+        if trimmed.isEmpty {
+            toast.show("已恢复自动名称「\(updated.displayTitle)」", tone: .success, symbol: "arrow.uturn.backward")
+        } else {
+            toast.show("已重命名为「\(trimmed)」", tone: .success, symbol: "pencil")
+        }
     }
 
     /// 标记指定会话为已读。按 id 读取 store 的最新状态，而不是使用行视图的快照，

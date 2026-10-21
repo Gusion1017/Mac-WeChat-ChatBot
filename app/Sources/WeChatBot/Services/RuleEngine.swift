@@ -170,7 +170,10 @@ final class RuleEngine: @unchecked Sendable {
                     matchedLabels.append("群聊·关键词")
                 }
             case .pat:
-                if isPatMessage(message: message, text: text) {
+                if PatMessage.isDirectedAtBot(
+                    message, conversation: conversation, selfID: selfID,
+                    selfMentionName: bot.selfMentionNames?[conversation.id]
+                ) {
                     matchedLabels.append("群聊·拍一拍")
                 }
             case .prefix:
@@ -247,26 +250,10 @@ final class RuleEngine: @unchecked Sendable {
             .contains { !$0.isEmpty && lowered.contains($0) }
     }
 
-    /// WeChat「拍一拍」的到达形态随版本不同：
-    /// - 4.1.12 及更早：系统消息（localType 10000）/ `<sysmsg type="pat">`；
-    /// - **4.1.15.55 实测：appmsg（type=49），`<appmsg><type>62</type><title>…拍了拍…</title>`**，
-    ///   hook 会把 title 提取为消息文本；这里同时兼容原始 XML 与 JSON 转义形态。
-    private func isPatMessage(message: ChatMessage, text: String) -> Bool {
-        let loweredText = text.lowercased()
-        if loweredText.contains("拍了拍") || loweredText.contains("patted") {
-            return true
-        }
-        let raw = (message.rawJSON ?? "").lowercased()
-        if raw.contains("拍了拍") || raw.contains("patted") || raw.contains("patmsg") {
-            return true
-        }
-        // 拍一拍 appmsg 的固定标记（type 62）；title 文本可能因本地化不含中文模板。
-        if raw.contains("<type>62</type>") || raw.contains("<type> 62</type>") {
-            return true
-        }
-        // JSON 序列化后引号会变成 \"；同时兼容未转义的原始文本。
-        return raw.contains("sysmsg type=\"pat") || raw.contains("sysmsg type=\\\"pat")
-    }
+    // 拍一拍的解析与「是否拍的是机器人」判定集中在 `PatMessage`：
+    // - 4.1.12 及更早：系统消息（localType 10000）/ `<sysmsg type="pat">`；
+    // - 4.1.15.55 实测：appmsg（type=49），`<appmsg><type>62</type><patinfo>…</patinfo>`。
+    // 只有真实拍一拍事件才参与 .pat 触发；普通消息正文里提到「拍了拍」不算。
 
     // MARK: Throttling
 

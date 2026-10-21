@@ -81,6 +81,35 @@ enum ConversationKind: String, Codable, Hashable {
     }
 }
 
+/// 会话 ID 的共享判定规则（App 解析与历史数据修复共用，避免两处漂移）。
+///
+/// 微信 4.1.15 的群 ID 契约是 `*@chatroom`；旧 hook 曾把私聊拍一拍里的 wxid
+/// 写进 `group_id`，App 因此建出「kind=group 但 ID 是 wxid」的伪群会话。
+/// `wxid_self` / `self` 是历史占位值（旧 bridge 未配置账号时的兜底），不是真实账号。
+enum ConversationIdentity {
+    /// 合法微信群 ID：非空且（忽略大小写）以 `@chatroom` 结尾。
+    static func isGroupID(_ id: String) -> Bool {
+        let value = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return !value.isEmpty && value.hasSuffix("@chatroom")
+    }
+
+    /// 历史占位「自己」ID（`wxid_self` / `self`，忽略大小写）；不能当作真实账号或会话目标。
+    static func isPlaceholderSelfID(_ id: String) -> Bool {
+        let value = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return value == "wxid_self" || value == "self"
+    }
+
+    /// 可作为私聊对象的 ID：非空、非群 ID、非占位自己、非 `@placeholder_` 前缀。
+    static func isPlausiblePeerID(_ id: String) -> Bool {
+        let value = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return false }
+        if isGroupID(value) { return false }
+        if isPlaceholderSelfID(value) { return false }
+        if value.lowercased().hasPrefix("@placeholder_") { return false }
+        return true
+    }
+}
+
 struct Conversation: Identifiable, Codable, Hashable {
     var id: String
     var kind: ConversationKind
@@ -100,13 +129,271 @@ struct Conversation: Identifiable, Codable, Hashable {
     /// nil 表示跟随全局工作时间；非 nil 表示此会话独立的工作时段。
     var workingHours: WorkingHours?
 
-    var displayTitle: String { title.isEmpty ? id : title }
+    /// 用户重命名或微信下发的真实昵称；nil 表示当前只有自动兜底名称。
+    var customTitle: String? {
+        ConversationName.customTitle(title, conversationID: id, kind: kind)
+    }
+
+    /// 列表/详情/AI 提示词统一使用的展示名。微信 4.1.15 只下发 wxid，
+    /// 因此空标题或 ID 形式的标题会落到 `ConversationName` 的可读兜底。
+    var displayTitle: String {
+        ConversationName.displayTitle(kind: kind, conversationID: id, storedTitle: title)
+    }
 
     var usesCustomWorkingHours: Bool { workingHours != nil }
 
     /// 会话自定义时段优先，否则继承全局设置。
     func effectiveWorkingHours(global: WorkingHours) -> WorkingHours {
         workingHours ?? global
+    }
+}
+
+/// 会话展示名解析。
+///
+/// 微信 4.1.15.55 的入站事件只有 wxid（Message 对象不含昵称，通讯录是加密 SQLite），
+/// 所以「取不到真实名称」是常态。这里集中处理三件事，避免裸 wxid 渗透到列表、AI 提示词和日志：
+/// 1. 判断标题是否真实可读（用户重命名 / 微信昵称）还是占位值；
+/// 2. 决定某个 `sender.nickname` 能不能作为会话标题学习；
+/// 3. 给没有真实名称的会话生成稳定、可辨识的兜底名（系统账号中文名 + 尾号）。
+enum ConversationName {
+    /// 微信内置账号的固定中文名（键为小写会话 ID）。
+    private static let systemNames: [String: String] = [
+        "filehelper": "文件传输助手",
+        "weixin": "微信团队",
+        "newsapp": "腾讯新闻",
+        "fmessage": "朋友推荐消息",
+        "medianote": "语音记事本",
+        "floatbottle": "漂流瓶",
+        "qqmail": "QQ邮箱提醒",
+        "tmessage": "腾讯微博",
+        "notifymessage": "服务通知",
+        "mphelper": "公众平台助手",
+        "voipnotify": "语音通话",
+        "voipmsgs": "语音通话",
+        "shakeapp": "摇一摇",
+        "lbsapp": "位置消息",
+        "radardetect": "雷达",
+        "blogapp": "博客",
+        "weapp": "小程序",
+        "brandsessionholder": "服务号",
+        "officialaccounts": "公众号"
+    ]
+
+    /// 占位标题（空、裸 ID、`wxid_*`、`*@chatroom`、旧版「群聊 <id>」）不展示也不入库。
+    static func isPlaceholderTitle(
+        _ title: String,
+        conversationID: String,
+        kind: ConversationKind
+    ) -> Bool {
+        let value = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return true }
+        // 旧版本把群标题写成「群聊 <群 ID>」；只匹配这种精确格式，
+        // 不误伤用户自己起的「群聊 兄弟」之类名称。
+        if kind == .group, value.lowercased() == "群聊 \(conversationID.lowercased())" {
+            return true
+        }
+        return !isReadableName(value, conversationID: conversationID, excludedID: "")
+    }
+
+    /// 真实可读标题；nil 表示该会话只有自动兜底名称（重命名输入框据此留空）。
+    static func customTitle(
+        _ title: String,
+        conversationID: String,
+        kind: ConversationKind
+    ) -> String? {
+        isPlaceholderTitle(title, conversationID: conversationID, kind: kind)
+            ? nil
+            : title.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 展示名：真实标题 > 系统账号中文名 > 可辨识兜底。
+    static func displayTitle(
+        kind: ConversationKind,
+        conversationID: String,
+        storedTitle: String
+    ) -> String {
+        if let custom = customTitle(storedTitle, conversationID: conversationID, kind: kind) {
+            return custom
+        }
+        let lowerID = conversationID.lowercased()
+        if let known = systemNames[lowerID] { return known }
+        if kind == .group || lowerID.hasSuffix("@chatroom") {
+            return "群聊 · \(shortSuffix(conversationID))"
+        }
+        if kind == .official || lowerID.hasPrefix("gh_") {
+            return "公众号 · \(shortSuffix(conversationID))"
+        }
+        if lowerID.hasPrefix("wxid_") {
+            return "微信好友 · \(shortSuffix(conversationID))"
+        }
+        return "会话 · \(shortSuffix(conversationID))"
+    }
+
+    /// 从事件里学习私聊标题：只接受可读昵称，拒绝 wxid/群 ID/自己/发送人 ID。
+    static func learnedTitle(
+        from name: String,
+        conversationID: String,
+        senderID: String,
+        selfID: String
+    ) -> String? {
+        let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isReadableName(value, conversationID: conversationID, excludedID: selfID) else { return nil }
+        if !senderID.isEmpty, value.lowercased() == senderID.lowercased() { return nil }
+        return value
+    }
+
+    /// 群聊副标题（最近发言人）同样只接受可读昵称，避免把 wxid 写进数据库。
+    static func learnedSenderName(
+        _ name: String,
+        conversationID: String,
+        senderID: String,
+        selfID: String
+    ) -> String? {
+        learnedTitle(from: name, conversationID: conversationID, senderID: senderID, selfID: selfID)
+    }
+
+    /// 昵称型字符串：非空、不是「我/自己」、不是 wxid / 群 ID、不是会话 ID 或指定账号 ID。
+    private static func isReadableName(
+        _ name: String,
+        conversationID: String,
+        excludedID: String
+    ) -> Bool {
+        let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return false }
+        if value == "我" || value == "自己" { return false }
+        let lower = value.lowercased()
+        if lower.hasPrefix("wxid_") { return false }
+        if lower.contains("@chatroom") { return false }
+        if lower == conversationID.lowercased() { return false }
+        if !excludedID.isEmpty, lower == excludedID.lowercased() { return false }
+        return true
+    }
+
+    /// 取稳定尾号用于区分未知会话：去掉 `wxid_` / `gh_` 前缀与 `@chatroom` 后缀。
+    private static func shortSuffix(_ conversationID: String, length: Int = 6) -> String {
+        var base = conversationID
+        if let at = base.firstIndex(of: "@") { base = String(base[..<at]) }
+        let lower = base.lowercased()
+        if lower.hasPrefix("wxid_") { base = String(base.dropFirst(5)) }
+        if lower.hasPrefix("gh_") { base = String(base.dropFirst(3)) }
+        guard !base.isEmpty else { return conversationID }
+        return String(base.suffix(length))
+    }
+}
+
+// MARK: - Contact directory
+
+/// 通讯录目录条目（bridge `get_contact_directory` 回包里 `users` / `groups` 的值）。
+///
+/// 微信 4.1.15 的入站事件只有 wxid，真实昵称/群名来自加密通讯录（见
+/// `docs/hook-contact-directory.md`）。`display` 已由 Hook 按「备注 > 昵称 > 别名 > ID」
+/// 归一化，App 只负责消费。
+struct ContactDirectoryEntry: Codable, Hashable, Sendable {
+    var display: String
+    var nickname: String?
+    var remark: String?
+
+    init(display: String, nickname: String? = nil, remark: String? = nil) {
+        self.display = display
+        self.nickname = nickname
+        self.remark = remark
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case display
+        case nickname
+        case remark
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // 缺字段（老 Hook / 无备注）不能让整包解码失败。
+        display = (try? container.decodeIfPresent(String.self, forKey: .display)) ?? ""
+        nickname = try? container.decodeIfPresent(String.self, forKey: .nickname)
+        remark = try? container.decodeIfPresent(String.self, forKey: .remark)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(display, forKey: .display)
+        try container.encodeIfPresent(nickname, forKey: .nickname)
+        try container.encodeIfPresent(remark, forKey: .remark)
+    }
+}
+
+/// bridge 通讯录目录快照：
+/// `{"ok":true,"generated_at":<毫秒>,"users":{wxid:{...}},"groups":{id@chatroom:{...}}}`；
+/// 失败时为 `{"ok":false,"reason":"key_missing"}`，`users`/`groups` 缺省为空。
+struct ContactDirectorySnapshot: Codable, Hashable, Sendable {
+    var ok: Bool
+    /// `key_missing` / `db_missing` / `decrypt_failed` / `unsupported`。
+    var reason: String?
+    /// Hook 侧生成时间（毫秒时间戳换算）；缺省表示未提供。
+    var generatedAt: Date?
+    var users: [String: ContactDirectoryEntry]
+    var groups: [String: ContactDirectoryEntry]
+
+    init(
+        ok: Bool,
+        reason: String? = nil,
+        generatedAt: Date? = nil,
+        users: [String: ContactDirectoryEntry] = [:],
+        groups: [String: ContactDirectoryEntry] = [:]
+    ) {
+        self.ok = ok
+        self.reason = reason
+        self.generatedAt = generatedAt
+        self.users = users
+        self.groups = groups
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case reason
+        case generatedAt = "generated_at"
+        case users
+        case groups
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // 字段缺失/类型异常都按「没有该信息」处理，避免一个坏字段让整包目录不可用。
+        ok = (try? container.decodeIfPresent(Bool.self, forKey: .ok)) ?? false
+        reason = try? container.decodeIfPresent(String.self, forKey: .reason)
+        users = (try? container.decodeIfPresent([String: ContactDirectoryEntry].self, forKey: .users)) ?? [:]
+        groups = (try? container.decodeIfPresent([String: ContactDirectoryEntry].self, forKey: .groups)) ?? [:]
+        // Hook 用毫秒整数；同时容忍秒（旧数据/手写测试夹具）。
+        if let millis = try? container.decodeIfPresent(Double.self, forKey: .generatedAt) {
+            generatedAt = Date(timeIntervalSince1970: millis > 10_000_000_000 ? millis / 1000 : millis)
+        } else {
+            generatedAt = nil
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(ok, forKey: .ok)
+        try container.encodeIfPresent(reason, forKey: .reason)
+        try container.encode(users, forKey: .users)
+        try container.encode(groups, forKey: .groups)
+        if let generatedAt {
+            try container.encode(Int64((generatedAt.timeIntervalSince1970 * 1000).rounded()), forKey: .generatedAt)
+        }
+    }
+
+    var isEmpty: Bool { users.isEmpty && groups.isEmpty }
+
+    /// 目录展示名：群聊只查 `groups`，私聊/公众号只查 `users`。
+    ///
+    /// 返回 nil 表示没有可用名字：缺失、空白，或 `display` 只是 ID 形式兜底值
+    /// （Hook 在无备注/昵称/别名时会回退成 wxid / 群 ID，这类值不能写成会话标题）。
+    func displayName(for id: String, kind: ConversationKind) -> String? {
+        let entry = kind == .group ? groups[id] : users[id]
+        guard let entry else { return nil }
+        let name = entry.display.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        guard !ConversationName.isPlaceholderTitle(name, conversationID: id, kind: kind) else { return nil }
+        return name
     }
 }
 
@@ -379,7 +666,8 @@ struct ScheduledTask: Identifiable, Codable, Hashable {
 /// - 使用强化 = 1 + 0.02 × min(accessCount, 20)，最多 +40%；
 /// - 衰减锚点取 `updatedAt` 与 `lastAccessedAt` 中较晚者：更新或召回都会刷新权重。
 ///
-/// 核心记忆（isCore）在所属会话（或全局）内优先注入，但仍展示综合权重。
+/// 核心记忆（isCore）在所属会话（或全局）内优先注入，但仍展示综合权重；
+/// `baseWeight` 可由用户在记忆编辑器中自由调整（默认 1.0），核心记忆之间也按综合权重排序。
 struct LongTermMemory: Identifiable, Codable, Hashable {
     var id: String = UUID().uuidString
     /// 空字符串表示全局记忆；否则为对应会话 ID。
@@ -388,7 +676,8 @@ struct LongTermMemory: Identifiable, Codable, Hashable {
     var conversationTitle: String = ""
     var summary: String
     var isCore: Bool = false
-    /// 基础权重，默认 1.0；其它因子在此基础上计算。
+    /// 基础权重，默认 1.0；用户可在编辑器里自由调整（范围 `baseWeightRange`），
+    /// 其它因子在此基础上计算。
     var baseWeight: Double = 1.0
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
@@ -406,8 +695,24 @@ struct LongTermMemory: Identifiable, Codable, Hashable {
     /// 使用强化：每次召回 +2%，最多 20 次（+40%）。
     static let usageGrowth: Double = 0.02
     static let usageCap: Int = 20
+    /// 用户可调基础权重：默认 1.0，编辑器中可在 0.1~10.0 之间自由调整。
+    static let defaultBaseWeight: Double = 1.0
+    static let baseWeightRange: ClosedRange<Double> = 0.1...10.0
+    /// 编辑器里的快捷预设（倍率）。
+    static let baseWeightPresets: [Double] = [0.5, 1.0, 2.0, 3.0, 5.0]
 
     var isGlobal: Bool { conversationID.isEmpty }
+
+    /// 是否被用户调整过基础权重（用于卡片徽标与提示）。
+    var hasCustomBaseWeight: Bool {
+        abs(baseWeight - Self.defaultBaseWeight) > 0.000_001
+    }
+
+    /// 把任意输入收敛到可调范围：NaN/inf 回落到默认值，越界取边界。
+    static func clampBaseWeight(_ value: Double) -> Double {
+        guard value.isFinite else { return defaultBaseWeight }
+        return min(max(value, baseWeightRange.lowerBound), baseWeightRange.upperBound)
+    }
 
     /// 重要度：1 + 0.12 × log2(1 + sourceCount)，饱和增长约 1~2.2。
     var importanceFactor: Double {
@@ -548,6 +853,24 @@ struct WorkingHours: Codable, Hashable {
     }
 }
 
+extension WorkingHours {
+    /// 工作时间的展示状态。与 `RuleEngine` 使用同一个 `contains` 判定，
+    /// 因此 `paused` 就代表当前消息会被规则引擎以「不在工作时段」拦截自动回复。
+    enum Status: Equatable {
+        /// 未启用时间限制（全局关闭或会话显式不限制），任何时间都允许自动回复。
+        case unrestricted
+        /// 已启用且当前在时段内。
+        case active
+        /// 已启用但当前不在时段内；自动回复会被拦截，手动发送不受影响。
+        case paused
+    }
+
+    func status(at date: Date = Date(), calendar: Calendar = .current) -> Status {
+        guard enabled else { return .unrestricted }
+        return contains(date, calendar: calendar) ? .active : .paused
+    }
+}
+
 struct HumanizeSettings: Codable, Hashable {
     var enabled: Bool = true
     var minDelayMs: Int = 700
@@ -557,6 +880,54 @@ struct HumanizeSettings: Codable, Hashable {
     var splitMessages: Bool = false
     var maxSegments: Int = 1
     var typingIndicator: Bool = true
+}
+
+/// 「别人拍一拍机器人」后的回复设置。整体作为 `BotSettings.pat` 的可选值保存：
+/// 旧 config.json 没有该键时保持 nil，不会让整份配置解码失败。
+///
+/// 回拍已移除：只发送自定义文字和/或 AI 回复，两者可独立开启。
+struct PatReplySettings: Codable, Hashable {
+    /// 别人拍机器人时是否发送回复。
+    var enabled: Bool = false
+    /// 是否发送自定义文字。
+    var fixedTextEnabled: Bool?
+    /// AI 回复前发送的文字；nil/空表示不发送。
+    var beforeText: String?
+    /// AI 回复后发送的文字；nil/空表示不发送。
+    var afterText: String?
+    /// 是否附带 AI 回复。
+    var aiReplyEnabled: Bool?
+    /// 群聊被拍后是否在第一条回复前 @ 拍的人。旧配置缺省为关闭。
+    var mentionPatterInGroup: Bool?
+
+    /// 是否填写了任意自定义文字。
+    var hasFixedText: Bool {
+        !(beforeText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !(afterText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 旧配置兼容：有文字但没写 fixedTextEnabled 时视为启用文字。
+    var resolvedFixedTextEnabled: Bool {
+        fixedTextEnabled ?? hasFixedText
+    }
+
+    var resolvedAIEnabled: Bool {
+        aiReplyEnabled ?? false
+    }
+
+    var resolvedMentionPatterInGroup: Bool {
+        mentionPatterInGroup ?? false
+    }
+}
+
+/// 回拍附言的模板替换：`{name}` → 对方昵称（缺失时用「对方」）。
+enum PatTextTemplate {
+    static func render(_ template: String, name: String) -> String {
+        let trimmed = template.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let displayName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.replacingOccurrences(of: "{name}", with: displayName.isEmpty ? "对方" : displayName)
+    }
 }
 
 struct BotSettings: Codable, Hashable {
@@ -579,6 +950,66 @@ struct BotSettings: Codable, Hashable {
     var humanize = HumanizeSettings()
     var defaultProviderID: String?
     var defaultPersonaID: String?
+
+    /// 别人拍一拍后的回复设置（不再回拍）。可选以兼容旧配置。
+    var pat: PatReplySettings?
+
+    var patReplyEnabled: Bool {
+        get { pat?.enabled ?? false }
+        set {
+            var updated = pat ?? PatReplySettings()
+            updated.enabled = newValue
+            pat = updated
+        }
+    }
+
+    var patFixedTextEnabled: Bool {
+        get { pat?.resolvedFixedTextEnabled ?? false }
+        set {
+            var updated = pat ?? PatReplySettings()
+            updated.fixedTextEnabled = newValue
+            pat = updated
+        }
+    }
+
+    var patAIEnabled: Bool {
+        get { pat?.resolvedAIEnabled ?? false }
+        set {
+            var updated = pat ?? PatReplySettings()
+            updated.aiReplyEnabled = newValue
+            pat = updated
+        }
+    }
+
+    /// 群聊被拍后是否在第一条回复前 @ 拍的人（默认关闭）。
+    var patMentionPatterEnabled: Bool {
+        get { pat?.resolvedMentionPatterInGroup ?? false }
+        set {
+            var updated = pat ?? PatReplySettings()
+            updated.mentionPatterInGroup = newValue
+            pat = updated
+        }
+    }
+
+    /// AI 回复前文字（原样保存；发送时 trim，空串表示不发送）。
+    var patBeforeText: String {
+        get { pat?.beforeText ?? "" }
+        set {
+            var updated = pat ?? PatReplySettings()
+            updated.beforeText = newValue.isEmpty ? nil : newValue
+            pat = updated
+        }
+    }
+
+    /// AI 回复后文字（原样保存；发送时 trim，空串表示不发送）。
+    var patAfterText: String {
+        get { pat?.afterText ?? "" }
+        set {
+            var updated = pat ?? PatReplySettings()
+            updated.afterText = newValue.isEmpty ? nil : newValue
+            pat = updated
+        }
+    }
 
     /// 从结构化 @ 事件学到的「群昵称」映射（群 ID -> 机器人在该群的展示昵称）。
     /// 用于兼容只有正文、没有 at 段/mentions 的 @ 消息。旧配置缺省为 nil。

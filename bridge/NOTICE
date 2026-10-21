@@ -16,12 +16,8 @@ onebot 的 GPL-3.0 衍生/复用构建。完整许可证见同目录 LICENSE
 
 本目录中与上游 onebot/ 完全一致、未修改的文件
 ------------------------------------------------
-http.go
-websocket.go
-worker.go
 msg.go
 protobuf_handler.go
-text_builder.go
 img_builder.go
 upload_builder.go
 upload_app_builder.go
@@ -54,17 +50,48 @@ main.go
   新增 `-self_id`（App 传入当前账号，优先于 image_path 推导）与
   `-log_file`（日志外置到 `~/Library/Logs/WeChatAI/bridge/macos.log`，
   避免写入 app bundle 破坏 ad-hoc 签名）。其余启动流程与上游一致。
+  Frida ready 后调用 `restoreContactDBKeys()`，把
+  `~/Library/Caches/WeChatAI/db-keys.json` 里的 SQLCipher DB key 用
+  `setDbKeys` 回灌给 hook（无缓存/失败只记日志，密钥不打印）。
 
 logger.go
   日志文件路径改为由 `-log_file` 指定，并在启动时创建所在目录。
 
 param.go
   为 `WechatMessage` 增加 `is_self` / `from_wxid` / `to_wxid` / `sender_wxid` /
-  `target_id` 字段（自消息方向与会话归属）；同时接收 `-self_id` 覆盖值。
+  `target_id` 字段（自消息方向与会话归属），以及 `pat_from_wxid` /
+  `pat_chat_wxid` / `pat_target_wxid` / `pat_suffix` / `pat_template`
+  （拍一拍目标判定）；同时接收 `-self_id` 覆盖值。
 
 incoming.go
   4.1.15 Message finalizer 入站事件归一化：把 `hook/script.js` 上报的
   `incoming_message` 转换成 OneBot 事件并推送到 HTTP/WS。
+  归一化前先清洗旧 hook 的非法群 ID（2026-10-21 修复）：`group_id` 非空但
+  不以 `@chatroom` 结尾时清空，并把 `message_type` 从 group 降为 private；
+  `pat_chat_wxid` 同理，私聊拍一拍不再被当成群。selfID 为空时也会执行清洗。
+  自己发出的群消息若 `group_id` 缺失而 `to_wxid` 是合法群 ID，则补回
+  `group_id` 并按群聊路由（旧 hook 的群自消息归位）。
+  归一化后调用 `enrichIncomingSender`，用通讯录目录补全 `sender.nickname`
+  与群事件 `group_name`（目录未命中时保持原样）；拍一拍的 `pat_*` 字段
+  透传（不参与 is_self 改写），仅非法 `pat_chat_wxid` 会被清空。
+
+worker.go
+  新增 `pat` 发送分支：构建 appmsg type=62 的 `SendAppMsgReq` 并调用 hook
+  `triggerSendPatMessage`；R3 模式下 `pat` 与 `text`/`reply` 一样提交后不再等待
+  buf2resp。**App 已不再发送 `pat` 段**（2026-10-21 移除原生回拍），该分支保留为
+  历史/实验路径，`r3PatSend` 永久保持 `false`。
+
+websocket.go
+  新增 WS 动作 `get_contact_directory`：按 `image_path` 推导 `db_storage`，
+  调 hook `getContactDirectory`，成功回 `{echo,status:"ok",data:<目录>}`，
+  失败回 `{echo,status:"failed",error}`；`at` 昵称在群成员缓存未命中时
+  回退通讯录昵称。另支持 `pat` 消息段。另按 gofmt 清理了空白（无语义变化）。
+
+http.go
+  `/send_group_msg` 的 `at` 昵称同样在群成员缓存未命中时回退通讯录昵称
+  （与 WS 发送路径共用 `resolveAtNickname`）。`pat` 消息段解析保留为历史路径
+  （App 不再发送）；入站 `pat_*` 结构化字段保留给 App 做拍一拍文字/AI 回复。
+  另按 gofmt 删除文件末尾空行（无语义变化）。
 
 本项目新增文件（非上游代码）
 ----------------------------
@@ -73,9 +100,15 @@ NOTICE                    本说明
 http_auth_test.go         无 Gadget 场景下验证 HTTP 鉴权、参数校验与 /ws 动作的
                           httptest 测试（不启动真实端口、不连接 Frida）
 incoming_msg_test.go      `HandleMsg` 序列化保留 mentions / 自消息字段的回归测试
-incoming_normalize_test.go 入站事件归一化（自消息、群聊、@、非法帧）单元测试
+incoming_normalize_test.go 入站事件归一化（自消息、群聊、@、非法帧、非法群 ID
+                          清洗、旧 hook 群自消息补群）单元测试
 r3seed.go                 R3 发送句柄（newsendmsg hand-off 闭包 clone）按微信
                           PID 持久化，bridge/App 重启后可恢复
+contact.go                通讯录目录：`get_contact_directory` 的 db_storage 推导、
+                          目录缓存与入站昵称/群名补全、群 @ 昵称回退，以及
+                          SQLCipher DB key 缓存（0600、原子写）与启动回灌
+contact_test.go           上述逻辑的单元测试（路径推导、JSON 解析、缓存、密钥文件
+                          权限/往返、入站补全、httptest WS 动作；不连接微信/Frida）
 
 注意：`bridge/script.js` 必须与 `hook/script.js` 保持同步（bridge 只读取自己
 目录下的副本）。修改 Hook 脚本后请运行 `bash scripts/sync_hook_script.sh`，

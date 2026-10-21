@@ -81,3 +81,39 @@ func TestHandleMsgPreservesMentionsWithoutAtSegment(t *testing.T) {
 		t.Fatalf("mentions 丢失: got %#v", got.Mentions)
 	}
 }
+
+// 拍一拍的结构化目标字段也必须显式保留，否则 App 无法判断“拍的是不是机器人”。
+func TestHandleMsgPreservesPatFields(t *testing.T) {
+	payload := []byte(`{
+		"group_id":"123@chatroom",
+		"self_id":"wxid_bot",
+		"user_id":"wxid_user",
+		"sender":{"user_id":"wxid_user","nickname":"用户"},
+		"time":1760000000000,
+		"post_type":"message",
+		"message_id":"2",
+		"message":[{"type":"text","data":{"text":"\"用户\" 拍了拍 \"机器人\""}}],
+		"raw_message":"<msg><appmsg><type>62</type><patinfo><fromusername>wxid_user</fromusername><chatusername>123@chatroom</chatusername><pattedusername>wxid_bot</pattedusername></patinfo></appmsg></msg>",
+		"message_type":"group",
+		"msg_type":49,
+		"pat_from_wxid":"wxid_user",
+		"pat_chat_wxid":"123@chatroom",
+		"pat_target_wxid":"wxid_bot",
+		"pat_template":"\"${wxid_user}\" 拍了拍 \"${wxid_bot}\""
+	}`)
+
+	out, err := HandleMsg(payload)
+	if err != nil {
+		t.Fatalf("HandleMsg 失败: %v", err)
+	}
+	var got WechatMessage
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("回包反序列化失败: %v", err)
+	}
+	if got.PatTargetWXID != "wxid_bot" || got.PatFromWXID != "wxid_user" || got.PatChatWXID != "123@chatroom" {
+		t.Fatalf("pat 字段丢失: %#v", got)
+	}
+	if got.PatTemplate == "" {
+		t.Fatalf("pat_template 丢失: %#v", got)
+	}
+}

@@ -98,7 +98,9 @@ else
     SWIFT_ARGS+=(--disable-sandbox)
     say "  SwiftPM sandbox disabled (SWIFT_DISABLE_SANDBOX=1)"
   fi
-  if ( cd "${ROOT_DIR}/app" && swift test "${SWIFT_ARGS[@]}" 2>&1 | tail -8 ); then
+  # macOS 自带 bash 3.2 在 set -u 下展开空数组会报 unbound variable，
+  # 这里用 "${arr[@]+...}" 形式兼容「没有 --disable-sandbox」的情况。
+  if ( cd "${ROOT_DIR}/app" && swift test ${SWIFT_ARGS[@]+"${SWIFT_ARGS[@]}"} 2>&1 | tail -8 ); then
     :
   else
     say "  ✘ swift test 失败"
