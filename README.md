@@ -4,6 +4,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2026%2B-lightgrey.svg)](#快速开始)
 [![Swift](https://img.shields.io/badge/Swift-6.2-orange.svg)](app/Package.swift)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8.svg)](bridge/go.mod)
+[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
 在 macOS 上通过 **Frida Gadget 注入官方微信**（复用唯一实例，不登录第二个客户端），
 把微信消息桥接到本地 **原生 SwiftUI** 应用，由 **DeepSeek / OpenAI 兼容模型** 生成
@@ -161,7 +162,7 @@ ChatBot/
 ├── devtools/                本地 Mock（无需微信 / Frida 即可联调）
 ├── assets/                  App 图标源文件（.iconset / .icns）
 ├── docs/                    架构、契约、开发手册、Hook 移植、通讯录、性能与验收
-├── .github/                 Issue / PR 模板
+├── .github/                 Issue / PR 模板、Release Notes 分类、Docs CI
 ├── .editorconfig            编码、缩进与换行约定
 ├── .gitattributes           换行规范化与生成代码标记
 ├── .gitignore               构建产物、日志与隐私文件忽略规则
@@ -169,8 +170,10 @@ ChatBot/
 ├── LICENSE                  GPL-3.0 全文
 ├── AGENTS.md                AI 编码代理的仓库指南
 ├── CHANGELOG.md             变更日志
+├── CODE_OF_CONDUCT.md       贡献者行为准则
 ├── CONTRIBUTING.md          贡献指南
 ├── SECURITY.md              安全与隐私报告
+├── SUPPORT.md               获取帮助与支持渠道
 └── ThirdPartyNotices.txt    第三方开源声明
 ```
 
@@ -202,6 +205,10 @@ bash scripts/sync_hook_script.sh
 也可以直接用根目录 `Makefile`（`make help`）：`make setup` / `make bridge` / `make app` /
 `make test` / `make check` / `make clean`。受限沙箱（CI / Agent）内构建时加
 `SWIFT_DISABLE_SANDBOX=1`。
+
+GitHub Actions 只跑可在 Linux 上完成的检查（文档链接、脚本语法、hook/bridge 副本一致、
+仓库无构建产物/截图）；Swift 与 Go 构建需要 macOS / 真机环境，请在本地按
+[`docs/development.md`](docs/development.md) 执行。
 
 约定：
 
@@ -278,6 +285,9 @@ git push -u origin main
 
 见 [CONTRIBUTING.md](CONTRIBUTING.md)。请遵循 `docs/` 契约优先、Conventional Commits、
 以及 `.github/PULL_REQUEST_TEMPLATE.md` 中的检查清单。
+
+参与本项目即表示同意遵守 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。提问、Bug 与支持渠道
+见 [SUPPORT.md](SUPPORT.md)；安全或隐私问题请走私密渠道（[SECURITY.md](SECURITY.md)）。
 
 ## 许可
 

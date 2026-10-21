@@ -63,6 +63,9 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   [`README.md`](README.md)「清理、打包与分享」）；文档中的测试数字统一为
   **Swift 126 项 / Go 60 项**；`docs/README.md` 增加开发手册、AI 代理指南与
   通讯录文档入口；`bridge/NOTICE` 更新为实际修改/新增文件清单。
+- **GitHub 仓库配置**：本地研究证据（截图 / 数据库备份 / 探针日志）移出仓库；新增
+  [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)、[`SUPPORT.md`](SUPPORT.md)、
+  `.github/release.yml` 与 Linux CI 仓库卫生检查（阻止构建产物、日志、DB、截图入库）。
 
 ### 修复
 

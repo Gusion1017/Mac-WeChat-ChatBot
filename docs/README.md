@@ -25,6 +25,8 @@
 [`AGENTS.md`](../AGENTS.md)（AI 编码代理指南）、
 [`CHANGELOG.md`](../CHANGELOG.md)（变更日志）、
 [`CONTRIBUTING.md`](../CONTRIBUTING.md)（贡献规范）、
+[`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md)（行为准则）、
+[`SUPPORT.md`](../SUPPORT.md)（支持渠道）、
 [`SECURITY.md`](../SECURITY.md)（安全与隐私报告）。
 
 > **现行 vs 历史**：`architecture.md` / `core-services.md` / `bridge.md` / `memory.md` /
