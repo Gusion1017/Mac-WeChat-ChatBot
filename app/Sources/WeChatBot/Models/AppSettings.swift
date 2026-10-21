@@ -181,7 +181,9 @@ struct HookSettings: Codable, Hashable {
 struct OneBotSettings: Codable, Hashable {
     var host: String = "127.0.0.1"
     var port: Int = 58080
-    var token: String = "wechatai-local-token"
+    /// OneBot HTTP 鉴权 Token。默认留空：首次启动机器人时由 App 生成随机值并持久化，
+    /// 避免所有部署共用公开的固定默认值。本地 Mock 可手动填 `wechatai-local-token`。
+    var token: String = ""
     var connType: String = "websocket"
     var bridgePath: String = ""
     var imagePath: String = ""
