@@ -73,3 +73,8 @@ enum L10n {
 
 /// Translate a Chinese UI string at runtime. Unknown keys fall back to the source string.
 func L(_ key: String) -> String { L10n.text(key) }
+
+/// Translate a Chinese format string and apply `String(format:)` arguments.
+func Lf(_ key: String, _ args: CVarArg...) -> String {
+    String(format: L10n.text(key), arguments: args)
+}

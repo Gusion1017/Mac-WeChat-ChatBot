@@ -673,6 +673,7 @@
 "AI 前文字（留空不发送）" = "Text before AI (leave empty to skip)";
 "AI 后文字（留空不发送）" = "Text after AI (leave empty to skip)";
 "以后每天/每周在该时间执行" = "Runs at this time every day or week";
+"保存后综合权重约 %.2f" = "Estimated combined weight after saving: %.2f";
 "先添加通道并填写模型名称。" = "Add a channel and enter a model name first.";
 "切换筛选条件查看其他任务。" = "Change the filter to see other schedules.";
 "开启后所有私聊都会自动回复" = "Auto-reply to every direct chat when on";
@@ -882,6 +883,7 @@
 "完整备份 /Applications/WeChat.app → 注入 Gadget → ad-hoc 重签。" = "Full backup of /Applications/WeChat.app → inject Gadget → ad-hoc re-sign.";
 "定时任务由 App 内调度器执行，仅当机器人运行且 OneBot 已连接时才会真正发送。时间以系统时区为准。" = "Schedules run in the app's scheduler and only send while the bot is running and OneBot is connected. Times use the system time zone.";
 "机器人会连接本地 OneBot 服务并按触发设置与人设自动回复。所有开关都可以在侧边栏「机器人」中随时调整。" = "The Bot connects to the local OneBot service and replies automatically using your trigger settings and Personas. Change any switch anytime in the Bot section of the sidebar.";
+"核心记忆优先占用注入名额（最多 %d 条），核心之间也按综合权重排序；保存会刷新更新时间，时间衰减从头计算。" = "Core memories take priority for injection slots (up to %d) and are sorted by combined weight; saving refreshes the timestamp and restarts time decay.";
 "会先完整备份 /Applications/WeChat.app，再注入 Gadget 并 ad-hoc 重签。" = "Fully backs up /Applications/WeChat.app, then injects Gadget and re-signs ad-hoc.";
 "启动机器人后会连接本地 OneBot 桥接。若仍无法连接，请在设置 → Hook 中检查微信与 Hook 状态。" = "Starting the bot connects to the local OneBot bridge. If it still can't connect, check WeChat and Hook status in Settings → Hook.";
 "需要已安装官方微信 4.1.15.55（arm64）。安装 Hook 会修改微信应用包，请先退出微信并确认了解风险。" = "Requires official WeChat 4.1.15.55 (arm64). Installing the Hook modifies the WeChat app bundle, so quit WeChat first and make sure you understand the risks.";
@@ -894,5 +896,6 @@
 "仅群聊生效；@ 附在第一条回复前（自定义前文字 → AI 首段 → 自定义后文字）。bridge 解析不到群昵称时按普通文本发送。" = "Group chats only. The @-mention goes before the first reply (custom pre-text → first AI paragraph → custom post-text). Sent as plain text if bridge can't resolve the group nickname.";
 "唯一实例方案：Gadget 注入后由 bridge 经 frida-core 附加，脚本读取/调用 wechat.dylib 内部函数" = "Single-instance approach: after Gadget injection, the bridge attaches via frida-core and the script reads and calls internal wechat.dylib functions";
 "OneBot 仅监听 127.0.0.1，不暴露到局域网。请勿将端口转发到公网；如更换 Token，需要同时更新正在运行的 bridge。" = "OneBot listens on 127.0.0.1 only and isn't exposed to the LAN. Don't forward the port to the internet; if you change the token, update the running bridge as well.";
+"权重越高越优先进入提示词；核心记忆优先占用注入名额（最多 %d 条），核心之间也按权重排序。基础权重可在记忆编辑器中自由调整（0.1~10×）。" = "The higher the weight, the earlier it enters the prompt; core memories take priority for injection slots (up to %d), and cores are sorted by weight as well. Base weight can be adjusted in the memory editor (0.1–10×).";
 "API Key 保存在 macOS Keychain（service com.gusionw.wechatai），config.json 仅保存 Keychain 引用名。" = "API Keys are stored in the macOS Keychain (service com.gusionw.wechatai); config.json only keeps the Keychain reference name.";
 "Hook 版本适配、4.1.15 收发、原生发送与通讯录读取均为本项目自研；上游仅提供基线脚本、地址查找工具与 OneBot 协议实现。具体地址、结构与密钥细节不在界面展开。" = "Hook version adaptation, 4.1.15 send/receive, native sending, and contact reading are all built in-house; upstream provides only baseline scripts, address lookup tools, and the OneBot protocol implementation. Specific addresses, structures, and key details aren't exposed in the UI.";

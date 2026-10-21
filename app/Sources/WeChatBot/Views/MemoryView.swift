@@ -535,8 +535,7 @@ struct MemoryView: View {
         VStack(alignment: .leading, spacing: 10) {
             Label(L("综合权重"), systemImage: "scalemass")
                 .font(.headline)
-            Text("权重越高越优先进入提示词；核心记忆优先占用注入名额（最多 \(ChatEngine.longTermMemoryLimit) 条），"
-                + "核心之间也按权重排序。基础权重可在记忆编辑器中自由调整（0.1~10×）。")
+            Text(Lf("权重越高越优先进入提示词；核心记忆优先占用注入名额（最多 %d 条），核心之间也按权重排序。基础权重可在记忆编辑器中自由调整（0.1~10×）。", ChatEngine.longTermMemoryLimit))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1336,13 +1335,12 @@ private struct MemoryEditorSheet: View {
                         )
                     }
                     Spacer(minLength: 4)
-                    Text("保存后综合权重约 \(String(format: "%.2f", estimatedWeight))")
+                    Text(Lf("保存后综合权重约 %.2f", estimatedWeight))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .help(L("按当前基础权重与保存时刷新的更新时间估算"))
                 }
-                Text("核心记忆优先占用注入名额（最多 \(ChatEngine.longTermMemoryLimit) 条），"
-                    + "核心之间也按综合权重排序；保存会刷新更新时间，时间衰减从头计算。")
+                Text(Lf("核心记忆优先占用注入名额（最多 %d 条），核心之间也按综合权重排序；保存会刷新更新时间，时间衰减从头计算。", ChatEngine.longTermMemoryLimit))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
