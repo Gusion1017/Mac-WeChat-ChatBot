@@ -7,7 +7,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 SWIFT_FLAGS := $(if $(filter 1,$(SWIFT_DISABLE_SANDBOX)),--disable-sandbox,)
-.PHONY: help setup bridge app install run dev test test-go check docs-check clean clean-all
+.PHONY: help setup bridge app install run dev test test-go check docs-check clean clean-all release
 
 help: ## 列出可用目标
 	@awk 'BEGIN {FS = ":.*##"; printf "\n微信 AI 助手（WeChat AI）\n\n"} \
@@ -23,6 +23,9 @@ bridge: ## 构建 OneBot bridge（bridge/onebot，含 Go 测试）
 
 app: ## 构建并打包 App（dist/WeChat AI.app）
 	bash scripts/build_app.sh
+
+release: ## 构建并打包 GitHub Releases 用的 App zip
+	bash scripts/package_release.sh
 
 install: ## 把 dist 中的 App 安装到 ~/Applications
 	bash scripts/install_app.sh
