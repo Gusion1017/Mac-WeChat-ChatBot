@@ -28,6 +28,7 @@ SKIP_DIR_NAMES = {
     ".build-memory",
     "node_modules",
     "dist",
+    "_local",
     "_research",
     "__pycache__",
     ".swiftpm",

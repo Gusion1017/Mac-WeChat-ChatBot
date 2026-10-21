@@ -1,6 +1,6 @@
 # 微信 AI 助手（WeChat AI）— 常用开发命令入口
 #
-# 所有目标都是 scripts/ 下脚本的薄封装；参数与细节见各脚本头部和 docs/development.md。
+# 所有目标都是 scripts/ 下脚本的薄封装；参数与细节见各脚本头部和 docs/README.md。
 # 用法：make            # 列出全部目标
 #       make test       # Swift 单元测试
 
@@ -13,7 +13,7 @@ help: ## 列出可用目标
 	@awk 'BEGIN {FS = ":.*##"; printf "\n微信 AI 助手（WeChat AI）\n\n"} \
 		/^[a-zA-Z0-9_-]+:.*##/ {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' \
 		$(MAKEFILE_LIST)
-	@printf "\n文档：docs/development.md · docs/README.md\n\n"
+	@printf "\n文档：docs/README.md · CHANGELOG.md\n\n"
 
 setup: ## 下载并校验 Frida Gadget（hook/gadget/）
 	bash scripts/fetch_gadget.sh

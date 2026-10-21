@@ -4,7 +4,6 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2026%2B-lightgrey.svg)](#快速开始)
 [![Swift](https://img.shields.io/badge/Swift-6.2-orange.svg)](app/Package.swift)
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8.svg)](bridge/go.mod)
-[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
 在 macOS 上通过 **Frida Gadget 注入官方微信**（复用唯一实例，不登录第二个客户端），
 把微信消息桥接到本地 **原生 SwiftUI** 应用，由 **DeepSeek / OpenAI 兼容模型** 生成
@@ -25,7 +24,6 @@
 - [清理、打包与分享](#清理打包与分享)
 - [风险与备份](#风险与备份)
 - [隐私与安全](#隐私与安全)
-- [贡献](#贡献)
 - [许可](#许可)
 
 ## 功能
@@ -47,9 +45,9 @@
   在本机微信手动发一条消息后自动重发；仅文本，4.1.12 仍走 legacy，互相隔离
 - **通讯录真实昵称 / 群名**：通过本机**只读**的通讯录读取，把入站事件里的 wxid
   映射为真实好友昵称 / 群名；群成员缓存未命中时回退通讯录。数据仅留本机，
-  隐私边界见 [通讯录文档](docs/hook-contact-directory.md)
+  隐私边界见下文「隐私与安全」
 - **多 AI 通道**：DeepSeek 默认，OpenAI / Ollama / 任意 OpenAI 兼容端点
-- **图片 / 语音 / 表情 / 文件**：文本 / 表情 / 群 @ 已验证；图片 / 文件下载 hook 在 4.1.12 暂缺（见验收报告）
+- **图片 / 语音 / 表情 / 文件**：文本 / 表情 / 群 @ 已验证；图片 / 文件下载 hook 在 4.1.12 暂缺（见「状态」）
 - **定时主动消息**、**实时会话看板**、**运行日志**
 - **中 / 英双语界面**：首次向导右上角或「设置 → 通用 → 界面语言」可切换
   跟随系统 / 简体中文 / English，切换即时生效
@@ -68,15 +66,15 @@
 | OneBot bridge（Go + frida-core） | ✅ 构建 / 鉴权 / 真机附加 / 60 项测试通过 |
 | 4.1.12.53 接收 + 主动发送 | ✅ 真机全链路，单条自动回复稳定 |
 | 4.1.15.55 接收（Message finalizer） | ✅ 历史验证 |
-| 4.1.15.55 发送（R3 原生发送） | ✅ 文本私聊真机验证（2026-10-20）；设置内可开关，见 [R3 文档](docs/hook-r3-native-send.md) |
-| 通讯录昵称 / 群名（本机只读） | ✅ 4.1.15.55 真机验证（2026-10-21，22 条：21 联系人 + 1 群），见 [通讯录文档](docs/hook-contact-directory.md) |
+| 4.1.15.55 发送（R3 原生发送） | ✅ 文本私聊真机验证（2026-10-20）；设置内可开关 |
+| 通讯录昵称 / 群名（本机只读） | ✅ 4.1.15.55 真机验证（2026-10-21，22 条：21 联系人 + 1 群）， |
 | 安装 / 备份 / 重签工具链 | ✅ 已在微信副本上校验通过 |
 | App 打包脚本 / 图标 / Info.plist | ✅ |
-| 首版验收 | ✅ 2026-10-20 通过；未完成项见 [集成状态](docs/integration-status.md) |
+| 首版验收 | ✅ 2026-10-20 通过 |
 
 目标环境：Apple Silicon、macOS 26+、Xcode 27；支持微信 **4.1.12.53 (269365)**（legacy 收发）
 与 **4.1.15.55 (270135)**（Message finalizer 接收 + R3 文本发送；R3 首次使用需在本机微信
-手动发一条消息以捕获发送句柄，见 [R3 文档](docs/hook-r3-native-send.md)）。
+手动发一条消息以捕获发送句柄）。
 
 ## 架构
 
@@ -97,8 +95,7 @@ WeChatAI.app (SwiftUI)
 ```
 
 详细契约见 [`docs/architecture.md`](docs/architecture.md)，记忆设计见 [`docs/memory.md`](docs/memory.md)，
-开发与排障见 [`docs/development.md`](docs/development.md)，完整文档索引见 [`docs/README.md`](docs/README.md)，
-变更历史见 [`CHANGELOG.md`](CHANGELOG.md)。
+完整文档索引见 [`docs/README.md`](docs/README.md)，变更历史见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 快速开始
 
@@ -113,8 +110,8 @@ Go 1.25 与 Frida Gadget 17.8.0 由脚本按固定版本下载并校验，无需
 
 ```bash
 # 0. 获取代码
-git clone <your-repo-url> ChatBot
-cd ChatBot
+git clone https://github.com/Gusion1017/Mac-WeChat-ChatBot.git
+cd Mac-WeChat-ChatBot
 
 # 1. 下载 Frida Gadget（写入 hook/gadget/FridaGadget.dylib）
 bash scripts/fetch_gadget.sh
@@ -152,7 +149,7 @@ bash tools/manage_wechat.sh restore    # 还原官方 App
 ## 目录结构
 
 ```
-ChatBot/
+Mac-WeChat-ChatBot/
 ├── app/                     SwiftUI macOS 应用（SwiftPM）
 │   ├── Package.swift        平台 macOS 26 / Swift 6.2
 │   ├── Sources/WeChatBot/   Models / Core / Services / DesignSystem / Views
@@ -163,35 +160,28 @@ ChatBot/
 ├── hook/                    Frida 注入脚本
 │   ├── script.js            唯一事实来源（版本适配 + R3）
 │   ├── versions/*.json      微信版本地址表
-│   ├── gadget/              FridaGadget.config（.dylib 运行时下载，不入库）
-│   └── diag/                诊断与指针反查说明
-├── tools/                   Mach-O 注入、微信备份/安装/还原、指针反查
+│   └── gadget/              FridaGadget.config（.dylib 运行时下载，不入库）
+├── tools/                   Mach-O 注入、微信备份/安装/还原
 ├── scripts/                 构建、打包、安装、运行、清理、自检
 ├── devtools/                本地 Mock（无需微信 / Frida 即可联调）
 ├── assets/                  App 图标源文件（.iconset / .icns）
-├── docs/                    架构、契约、开发手册、Hook 移植、通讯录、性能与验收
-├── .github/                 Issue / PR 模板、Release Notes 分类、Docs CI
+├── docs/                    架构、契约、服务、桥接、记忆与界面设计
+├── .github/                 Release Notes 分类与 Docs CI
 ├── .editorconfig            编码、缩进与换行约定
 ├── .gitattributes           换行规范化与生成代码标记
 ├── .gitignore               构建产物、日志与隐私文件忽略规则
 ├── Makefile                 常用开发命令（make help）
 ├── LICENSE                  GPL-3.0 全文
-├── AGENTS.md                AI 编码代理的仓库指南
 ├── CHANGELOG.md             变更日志
-├── CODE_OF_CONDUCT.md       贡献者行为准则
-├── CONTRIBUTING.md          贡献指南
-├── SECURITY.md              安全与隐私报告
-├── SUPPORT.md               获取帮助与支持渠道
 └── ThirdPartyNotices.txt    第三方开源声明
 ```
 
 以下目录 / 文件**可随时重建，不入库**：`app/.build*`、`bridge/onebot`、`dist/`、`log/`、
-`bridge/log/`、`hook/gadget/FridaGadget.dylib`、`_research/`（本地研究证据）。
+`bridge/log/`、`hook/gadget/FridaGadget.dylib`、`_research/`（本地研究证据）与 `_local/`（本地开发笔记/探针）。
 
 ## 开发与测试
 
-完整开发手册（环境、文件地图、常见任务、排障、发布）见
-[`docs/development.md`](docs/development.md)；AI 代理见 [`AGENTS.md`](AGENTS.md)。
+环境准备、构建、测试与常见任务见本节；架构与契约见 [`docs/` 文档索引](docs/README.md)。
 
 ```bash
 # 一条命令做静态检查 + Swift 测试
@@ -215,8 +205,7 @@ bash scripts/sync_hook_script.sh
 `SWIFT_DISABLE_SANDBOX=1`。
 
 GitHub Actions 只跑可在 Linux 上完成的检查（文档链接、脚本语法、hook/bridge 副本一致、
-仓库无构建产物/截图）；Swift 与 Go 构建需要 macOS / 真机环境，请在本地按
-[`docs/development.md`](docs/development.md) 执行。
+仓库无构建产物/截图）；Swift 与 Go 构建需要 macOS / 真机环境，请在本地执行。
 
 约定：
 
@@ -248,7 +237,7 @@ bash scripts/package_release.sh      # 或 make release
 导出**仅含 Git 跟踪文件**的源码包（自动排除构建产物、日志、Gadget 与研究数据）：
 
 ```bash
-git archive --format=zip --prefix=ChatBot/ -o ChatBot-src.zip HEAD
+git archive --format=zip --prefix=Mac-WeChat-ChatBot/ -o Mac-WeChat-ChatBot-src.zip HEAD
 ```
 
 ### 发布前检查清单
@@ -257,16 +246,15 @@ git archive --format=zip --prefix=ChatBot/ -o ChatBot-src.zip HEAD
 
 - [ ] `bash scripts/check.sh --with-go` 通过（Swift 126 项、Go 60 项、文档链接、脚本语法、副本一致）。
 - [ ] `bash scripts/clean.sh --yes` 清理构建缓存、产物与日志（需要保留 `dist/` 时加 `--keep-dist`）。
-- [ ] `git status --short` 只包含预期源码与文档，没有 `_research/`、`dist/`、`log/`、`*.sqlite*`、`*.dmg`。
+- [ ] `git status --short` 只包含预期源码与文档，没有 `_local/`、`_research/`、`dist/`、`log/`、`*.sqlite*`、`*.dmg`。
 - [ ] `git ls-files | grep -Ei '(\.(dylib|dmg|zip|sqlite|sqlite3|db|log)$|^bridge/onebot$)'` 无输出。
 - [ ] 仓库内无真实 wxid / 群 ID / 手机号 / 聊天原文 / 截图 / API Key / OneBot Token。
-- [ ] 按目标仓库修改 `.github/ISSUE_TEMPLATE/config.yml` 与本节的 `<owner>` / `<repo>` 占位符。
 - [ ] 用上面的 `git archive` 导出并抽查压缩包内容，再创建 GitHub 仓库并 push。
 
 上传 GitHub：
 
 ```bash
-git remote add origin git@github.com:<owner>/<repo>.git
+git remote add origin git@github.com:Gusion1017/Mac-WeChat-ChatBot.git
 git push -u origin main
 ```
 
@@ -293,16 +281,7 @@ git push -u origin main
 - **数据**：消息 / 记忆 / 日志全部保存在本机；无遥测、无云端同步、无 WebView。
 - **仓库**：不包含真实 wxid、群 ID、聊天记录、CDN 密钥、API Key 或界面 / 真机截图；
   示例文本与测试数据均已脱敏。
-- **报告问题**：安全或隐私问题请走 [SECURITY.md](SECURITY.md) 的私密渠道，不要在公开 issue
-  中粘贴密钥、wxid 或聊天内容。
-
-## 贡献
-
-见 [CONTRIBUTING.md](CONTRIBUTING.md)。请遵循 `docs/` 契约优先、Conventional Commits、
-以及 `.github/PULL_REQUEST_TEMPLATE.md` 中的检查清单。
-
-参与本项目即表示同意遵守 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。提问、Bug 与支持渠道
-见 [SUPPORT.md](SUPPORT.md)；安全或隐私问题请走私密渠道（[SECURITY.md](SECURITY.md)）。
+- **报告问题**：安全或隐私问题请走私密渠道（不要开公开 issue），更不要粘贴密钥、wxid 或聊天内容。
 
 ## 许可
 

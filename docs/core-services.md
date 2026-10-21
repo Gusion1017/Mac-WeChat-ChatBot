@@ -24,7 +24,7 @@
 | `Services/ProcessRunner.swift` | `Process` 异步行流封装（脚本/bridge 输出） |
 | `Services/AppResources.swift` | bundle / 开发树资源定位（bridge/hook/tools） |
 | `Services/LogPipeline.swift` | 日志批量刷新、ANSI 清理、过滤与入库节流（200ms 批量，避免主线程逐行失效） |
-| `Services/CrashReporter.swift` | AppKit 布局安全阀、未捕获异常报告、会话面包屑、主线程看门狗（见 `performance.md`） |
+| `Services/CrashReporter.swift` | AppKit 布局安全阀、未捕获异常报告、会话面包屑、主线程看门狗 |
 | `Services/MentionText.swift` | 群聊 @ 文本兜底解析（结构化 `at` 缺失时用群昵称匹配） |
 | `Services/ContactDirectory.swift` | 通讯录目录快照、会话标题补全与群昵称解析 |
 | `Services/PatMessage.swift` | 拍一拍目标判定与 `{name}` 文本模板 |
@@ -170,8 +170,7 @@ RuntimeCoordinator.handle(event)
   单文件上限 40MB；http(s) URL 仅保存 `mediaURL` 不下载。
 - 事件模型：`OneBotEvent`（纯值类型）→ 运行时转 `Conversation`/`ChatMessage`；
   `at` 段与 `mentions` 收集 @ 目标，RuleEngine 优先精确匹配机器人 wxid；
-  结构化 at 缺失时可用从历史事件学到的「群昵称」做文本 @ 兜底（见
-  [`integration-status.md`](integration-status.md) 的「@ 唤醒加固」）。
+  结构化 at 缺失时可用从历史事件学到的「群昵称」做文本 @ 兜底。
 
 ### 5.3 AIClient
 

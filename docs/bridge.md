@@ -139,7 +139,7 @@ App 启动时会把 `-log_file` 指向 `~/Library/Logs/WeChatAI/bridge/macos.log
 
 ### 2.1 前置条件
 
-1. 已按 [`docs/hook-porting.md`](hook-porting.md) 的流程给 `WeChat.app` 注入 Frida Gadget，
+1. 已通过 `tools/manage_wechat.sh install` 给 `WeChat.app` 注入 Frida Gadget，
    Gadget 监听 `127.0.0.1:27042`（端口可在 App 设置中改，脚本用 `--gadget-addr` 或
    `GADGET_ADDR`）；
 2. 微信已启动，且 Gadget 已启动；
@@ -219,7 +219,7 @@ bridge/onebot \
   `HOOK_SEND_DISABLED=false` 才允许 Hook 脚本按 JSON 的 `enableSend`/`req2bufSendMode`
   执行。App 直接启动 binary 时不会经过本脚本，建议 `ProcessRunner.launch` 也注入
   `HOOK_SEND_DISABLED=true`（安全默认，需开发送时再关）。
-  详见 `hook/script.js` 顶部与 [`docs/hook-4_1_15-abi.md`](hook-4_1_15-abi.md)。
+  详见 `hook/script.js` 顶部。
 
 ---
 
@@ -248,7 +248,7 @@ bridge/onebot \
 | --- | --- | --- |
 | `get_login_info` | `{"echo":..., "status":"ok", "data":{"user_id":..., "nickname":...}}` | 上游 `nickname` 直接填 `wxid`（不是昵称）；`user_id` 来自 `image_path` 推断或已收到事件。 |
 | `get_group_member_info` | `{"echo":..., "status":"ok", "data":{"nickname":...}}` | 只查进程内缓存（曾收到该群该成员消息）；未命中时为 `null`。 |
-| `get_contact_directory` | `{"echo":..., "status":"ok", "data":{"ok":true,"users":{...},"groups":{...}}}` | 本机**只读**读取通讯录后的目录；失败回 `{"status":"failed","error":...}`。字段与隐私边界见 [`hook-contact-directory.md`](hook-contact-directory.md)。 |
+| `get_contact_directory` | `{"echo":..., "status":"ok", "data":{"ok":true,"users":{...},"groups":{...}}}` | 本机**只读**读取通讯录后的目录；失败回 `{"status":"failed","error":...}`。 |
 | `send_private_msg` / `send_group_msg` | **不回包** | 发送结果只写日志；成功/失败不会产生 echo/响应。App 应以 HTTP 发送为主通道。 |
 
 其余 action 会被静默忽略。同一时刻只有一个 WS 连接（全局 `conn`）；新连接会替换旧连接，
@@ -438,7 +438,7 @@ go test -count=1 -timeout=120s -run 'TestSendHandlerAuth|TestWebSocketGetLoginIn
     务必对比 `hook/script.js` 与 `bridge/script.js` 的 SHA256（见 NOTICE）。
 14. **`pat` 出站段保留但产品不再使用**：bridge 的 HTTP/WS 仍能解析 `{"type":"pat"}`
     并调用 hook 的 `triggerSendPatMessage`，属于历史/实验路径；App 已移除 `sendPat`，
-    `r3PatSend` 永久保持 `false`，不要启用原生回拍（见 `hook-r3-native-send.md`「历史」）。
+    `r3PatSend` 永久保持 `false`，不要启用原生回拍。
 
 ---
 

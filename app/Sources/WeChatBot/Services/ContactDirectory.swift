@@ -1,6 +1,6 @@
 import Foundation
 
-/// bridge 通讯录目录动作的线上契约（见 `docs/hook-contact-directory.md` §3.2/§4）。
+/// bridge 通讯录目录动作的线上契约（见 `docs/architecture.md` §3）。
 ///
 /// App 只消费 bridge 的 WS 动作回包，不直接读微信数据库：
 /// - 请求：`{"action":"get_contact_directory","echo":"contact-directory","params":{}}`
@@ -57,7 +57,7 @@ enum OneBotContactDirectory {
 
 /// 把通讯录目录名落到 `Conversation.title` 的纯逻辑（持久化与 UI 状态由运行时负责）。
 ///
-/// 规则（`docs/hook-contact-directory.md` §5）：
+/// 规则（`docs/architecture.md` §3）：
 /// - 只在标题为空/占位（`ConversationName.isPlaceholderTitle`）时填；
 /// - 用户重命名（非占位标题）绝不覆盖；
 /// - 群聊会话只从 `groups` 取名，私聊/公众号只从 `users` 取名；

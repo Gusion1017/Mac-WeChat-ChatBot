@@ -40,28 +40,23 @@
 
 ## 2. 目录与写入边界
 
-| 目录 | 归属 | 说明 |
-| --- | --- | --- |
-| `app/Sources/WeChatBot/Models/` | Lead | 共享数据模型 / 设置，改动需先沟通 |
-| `app/Sources/WeChatBot/Core/` | swift-core | AppStore、运行时编排、服务协议 |
-| `app/Sources/WeChatBot/Services/` | swift-core | OneBot/AI/记忆/触发判定/调度/Hook 服务 |
-| `app/Sources/WeChatBot/DesignSystem/` | swift-ui | 主题、组件、玻璃效果 |
-| `app/Sources/WeChatBot/Views/` | swift-ui | 所有页面与弹窗 |
-| `app/Sources/WeChatBot/WeChatBotApp.swift` | swift-ui | App 场景（窗口/菜单栏/设置） |
-| `app/Tests/WeChatAITests/` | swift-core | 核心服务单元测试 |
-| `bridge/` | bridge | OneBot Go 源码与脚本（`proto/` 为微信协议定义） |
-| `hook/` | hook-port | script.js、版本 JSON、Gadget 配置与诊断说明 |
-| `tools/` | hook-port / Lead | Mach-O 注入、微信备份/安装/还原、指针反查（addrfind 来自上游，未随仓库分发） |
-| `scripts/` | Lead / bridge | 构建、打包、安装、运行、清理脚本 |
-| `devtools/` | Lead | 本地 Mock AI/OneBot 与 Frida 探针（不参与打包） |
-| `assets/` | Lead | App 图标源文件与 `.icns` |
-| `docs/` | Lead | 架构、契约、研究记录与验收报告 |
-| `_research/` | hook-port | Hook 移植证据/日志/候选 JSON（git 忽略，仅本地保留） |
-
-> 「归属」列记录的是 2026-10 并行开发期的任务名（Lead / swift-core / swift-ui / bridge /
-> hook-port），用于说明**改动的主要责任面**，不是人员权限。日常维护按目录职责理解；
-> 跨目录改动先读 [`development.md`](development.md) 的「改动定位」与
-> [`AGENTS.md`](../AGENTS.md) 的写盘边界。
+| 目录 | 说明 |
+| --- | --- |
+| `app/Sources/WeChatBot/Models/` | 共享数据模型 / 设置 |
+| `app/Sources/WeChatBot/Core/` | AppStore、运行时编排、服务协议 |
+| `app/Sources/WeChatBot/Services/` | OneBot / AI / 记忆 / 触发判定 / 调度 / Hook 服务 |
+| `app/Sources/WeChatBot/DesignSystem/` | 主题、组件、玻璃效果 |
+| `app/Sources/WeChatBot/Views/` | 所有页面与弹窗 |
+| `app/Sources/WeChatBot/WeChatBotApp.swift` | App 场景（窗口 / 菜单栏 / 设置） |
+| `app/Tests/WeChatAITests/` | 核心服务单元测试 |
+| `bridge/` | OneBot Go 源码与脚本（`proto/` 为微信协议定义） |
+| `hook/` | script.js、版本 JSON 与 Gadget 配置 |
+| `tools/` | Mach-O 注入、微信备份 / 安装 / 还原 |
+| `scripts/` | 构建、打包、安装、运行、清理脚本 |
+| `devtools/` | 本地 Mock AI / OneBot（不参与打包） |
+| `assets/` | App 图标源文件与 `.icns` |
+| `docs/` | 架构、契约与操作手册 |
+| `_research/` | 真机证据 / 日志（git 忽略，仅本地保留） |
 
 ## 3. OneBot 桥接契约（已按上游 v0.0.18 源码核对）
 
@@ -89,7 +84,7 @@ bridge/onebot \
 - `-wechat_conf` 由 App **运行期生成**：读取 `hook/versions/<version>_mac.json` 后合并 App 设置
   （4.1.15.55 为 R3 发送开关），写入
   `~/Library/Application Support/WeChatAI/runtime/hook-<version>-<build>.json` 再传给 bridge；
-  仓库 JSON 始终保持默认 `off`，产品行为只由设置决定（见 [`hook-r3-native-send.md`](hook-r3-native-send.md)）。
+  仓库 JSON 始终保持默认 `off`，产品行为只由设置决定。
 - `image_path` 用于图片/视频临时目录；不存在时上游会报错，App 负责创建/探测。
 - 鉴权：HTTP 发送接口要求 `Authorization: Bearer <token>`；WS 无鉴权，仅监听 127.0.0.1。
 
@@ -180,7 +175,6 @@ bridge/onebot \
   （`groups[*].members` 为群成员群昵称）。App 只在标题为空/占位时用目录填
   `Conversation.title`；bridge 转发入站事件时覆盖 `sender.nickname`
   （群聊优先群昵称，再回退通讯录显示名；群事件附 `group_name`），群 @ 昵称同样优先群昵称。
-  详见 [`hook-contact-directory.md`](hook-contact-directory.md)。
 - 媒体字段：`data.url` 为 `file://` 本地路径时复制到 App 媒体目录；`data.file` 可能为 base64。
 
 ### 3.3 WebSocket 动作（App → bridge）
@@ -206,8 +200,7 @@ bridge/onebot \
   「拍一拍回复 @ 拍的人」复用同一路径（仅群聊，附在回复的第一条消息前）。
 - 拍一拍：**App 已移除出站 `pat`**（2026-10-21），不再发送原生拍一拍；bridge/hook 仍保留
   `pat` 解析与 `triggerSendPatMessage` 作为历史路径（`r3PatSend=false`，产品不调用）。
-  入站 `pat_*` 字段保留，App 用它触发自定义文字/AI 回复。原生 sendpat 失败与崩溃记录见
-  [`hook-r3-native-send.md`](hook-r3-native-send.md) 的「历史」一节。
+  入站 `pat_*` 字段保留，App 用它触发自定义文字/AI 回复。
 
 ## 4. App 内部关键类型
 
@@ -244,7 +237,7 @@ bridge/onebot \
   `hook/versions/*.json` 与 `hook/script.js`，文档不展开。
   App 默认开启 R3（可在设置中关闭）；首次使用（或微信重启后）需在本机微信手动发一条消息
   以捕获发送上下文，App/bridge 重启会按微信 PID 从本地缓存自动恢复。
-- 任何 Hook 适配变更必须在真机验证文本收发后才能标记为可用（见 `hook-porting.md`）。
+- 任何 Hook 适配变更必须在真机验证文本收发后才能标记为可用。
 - 安装 Gadget 流程：完整备份 → 注入 load command → 复制 Gadget/配置 → ad-hoc 重签整个 App → 校验。
 - 恢复：从备份 zip 还原整个 `/Applications/WeChat.app` 并重签（或直接用备份替换）。
 

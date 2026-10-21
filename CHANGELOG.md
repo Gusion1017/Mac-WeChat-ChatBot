@@ -10,13 +10,12 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 - **通讯录真实昵称 / 群名**：hook 在本机**只读**读取通讯录后返回联系人目录，
   bridge 暴露 OneBot `get_contact_directory`，App 用真实昵称/群名替换 wxid 标题，
-  并在群成员缓存未命中时回退通讯录昵称。详见
-  [`docs/hook-contact-directory.md`](docs/hook-contact-directory.md)。
+  并在群成员缓存未命中时回退通讯录昵称（契约见 `docs/architecture.md` §3）。
 - **中 / 英双语界面**：首次向导右上角与「设置 → 通用 → 界面语言」可切换
   跟随系统 / 简体中文 / English；内建 `en.lproj/Localizable.strings`，静态 `Text`
   与 `L()` 组件/枚举标签均覆盖，切换即时生效。
 - **稳定性与崩溃取证**：`CrashReporter`（未捕获异常报告、会话面包屑、主线程看门狗）、
-  `AppKitLayoutGuard`（显示周期断言安全阀），详见 `docs/performance.md`。
+  `AppKitLayoutGuard`（显示周期断言安全阀）。
 - **回复进度倒计时**：`ReplyProgressBar`，会话详情头部、输入区与会话行同步显示
   AI 生成 / 拟人化等待 / 发送中 / 完成 / 失败状态。
 - **会话重命名**：会话详情菜单「重命名会话…」（`ConversationRenameSheet`），
@@ -42,13 +41,15 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   `MemoryStore.repairSelfRoutedMessages` 一次性修复历史误路由。
 - **bridge**：`incoming.go` 入站事件归一化、`r3seed.go` 发送句柄按微信 PID 持久化；
   新增 `incoming_msg_test.go`、`incoming_normalize_test.go`、`MessageRoutingTests`。
-- **文档**：新增 `docs/development.md`（开发手册）、`docs/install.md`（安装与启动）、
-  `AGENTS.md`（AI 代理指南）、`docs/performance.md`、`docs/hook-contact-directory.md`、
-  本变更日志；新增 `scripts/check.sh`、`scripts/check_docs.py`、
+- **文档**：新增 `docs/install.md`（安装与启动）、架构/契约文档与本变更日志；
+  新增 `scripts/check.sh`、`scripts/check_docs.py`、
   `scripts/sync_hook_script.sh`、根 `Makefile`。
 
 ### 变更
 
+- **仓库精简**：下线仅供开发期使用的文档与工具（AI 代理指南、开发手册、Hook 移植/ABI/R3/通讯录方法文档、
+  集成状态与验收报告、性能事故记录、Frida 反查探针、指针归属工具、Issue/PR 模板与协作文件），
+  相关内容保留在本机 `_local/`（已 gitignore）；公开仓库只保留用户视角文档与运行所需代码。
 - **移除原生「拍一拍」回拍**：App 删除 `sendPat` 与「仅回拍 / 回拍位置」设置及相关测试，
   不再发送 `pat` 消息段。bridge/hook 中保留的 sendpat 历史代码保持默认关闭
   （`r3PatSend=false`、App 不调用），仅作逆向记录。拍一拍设置收敛为「拍一拍回复」；
@@ -65,13 +66,12 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   不再报 unbound variable）；`sync_hook_script.sh` 在 Linux 上回退 `sha256sum`，便于 CI 校验。
 - **发布准备**：清理构建产物、运行日志与 `.DS_Store`；新增发布前检查清单（见
   [`README.md`](README.md)「清理、打包与分享」）；文档中的测试数字统一为
-  **Swift 126 项 / Go 60 项**；`docs/README.md` 增加开发手册、AI 代理指南与
-  通讯录文档入口；`bridge/NOTICE` 更新为实际修改/新增文件清单。
+  **Swift 126 项 / Go 60 项**；`docs/README.md` 重新整理文档入口；
+  `bridge/NOTICE` 更新为实际修改/新增文件清单。
 - **发布打包**：新增 `scripts/package_release.sh`（构建 + 校验签名 + 生成
   `dist/WeChat-AI-<version>.zip` / `.sha256`）与 `make release`；
   `build_app.sh` 随包附带 `bridge/NOTICE` 与上游许可证，满足 GPL 合规。
 - **GitHub 仓库配置**：本地研究证据（截图 / 数据库备份 / 探针日志）移出仓库；新增
-  [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)、[`SUPPORT.md`](SUPPORT.md)、
   `.github/release.yml` 与 Linux CI 仓库卫生检查（阻止构建产物、日志、DB、截图入库）。
 
 ### 修复
@@ -112,10 +112,10 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - **微信上滑历史卡顿**：`hook/script.js` 的 `isReadablePointer` 不再调用
   `Process.findRangeByAddress`（每轮都会枚举进程内存映射，微信里单次 20–50ms），改为
   试读 1 字节；Message finalizer 先去重再读字符串、私聊跳过群专用字段、逐条 `console.log`
-  改为 `HOOK_DEBUG` 开关。历史回放从约 1 条/秒恢复到成批到达，详见 `docs/performance.md` §7。
+  改为 `HOOK_DEBUG` 开关。历史回放从约 1 条/秒恢复到成批到达。
 - **R3 重启后状态误报**：bridge/App 重启时发送句柄已从 `r3-seed.json` 恢复，但 App 只解析
   「捕获闭包」日志，Hook 卡片仍显示「R3 等待信号」并提示手动发消息；现解析恢复/过期日志、
-  同步 `r3Seeded` 与提示文案（仅微信重启后需要手动发送），见 `docs/hook-r3-native-send.md`。
+  同步 `r3Seeded` 与提示文案（仅微信重启后需要手动发送）。
 
 ### 安全
 
@@ -147,5 +147,5 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/<owner>/ChatBot/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/<owner>/ChatBot/releases/tag/v1.0.0
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.0.0

@@ -285,8 +285,8 @@ enum ConversationName {
 
 /// 通讯录目录条目（bridge `get_contact_directory` 回包里 `users` / `groups` 的值）。
 ///
-/// 微信 4.1.15 的入站事件只有 wxid，真实昵称/群名来自加密通讯录（见
-/// `docs/hook-contact-directory.md`）。`display` 已由 Hook 按「备注 > 昵称 > 别名 > ID」
+/// 微信 4.1.15 的入站事件只有 wxid，真实昵称/群名来自加密通讯录（契约见
+/// `docs/architecture.md` §3）。`display` 已由 Hook 按「备注 > 昵称 > 别名 > ID」
 /// 归一化，App 只负责消费。
 struct ContactDirectoryEntry: Codable, Hashable, Sendable {
     var display: String

@@ -29,7 +29,7 @@ var structVer = "{{.structVer}}";
 //   - 虚调用 ABI: 旧 (vtable+0x10)(buffer, out, out, out) -> 新 (vtable+0x18)(buffer);
 //   - 新版在虚调用前先 bl autoBufferWriteFunc 预写前缀串(0x46362f4), 旧版没有;
 //   - 新版 found 路径新增 map erase + operator delete(0x4635ed0..0x4635f18)。
-// 详见 docs/hook-4_1_15-abi.md。
+// 地址与开关的权威数据源：hook/versions/*.json。
 //
 // Go text/template 缺键渲染为 "<no value>", 所以只有精确等于 "v4_1_15" 才走新布局,
 // 其余(含旧版 JSON 无该键)全部走 4.1.12 及以前的旧路径, 行为不变。
@@ -94,7 +94,7 @@ function hookDebug() {
 //              然后直接调 slot13(0x4634710) 让微信自己注册/分配 taskId/dispatch。
 //              前置: 必须先捕获到一份真实 newsendmsg 闭包 clone(人工发一条文本触发,
 //              见 r3ClosureCapture); 无 clone 时发送安全 fail。
-//              详见 docs/hook-r3-native-send.md。
+//              详见 docs/architecture.md §3（设置 → Hook）。
 //   "off"    = 关闭(4.1.15 默认): 不注册 req2buf/blrX8/预写 hook, triggerSend* 直接 fail。
 var enableSendFromJson = "{{.enableSend}}";
 var req2bufSendModeFromJson = "{{.req2bufSendMode}}";
@@ -152,7 +152,7 @@ try {
     }
 } catch (e) { }
 
-// v4_1_15 __TEXT 偏移常量(与 hook/versions/4_1_15_55_mac.json 同源, 见 docs/hook-4_1_15-abi.md)
+// v4_1_15 __TEXT 偏移常量(与 hook/versions/4_1_15_55_mac.json 同源)
 var L415 = {
     req2bufFindRetErase: 0x4635ed0,    // found 路径父指针回爬/erase 入口
     req2bufSkipEraseResume: 0x4635f1c, // legacy: PC 跳转恢复点; C2: erase 后恢复 hook 点
@@ -3230,7 +3230,7 @@ function r3Status() {
 // 页格式（4.1.15 实测）：4096 字节/页，reserve=80（IV16+HMAC64），AES-256-CBC；
 // 页 1 前 16 字节是 salt；其余页密文 [0,4016)、IV [4016,4032)、HMAC [4032,4096)。
 // 密钥只用页 1 试解密校验（SQLite format 3\0），不依赖 HMAC 实现。
-// 详见 docs/hook-contact-directory.md。
+// 契约见 docs/architecture.md §3。
 var contactDirectoryEnabled = "{{.contactDirectory}}" === "true";
 var CONTACT_PAGE_SIZE = 4096;
 var CONTACT_RESERVE = 80;

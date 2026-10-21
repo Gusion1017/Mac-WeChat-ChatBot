@@ -3,7 +3,7 @@ package main
 // 本文件不是上游源码，由 ChatBot 项目为「通讯录目录 / DB key 缓存 / 入站昵称补全」
 // 新增。测试只覆盖纯逻辑与 httptest WS，不连接微信、不启动 Frida：
 // Frida RPC 经 callFridaExport 包级变量注入替身，密钥缓存路径也重定向到临时目录。
-// 契约见 docs/hook-contact-directory.md §4。
+// 契约见 docs/architecture.md §3。
 
 import (
 	"encoding/json"

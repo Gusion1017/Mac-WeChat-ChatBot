@@ -42,11 +42,11 @@
 
 ## 3. 方式 B：源码 ZIP（需要 Xcode 27）
 
-1. 在 GitHub 页面 **Code → Download ZIP**，解压（目录名通常是 `ChatBot-main`）。
+1. 在 GitHub 页面 **Code → Download ZIP**，解压（目录名通常是 `Mac-WeChat-ChatBot-main`）。
 2. 打开「终端」，进入解压后的目录：
 
    ```bash
-   cd ~/Downloads/ChatBot-main       # 以实际解压目录为准
+   cd ~/Downloads/Mac-WeChat-ChatBot-main   # 以实际解压目录为准
    ```
 
 3. 依次执行（首次会下载 Go 1.25、Frida devkit 与 Gadget，约需数分钟和数 GB 磁盘）：

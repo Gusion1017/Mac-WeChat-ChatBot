@@ -50,7 +50,7 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 		if v.Type == "text" {
 			sendContent += v.Data.Text
 		} else if v.Type == "at" {
-			// 群成员缓存未命中时回退通讯录昵称（docs/hook-contact-directory.md §4）。
+			// 群成员缓存未命中时回退通讯录昵称（docs/architecture.md §3）。
 			if nickname, ok := resolveAtNickname(req.GroupID, v.Data.QQ); ok {
 				sendContent += fmt.Sprintf("@%s\u2005", nickname)
 				atUserID += v.Data.QQ + ","

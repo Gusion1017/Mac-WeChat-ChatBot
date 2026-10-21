@@ -11,7 +11,7 @@ struct WeChatAIApp: App {
     init() {
         // 稳定性：布局安全阀必须早于任何 SwiftUI 场景 / AppKit 窗口出现，
         // 否则 macOS 26 的显示周期断言会把一次布局回环升级成 EXC_BREAKPOINT 闪退。
-        // 细节与取证见 docs/performance.md。
+        // 细节与取证见 `Services/CrashReporter.swift`。
         AppKitLayoutGuard.install("App.init")
         // 崩溃取证：尽可能早安装（AppKit 启动时会覆盖顶层处理器，
         // AppDelegate 的 launch 回调里会再装回来）。

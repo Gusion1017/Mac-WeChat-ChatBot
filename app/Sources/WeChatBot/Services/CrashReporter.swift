@@ -12,7 +12,7 @@ let stabilityLogger = Logger(subsystem: "com.gusionw.wechatai", category: "Stabi
 
 /// AppKit 显示周期断言的“安全阀”。
 ///
-/// 背景（见 `docs/performance.md`）：macOS 26.x 的 AppKit 在 `NSWindow` 的
+/// 背景：macOS 26.x 的 AppKit 在 `NSWindow` 的
 /// “Update Constraints in Window” 周期数超过窗口内视图数时，会抛出
 /// `NSInternalInconsistencyException` 并直接走 `+[NSApplication _crashOnException:]`
 /// → `EXC_BREAKPOINT`。这个 abort 发生在 AppKit 的布局回调内部，应用层拿不到异常，
@@ -27,7 +27,7 @@ let stabilityLogger = Logger(subsystem: "com.gusionw.wechatai", category: "Stabi
 /// <https://github.com/utmapp/UTM/issues/4691>。
 ///
 /// 安全阀只把“断言崩溃”降级为“日志”，不修复布局回环本身；真正的根因仍由 UI 层
-/// 修复（见 `docs/performance.md`）。它也不会关闭 AppKit 的布局检查
+/// 修复。它也不会关闭 AppKit 的布局检查
 /// （不使用 `NSWindowShouldCheckDisplayCycleLimit`）。
 enum AppKitLayoutGuard {
     /// AppKit 读取的 asserts 开关键（`false` = 只记录日志，不 abort）。

@@ -11,7 +11,7 @@ package main
 //     setDbKeys 回灌，免去重新等登录期派生。
 //
 // 密钥只出现在内存与 0600 缓存文件中，绝不写日志。
-// 契约见 docs/hook-contact-directory.md §3.2 / §4。
+// 契约见 docs/architecture.md §3。
 
 import (
 	"context"
@@ -275,7 +275,7 @@ func primeNicknameCache(dir *ContactDirectory) {
 }
 
 // resolveAtNickname 解析群 @ 的显示昵称：优先历史消息建立的群成员缓存，
-// 未命中时回退通讯录目录（docs/hook-contact-directory.md §4）。
+// 未命中时回退通讯录目录（docs/architecture.md §3）。
 func resolveAtNickname(groupID, userID string) (string, bool) {
 	if groupID == "" || userID == "" {
 		return "", false
