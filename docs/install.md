@@ -70,12 +70,23 @@
 ```bash
 bash scripts/fetch_gadget.sh
 bash scripts/build_bridge.sh
+bash scripts/package_release.sh
+```
+
+脚本会构建 App、校验签名、打包并生成 SHA256；也可以直接 `make release`：
+
+- `dist/WeChat-AI-<version>.zip`
+- `dist/WeChat-AI-<version>.zip.sha256`
+
+也可以手动执行：
+
+```bash
 bash scripts/build_app.sh
 ditto -c -k --keepParent "dist/WeChat AI.app" "dist/WeChat-AI-1.0.0.zip"
 shasum -a 256 "dist/WeChat-AI-1.0.0.zip"
 ```
 
-把 `dist/WeChat-AI-1.0.0.zip` 上传到 GitHub **Releases**，在说明里写清：
+把 zip 与 `.sha256` 上传到 GitHub **Releases**，在说明里写清：
 
 - 支持 Apple Silicon / macOS 26+ / 微信 4.1.12.53 或 4.1.15.55；
 - App 为 ad-hoc 签名、未公证，首次需右键打开或移除 quarantine；

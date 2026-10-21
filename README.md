@@ -209,7 +209,7 @@ bash scripts/sync_hook_script.sh
 ```
 
 也可以直接用根目录 `Makefile`（`make help`）：`make setup` / `make bridge` / `make app` /
-`make test` / `make check` / `make clean`。受限沙箱（CI / Agent）内构建时加
+`make release` / `make test` / `make check` / `make clean`。受限沙箱（CI / Agent）内构建时加
 `SWIFT_DISABLE_SANDBOX=1`。
 
 GitHub Actions 只跑可在 Linux 上完成的检查（文档链接、脚本语法、hook/bridge 副本一致、
