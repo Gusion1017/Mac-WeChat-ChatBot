@@ -1,0 +1,49 @@
+name: Docs & Consistency
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: 文档、脚本与仓库卫生
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Shell syntax
+        run: |
+          for script in scripts/*.sh tools/*.sh; do
+            bash -n "${script}"
+          done
+
+      - name: Python syntax
+        run: |
+          python3 -m py_compile scripts/check_docs.py devtools/*.py tools/*.py
+
+      - name: Docs links, script copy and version JSON
+        run: bash scripts/check.sh --docs
+
+      - name: No generated artifacts tracked
+        run: |
+          if git ls-files | grep -Ei '(\.(dylib|dmg|zip|sqlite|sqlite3|db|log)$|^bridge/onebot$)'; then
+            echo "❌ 仓库包含构建产物或隐私数据文件"
+            exit 1
+          fi
+
+      - name: No screenshots or recordings tracked
+        run: |
+          if git ls-files | grep -Ei '\.(png|jpe?g|gif|webp|heic|mov|mp4)$' | grep -v '^assets/'; then
+            echo "❌ 仓库包含截图/录屏；请改放到本地（不要提交）"
+            exit 1
+          fi
