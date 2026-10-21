@@ -20,8 +20,9 @@ WeChat.app (Frida Gadget) ⇄ bridge/onebot ⇄ WeChatAI.app
 - 提交：`f222f37321f66d3a199cb3c7642f77f7504d85da`（2026-09-28）
 - 许可：**GPL-3.0**（完整文本见 [`bridge/LICENSE`](../bridge/LICENSE)；
   衍生说明见 [`bridge/NOTICE`](../bridge/NOTICE)）
-- 本项目**没有修改上游 Go 源码**；`script.js` 已同步 `hook/script.js` 的 WeChat 4.1.15
-  ABI 适配（见「与上游差异」），其余只增加构建工具、测试与文档。
+- 本项目以上游 `onebot/` 为基线，**Go 源码有修改与新增**（自消息方向、入站归一化、
+  通讯录目录、R3 句柄持久化等）；逐文件清单与原因见 [`bridge/NOTICE`](../bridge/NOTICE)。
+  `script.js` 同步 `hook/script.js` 的微信 4.1.12 / 4.1.15 ABI 适配（见「与上游差异」）。
 
 ---
 
@@ -62,7 +63,8 @@ scripts/build_bridge.sh
 - 构建参数：`-trimpath -buildvcs=false -ldflags="-s -w"`；
 - 自检：产物必须是 Mach-O arm64，`onebot -h` 必须正常；若仓库存在 `hook/script.js`，
   还会对比它与 `bridge/script.js` 的 SHA256，不一致时给出同步警告；
-- 运行 `http_auth_test.go` 中的鉴权/参数校验/WS 动作测试（`BRIDGE_SKIP_TESTS=1` 可跳过）。
+- 运行 `go test ./...`（6 个 `_test.go`：鉴权/参数校验/WS 动作、入站归一化、
+  `HandleMsg` 字段保留、通讯录、protobuf dump、工具函数；`BRIDGE_SKIP_TESTS=1` 可跳过）。
 
 干净重建（下载与编译全部重来，约 70 秒，取决于网络）：
 
@@ -104,23 +106,22 @@ Frida 以**静态库**链接进可执行文件，因此分发时不需要额外 
 ```
 bridge/
 ├── onebot              # 构建产物（被 .gitignore 忽略，发布前需构建）
-├── script.js           # 运行时读取；已同步 hook/script.js 的 4.1.15 ABI 适配
+├── script.js           # 运行时读取；由 hook/script.js 同步（scripts/sync_hook_script.sh）
 ├── go.mod / go.sum
-├── *.go                # 上游源码（未修改）
+├── *.go                # 上游源码 + 本项目修改/新增（清单见 NOTICE）
 ├── proto/              # gRPC/protobuf 生成代码（编译必需）
 ├── LICENSE             # 上游 GPL-3.0
-├── NOTICE              # 衍生/第三方许可说明
-└── http_auth_test.go   # 本项目新增的本地测试
+├── NOTICE              # 上游来源、已修改文件与新增文件说明
+└── *_test.go           # 本项目新增的 httptest 测试（不连 Frida）
 ```
 
-`bridge/log/macos.log` 在运行时生成（见 §4.4），已忽略。
+`bridge/log/macos.log` 是 `run_bridge.sh` 的默认日志（相对 `-log_file`，已忽略）；
+App 启动时会把 `-log_file` 指向 `~/Library/Logs/WeChatAI/bridge/macos.log`，见 §4.4。
 
-> **script.js 同步**：`bridge/script.js` 已从 `hook/script.js` 同步 WeChat 4.1.15 的
-> ABI 适配（`req2bufLayout`、autoBuffer 预写注入、`HOOK_DEBUG` 诊断；上游原版为
-> 71697 字节，现 85818 字节，SHA256
-> `7dd68dff738c2dcc313ced584aee99d43fc2c89dfac92cad1ed42dccd8be943f`）。
-> bridge 只读取自己目录下的副本，不读取 `hook/`；若 `hook/script.js` 再次修改，
-> 发布前必须重新复制并更新 `bridge/NOTICE`。
+> **script.js 同步**：`bridge/script.js` 是 `hook/script.js` 的运行时副本，不要手改。
+> 修改 hook 脚本后运行 `bash scripts/sync_hook_script.sh`；`bash scripts/check.sh`
+> 会校验两者一致。具体改动与版本说明见 [`bridge/NOTICE`](../bridge/NOTICE)，
+> 文档里不要写死文件大小或 SHA256（会随脚本迭代过期）。
 
 ### 1.4 常见构建错误
 
@@ -247,6 +248,7 @@ bridge/onebot \
 | --- | --- | --- |
 | `get_login_info` | `{"echo":..., "status":"ok", "data":{"user_id":..., "nickname":...}}` | 上游 `nickname` 直接填 `wxid`（不是昵称）；`user_id` 来自 `image_path` 推断或已收到事件。 |
 | `get_group_member_info` | `{"echo":..., "status":"ok", "data":{"nickname":...}}` | 只查进程内缓存（曾收到该群该成员消息）；未命中时为 `null`。 |
+| `get_contact_directory` | `{"echo":..., "status":"ok", "data":{"ok":true,"users":{...},"groups":{...}}}` | 微信进程内解密 `contact.db` 后的通讯录目录；失败回 `{"status":"failed","error":...}`。字段与隐私注意见 [`hook-contact-directory.md`](hook-contact-directory.md)。 |
 | `send_private_msg` / `send_group_msg` | **不回包** | 发送结果只写日志；成功/失败不会产生 echo/响应。App 应以 HTTP 发送为主通道。 |
 
 其余 action 会被静默忽略。同一时刻只有一个 WS 连接（全局 `conn`）；新连接会替换旧连接，
@@ -386,20 +388,26 @@ go test -count=1 -timeout=120s -run 'TestSendHandlerAuth|TestWebSocketGetLoginIn
 
 ## 5. 与上游差异
 
-上游源码保持原样（可用 `diff -r` 对照），差异仅有：
+完整清单以 [`bridge/NOTICE`](../bridge/NOTICE) 为准（逐文件列出与上游一致、已修改与新增的
+文件及原因）。概要：
 
 1. **构建方式**：上游 `setup_frida_and_build.sh` 使用 `go build`（未 strip）；
    本项目用 `-trimpath -buildvcs=false -ldflags="-s -w"`，产物约 95 MB（上游约 133 MB）。
    调用方只是 App 启动进程，不受影响；如需保留符号调试，去掉这些参数即可。
-2. **新增文件**：`NOTICE`、`.gitignore`、`http_auth_test.go`、
-   `UPSTREAM_README.md`（上游 `readme.md` 重命名）、`Makefile.upstream`
-   （上游 Makefile 仅参考）。
-3. **工程脚本**：`scripts/build_bridge.sh`（下载/校验/离线缓存/Go 工具链隔离/构建自检）
+2. **已修改文件**：`main.go`（`-self_id`、`-log_file`、通讯录 DB key 回灌）、
+   `logger.go`（`-log_file`）、`param.go`（自消息方向与 `pat_*` 字段）、
+   `incoming.go`（Message finalizer 归一化、非法群 ID 清洗、通讯录昵称补全）、
+   `websocket.go`（`get_contact_directory`、`at` 昵称回退）、
+   `http.go`（`at` 昵称回退）、`worker.go`（R3 提交后跳过 buf2resp）。
+3. **本项目新增**：`contact.go`（通讯录目录 + SQLCipher key 缓存）、
+   `r3seed.go`（发送句柄按 PID 持久化）、`NOTICE`、`.gitignore`、
+   `*_test.go`、`UPSTREAM_README.md`（上游 `readme.md` 重命名）与
+   `Makefile.upstream`（上游 Makefile，仅参考）。
+4. **工程脚本**：`scripts/build_bridge.sh`（下载/校验/离线缓存/Go 工具链隔离/构建自检）
    与 `scripts/run_bridge.sh`（参数化启动与前置检查）。
-4. **上游未改**：没有修改任何 `.go`、`go.mod`、`go.sum`、`proto/` 文件；
-   `script.js` 是唯一被修改的上游文件——已同步 `hook/script.js` 的 4.1.15 ABI
-   适配（`req2bufLayout`、autoBuffer 预写、`HOOK_DEBUG`），细节与 SHA256 见
-   [`bridge/NOTICE`](../bridge/NOTICE)。
+5. **`script.js`**：唯一被修改的上游脚本，已同步 `hook/script.js` 的 4.1.12 / 4.1.15
+   ABI 适配（`req2bufLayout`、autoBuffer 预写、Message finalizer、R3 发送、通讯录）。
+   它以 `hook/script.js` 为唯一事实来源，细节见 NOTICE。
 
 ---
 
@@ -420,14 +428,18 @@ go test -count=1 -timeout=120s -run 'TestSendHandlerAuth|TestWebSocketGetLoginIn
    冷启动后未收到过对应群成员消息时可能缺失。
 9. **`myWechatId` 推断**：未收到事件前从 `image_path` 的
    `xwechat_files/<wxid>_xxx/...` 推断，路径格式不符时可能为空或截断。
-10. **日志含聊天内容**：`Info("发送数据", ...)` 会记录完整事件 JSON；日志目录
-    `bridge/log` 应按敏感数据保护并定期清理。
+10. **日志含聊天内容**：`Info("发送数据", ...)` 会记录完整事件 JSON；日志文件
+    （`run_bridge.sh` 默认 `bridge/log/`，App 默认 `~/Library/Logs/WeChatAI/bridge/`）
+    应按敏感数据保护并定期清理。
 11. **静态链接 Frida**：二进制约 95 MB，冷启动/内存占用高于普通 Go 程序；
     未在真实微信 Gadget 环境下测量 RSS（目标 <80 MB 需联调确认）。
 12. **无健康检查端点**：只能通过 WS 是否可连接判断；`/debug/pprof` 与 `/test_ws`
     不属于契约，勿依赖。
 13. **`bridge/script.js` 是手同步副本**：Hook 脚本继续迭代时容易忘记同步；发布前
     务必对比 `hook/script.js` 与 `bridge/script.js` 的 SHA256（见 NOTICE）。
+14. **`pat` 出站段保留但产品不再使用**：bridge 的 HTTP/WS 仍能解析 `{"type":"pat"}`
+    并调用 hook 的 `triggerSendPatMessage`，属于历史/实验路径；App 已移除 `sendPat`，
+    `r3PatSend` 永久保持 `false`，不要启用原生回拍（见 `hook-r3-native-send.md` §10.9）。
 
 ---
 
@@ -436,8 +448,8 @@ go test -count=1 -timeout=120s -run 'TestSendHandlerAuth|TestWebSocketGetLoginIn
 - **仅回环**：`run_bridge.sh` 固定 `-receive_host=127.0.0.1:<port>`，App 同样如此；
   不要把端口暴露到局域网。
 - **HTTP token**：`/send_*` 要求 `Authorization: Bearer <token>`；token 建议用
-  `openssl rand -hex 32` 生成（App 默认 64 字符 hex）。`run_bridge.sh` 未提供 token
-  时会随机生成并打印。
+  `openssl rand -hex 32` 生成（App 首次启动机器人时生成 64 字符 hex）。
+  `run_bridge.sh` 未提供 token 时会随机生成并打印。
 - **token 可见性**：上游启动时把完整 token 打印到 stdout，且 token 通过命令行参数
   传给进程，同机用户可用 `ps` 看到；仅适用于单用户桌面环境。App 日志如需脱敏，
   应在读取 bridge stdout 时过滤 `OnebotToken`。

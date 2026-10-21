@@ -1,4 +1,4 @@
-# WeChat AI ChatBot — 常用开发命令入口
+# 微信 AI 助手（WeChat AI）— 常用开发命令入口
 #
 # 所有目标都是 scripts/ 下脚本的薄封装；参数与细节见各脚本头部和 docs/development.md。
 # 用法：make            # 列出全部目标
@@ -10,7 +10,7 @@ SWIFT_FLAGS := $(if $(filter 1,$(SWIFT_DISABLE_SANDBOX)),--disable-sandbox,)
 .PHONY: help setup bridge app install run dev test test-go check docs-check clean clean-all
 
 help: ## 列出可用目标
-	@awk 'BEGIN {FS = ":.*##"; printf "\nWeChat AI ChatBot\n\n"} \
+	@awk 'BEGIN {FS = ":.*##"; printf "\n微信 AI 助手（WeChat AI）\n\n"} \
 		/^[a-zA-Z0-9_-]+:.*##/ {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' \
 		$(MAKEFILE_LIST)
 	@printf "\n文档：docs/development.md · docs/README.md\n\n"

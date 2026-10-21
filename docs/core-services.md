@@ -26,6 +26,8 @@
 | `Services/LogPipeline.swift` | 日志批量刷新、ANSI 清理、过滤与入库节流（200ms 批量，避免主线程逐行失效） |
 | `Services/CrashReporter.swift` | AppKit 布局安全阀、未捕获异常报告、会话面包屑、主线程看门狗（见 `performance.md`） |
 | `Services/MentionText.swift` | 群聊 @ 文本兜底解析（结构化 `at` 缺失时用群昵称匹配） |
+| `Services/ContactDirectory.swift` | 通讯录目录快照、会话标题补全与群昵称解析 |
+| `Services/PatMessage.swift` | 拍一拍目标判定与 `{name}` 文本模板 |
 | `Services/Diagnostics.swift` | `WECHATAI_SELFTEST=1` 服务层自检 |
 
 本文件聚焦 Services/Core；设置模型、记忆页文件夹与 App 生命周期（防睡眠 apply/release）
@@ -203,6 +205,30 @@ RuntimeCoordinator.handle(event)
 6. 冷却与每分钟上限按会话记账；**只有发送成功后**才 `noteReply` 消耗冷却，
    AI 失败不会误占冷却；运行时对同会话生成做串行化，避免并发穿透。
 
+拍一拍（2026-10-21 修复）：`PatMessage.event(from: rawJSON)` 优先解析 hook 的
+`pat_*` 结构化字段，回退解析 `raw_message` 里的 `<patinfo>` / `<pat>` XML。
+`.pat` 触发只在 `pat_target_wxid == selfID` 时命中；没有结构化 target 时，
+私聊按「拍了拍我 / patted me」、群聊按正文含 selfID 或已学到的群昵称兜底。
+普通文本里出现「拍了拍」（例如「我刚才拍了拍他」）不再算拍一拍。
+
+拍一拍回复（`bot.pat.enabled`，默认关闭）：规则引擎放行后，若当前消息确实拍的是
+机器人，运行期进入 `handlePatReply`。**不再回拍**，只发送：
+
+- `bot.pat.fixedTextEnabled` + `beforeText` / `afterText`：AI 前/后的自定义文字
+  （`PatTextTemplate.render` 支持 `{name}` → 对方昵称；空串不发送）；
+- `bot.pat.aiReplyEnabled`：用与普通回复相同的 persona/provider/model 生成 AI 文字；
+  生成失败只跳过 AI，不影响自定义文字；
+- `bot.pat.mentionPatterInGroup`（默认关闭）：群聊拍一拍回复时，把真实 @（OneBot
+  `at` 段，`qq` = 拍的人 wxid）附在**第一条**发出的消息前。自定义前文字 → AI 首段 →
+  自定义后文字，哪条先发出就 @ 哪条，最多一次；私聊始终不 @。`PatMessage.replyMention`
+  负责目标判定（群聊、非机器人自己、非群 ID），本地气泡展示可读昵称时同步带上 `@昵称`
+  前缀；bridge 按群成员缓存/通讯录解析群昵称，解析失败时该条按普通文本发送。
+
+发送顺序：AI 前文字 → AI 回复 → AI 后文字。全部内容都未发出时回退普通 AI 回复
+（拍一拍回复的 @ 依旧生效，只附在回退回复的第一条消息前）；
+dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证失败并彻底移除，
+不再请求 bridge 的 `pat` 发送能力。
+
 ### 5.5 ChatEngine
 
 - system = persona.systemPrompt（无可用人格时回退到 `Persona.defaultSystemPrompt`）+ 真人聊天约束 +
@@ -223,7 +249,9 @@ RuntimeCoordinator.handle(event)
 - dry-run 时不分段/不延迟，只产出计划文本。
 - 长期记忆召回：只注入「当前会话 + 全局」记忆，核心记忆同样遵守作用域
   （其它会话的核心记忆不注入）；按核心 → 手写 → 自动总结的优先级、同层按**综合权重**降序，
-  默认最多 6 条（内容重要度 × 使用强化 × 30 天半衰期）；提示词注明核心/手写优先、
+  默认最多 6 条（`ChatEngine.longTermMemoryLimit`，核心记忆优先占用名额）；
+  综合权重 = 基础权重 × 内容重要度 × 使用强化 × 30 天半衰期，其中基础权重可由用户
+  在记忆编辑器中自由调整（0.1~10×），核心记忆之间也按该权重排序；提示词注明核心/手写优先、
   自动总结仅供参考、冲突时以核心/手写为准；召回后 `MemoryStore.recordMemoryAccess(ids:)`
   以 best-effort 累加访问次数。
 - 批量总结：短期窗口（10 条）外的未总结消息**攒够 8 条**才调用一次 AI，
@@ -329,14 +357,16 @@ RuntimeCoordinator.handle(event)
 
 ### 8.1 `swift test`（推荐，无需 UI）
 
-测试 target 位于 `app/Tests/WeChatAITests/`（`CoreServicesTests.swift`（41）、
-`SleepPreventionTests.swift`（9）、`MessageRoutingTests.swift`（5）、
-`NativeSendConfigTests.swift`（3），共 58 项）：
+测试 target 位于 `app/Tests/WeChatAITests/`（`CoreServicesTests.swift`（43）、
+`SleepPreventionTests.swift`（9）、`MessageRoutingTests.swift`（12）、
+`NativeSendConfigTests.swift`（3）、`ConversationNameTests.swift`（8）、`WorkingHoursStatusTests.swift`（5）、
+`ContactDirectoryTests.swift`（15）、`PatMessageTests.swift`（20）、`PatReplySettingsTests.swift`（7）、
+`HookSelfIDTests.swift`（4），共 126 项）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 57 tests, with 0 failures（2026-10-21）
+# Executed 126 tests, with 0 failures（2026-10-21）
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
@@ -344,7 +374,8 @@ swift test --scratch-path .build-verify
 同会话早期片段召回（排除窗口内/当前消息，最多 3 条）、群聊发言人标注
 （`senderName` 优先、回退 `senderID`）、手写记忆作为权威参考合并且不被覆盖、
 长期记忆滚动合并与历史多条合并、`MemorySummaryCompactor` 去重/600 字上限、
-`accessCount` 权重强化与 `sourceCount` 对数增长、旧库 v2→v4 迁移；
+`accessCount` 权重强化与 `sourceCount` 对数增长、`baseWeight` 可调（范围收敛/持久化/
+核心记忆按权重排序与超额时的注入优先级）、旧库 v2→v4 迁移；
 防睡眠旧配置兼容/三档标签/决策表；OneBot 事件解析（群/@/私聊/非法帧）、
 RuleEngine 默认触发+黑名单+关键词冷却、Scheduler daily/once nextFireAt、
 ChatEngine 分段/角色合并/中英分词/流式总开关、SettingsPersistence 原子写/幂等/无明文密钥、
@@ -373,7 +404,7 @@ RuleEngine 白黑名单/@/关键词/冷却、Scheduler 各 repeat 的 nextFireAt
 ChatEngine 分段/角色合并/关键词分词。输出 `[selftest] PASS/FAIL/WARN` 与汇总退出码。
 
 历史 CLI 驱动实测：**63 passed / 0 failed / 0 warnings**；当前 `swift test` 为
-**58/58 通过**（见 8.1；2026-10-21 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
+**126/126 通过**（见 8.1；2026-10-21 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
 Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Keychain 保存/删除、
 `config.json` 无明文 Key。
 
@@ -399,6 +430,12 @@ Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Ke
   历史数据中已经误路由到「自己 wxid」会话的消息，启动时由
   `MemoryStore.repairSelfRoutedMessages(selfID:)` 一次性归位（幂等）；随后
   `get_login_info` 返回的账号是 selfID 权威来源。
+- **会话归类自愈**：启动时在上述修复之后再跑
+  `MemoryStore.repairMisroutedConversations(selfID:)`，处理两类历史脏数据：
+  「自己 wxid / 字面量 `wxid_self`」会话、以及 `kind=group` 但 ID 不是
+  `@chatroom` 的伪群会话（例如旧 hook 把私聊拍一拍的 wxid 当群 ID）。
+  只搬能由消息 `raw_json` 明确推导目标（真实群 ID 或对方 wxid）的消息，
+  不确定则保留；搬完重算预览并删除空会话，幂等（2026-10-21）。
 - **历史回放不触发回复**：微信加载历史/补同步会把旧消息重新投递，App 仍入库供检索，
   但超过 120 秒的消息不再触发自动回复，也不会把会话预览/未读回退。
 - **白名单语义**：`effectiveWhitelist` / `effectiveBlacklist` 是“会话 ID 或用户 wxid”的统一名单；

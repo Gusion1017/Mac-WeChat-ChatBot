@@ -1,4 +1,4 @@
-# WeChat AI ChatBot — 架构与接口契约
+# 微信 AI 助手（WeChat AI）— 架构与接口契约
 
 > 目标：macOS 原生（SwiftUI）微信 AI 助手。通过 Frida Gadget 注入官方微信（唯一实例），
 > 复用开源 Hook 的收发能力，以本地 OneBot 桥接把消息交给原生 App；AI 回复走 OpenAI 兼容接口。
@@ -34,7 +34,7 @@
 - 原生 SwiftUI，无 WebView/Electron；空闲时仅 App 主进程 + 可选 bridge。
 - bridge 仅在机器人开启时运行；AI 请求按需发起，不轮询。
 - 消息写入 SQLite（WAL）；UI 列表分页加载，内存中最多保留当前会话。
-- 日志环形缓冲（App 内 2000 条），落盘按天切割，避免无界增长。
+- 日志环形缓冲（App 内 2000 条），DB 保留最近 5000 条；按天文件切割尚未实现，避免无界增长。
 - 防睡眠默认关闭；仅在用户选择「接入电源时 / 始终」后持有 IOKit 空闲睡眠断言，
   不轮询、不阻止合盖睡眠。
 
@@ -103,7 +103,7 @@ bridge/onebot \
   "user_id": "wxid_target",
   "group_id": "123456@chatroom",
   "sender": { "user_id": "wxid_target", "nickname": "昵称" },
-  "time": 1760000000,
+  "time": 1760000000000,
   "message_id": "123",
   "message": [
     { "type": "text", "data": { "text": "你好" } },
@@ -112,24 +112,75 @@ bridge/onebot \
     { "type": "face", "data": { "url": "file:///..." } }
   ],
   "raw_message": "你好",
-  "message_type": "group"
+  "message_type": "group",
+  "pat_from_wxid": "wxid_patter",
+  "pat_chat_wxid": "123456@chatroom",
+  "pat_target_wxid": "wxid_bot"
 }
 ```
 
+> `pat_*` 字段仅在「拍一拍」事件出现（2026-10-21 起）。hook 从 4.1.15 appmsg
+> `<patinfo>` 或旧版 `<sysmsg type="pat">` 解析：`pat_from_wxid` 是拍的人，
+> `pat_chat_wxid` 是群 ID（**私聊为空**），`pat_target_wxid` 是被拍的人，另可能有
+> `pat_suffix` / `pat_template`。原始 XML 仍保留在 `raw_message`，App 侧有兜底解析。
+> 2026-10-21 修复：私聊拍一拍 `<patinfo><chatusername>` 是 wxid（不是群 ID），
+> 旧 hook 曾把它当 `group_id` 写进事件，导致同一好友的拍一拍了拍进独立「群聊」；
+> 现在 hook 只在 `pat_chat_wxid` 是 `@chatroom` 时把它当群，bridge 也会清洗非法值。
+
 解析规则：
-- `group_id` 非空 → 群聊；否则私聊。
+- 群 ID 契约：微信群 ID 一律以 `@chatroom` 结尾。只有 `group_id` **是合法群 ID** 时才按群聊
+  处理；非空但形如 wxid 的脏 `group_id` 会被 bridge 清洗，App 解析时也不会把它当群
+  （2026-10-21 修复）。
+- hook 判群：`from` 或 `to` 任一以 `@chatroom` 结尾即视为群消息——入站群消息 `from=群`，
+  自己发出的群消息 `from=自己`、`to=群`；只有 `from` 是群时才解析群成员/正文前缀。
 - 发送者身份以 `sender.user_id` 为准，缺失时用 `user_id`。
 - `message` 可能是字符串或数组（上游 `Message` 结构），解析时容错。
 - 自消息方向（2026-10-21 起）：
   - hook 额外上报 `from_wxid` / `to_wxid` / `sender_wxid`；bridge 用
     `-self_id`（App 传入，缺失时从 `image_path` 推导）判定发送者是否自己；
   - 自己发出的消息带 `is_self:true`，`self_id`/`sender.user_id` 是当前账号，
-    私聊另带 `target_id=<对方 wxid>`，群聊 `target_id=<群 ID>`；
+    私聊另带 `target_id=<对方 wxid>`，群聊 `target_id=<群 ID>`；旧 hook 的群自消息
+    若 `group_id` 缺失而 `to_wxid` 是群 ID，bridge 会补 `group_id=to_wxid` 并置
+    `message_type=group`；
   - App 的 `conversationID`：群 → `group_id`；私聊自消息 → `target_id`；
     其余 → `user_id`。方向由 `is_self` 决定，不能再用 `self_id == user_id` 兜底
     判断私聊自消息（会把它记进「自己 wxid」的会话）。
+  - 会话归类自愈（2026-10-21）：启动时先跑 `MemoryStore.repairSelfRoutedMessages`
+    （旧 hook 把自消息记进自己会话），再跑 `MemoryStore.repairMisroutedConversations`
+    （`wxid_self` 占位会话、kind=group 但 ID 非群 ID 的伪群会话、非法群 ID 等）。
+    两者都只搬能由 `raw_json` 明确推导目标的消息，幂等，失败/不确定时保持原样。
+    历史事件反推 selfID 时会忽略 `wxid_self` / `self` 这类占位值。
 - App 连接后主动发 `get_login_info`，把返回的 `data.user_id` 作为 selfID 的
   权威来源；事件启发式仅作为旧 bridge 的兜底。
+- 拍一拍触发（2026-10-21 修复）：`pat_target_wxid == self_id` 才算「拍的是机器人」；
+  `pat_target_wxid` 缺失时不再用「正文含『拍了拍』」直接命中——私聊按模板
+  「拍了拍我 / patted me」判定，群聊只认正文含 selfID 或已学到的机器人群昵称。
+  普通文本里出现「拍了拍」不算拍一拍事件。拍别人（target 非 self）不进入自动回复。
+- 拍一拍回复（设置可控，默认关闭）：`bot.pat.enabled` 开启且当前拍一拍确实拍的是
+  机器人时，App 在规则引擎放行后发送自定义文字和/或 AI 回复。**不再回拍**，
+  bridge 出站 `pat` 段与 `OneBotClient.sendPat` 已移除。
+  - 自定义文字：`beforeText` / `afterText` 作为 AI 前/后的普通文本发送，支持
+    `{name}` 占位符（对方昵称），不依赖 AI；
+  - AI 回复：走与普通自动回复相同的 persona/provider/model 与上下文窗口；
+    生成失败只跳过 AI 文字，不影响自定义文字。
+  - 群聊 @ 拍的人（`bot.pat.mentionPatterInGroup`，默认关闭）：回复的第一条消息以
+    `{"type":"at","data":{"qq":<拍的人 wxid>}}` + 文本发送，由 bridge 解析群昵称并写入
+    `<atuserlist>` 生成真实 @；私聊不 @。bridge 解析不到昵称时该条不带 @ 照常发送。
+  - 发送顺序：AI 前文字 → AI 回复 → AI 后文字；全部未发出时回退普通 AI 回复
+    （回退回复的第一条同样带 @）。
+- 会话标题（`Conversation.title`）学习规则（2026-10-21 起）：
+  - 只在昵称**可读**时才写库：`sender.nickname` 非空、不等于会话 ID / `sender.user_id` /
+    selfID、不是 `wxid_*` / `*@chatroom`、不是「我 / 自己」；
+  - 自己发出的消息不参与命名；群聊标题不从消息推断（事件里没有群名），只更新副标题；
+  - 用户重命名（非占位标题）后不会被后续事件覆盖；
+  - 展示层 `ConversationName` 兜底：系统账号中文名 + `群聊 / 微信好友 / 公众号 · 尾号`；
+    启动时 `MemoryStore.repairPlaceholderConversationTitles` 幂等清理历史 ID 标题。
+- 通讯录真实昵称/群名（2026-10-21 起）：App 连接后请求 `get_contact_directory`；
+  bridge 调 hook 在微信进程内解密 `contact.db`（SQLCipher4）并查询联系人/群，
+  返回 `users` / `groups`（`groups[*].members` 为群成员群昵称）。App 只在标题为空/占位时
+  用目录填 `Conversation.title`；bridge 转发入站事件时覆盖 `sender.nickname`
+  （群聊优先群昵称，再回退通讯录显示名；群事件附 `group_name`），群 @ 昵称同样优先群昵称。
+  详见 [`hook-contact-directory.md`](hook-contact-directory.md)。
 - 媒体字段：`data.url` 为 `file://` 本地路径时复制到 App 媒体目录；`data.file` 可能为 base64。
 
 ### 3.3 WebSocket 动作（App → bridge）
@@ -140,6 +191,7 @@ bridge/onebot \
 { "action": "send_group_msg", "echo": "uuid", "params": { "group_id": "xxx@chatroom", "message": [ { "type": "at", "data": { "qq": "wxid_x" } }, { "type": "text", "data": { "text": " hi" } } ] } }
 { "action": "get_login_info", "echo": "uuid", "params": {} }
 { "action": "get_group_member_info", "echo": "uuid", "params": { "group_id": "xxx@chatroom", "user_id": "wxid_x" } }
+{ "action": "get_contact_directory", "echo": "contact-directory", "params": {} }
 ```
 
 - 上游对 `send_*` 动作**不回 echo**（当前实现）；App 以 HTTP 接口作为发送主通道并等待 `{"status":"ok"}`，WS 只用于收事件，避免“假成功”。
@@ -149,6 +201,13 @@ bridge/onebot \
   返回 `{"status":"ok"}` 或 5xx/`{"status":"failed","error":...}`。
 - 图片/语音/视频/文件：`message` 数组元素 `{"type":"image","data":{"file":"base64://..."}}`。
   单条消息过长时 App 应自行分段。
+- 群聊 @：`{"type":"at","data":{"qq":"wxid_x"}}` 放在文本段之前；bridge 用群成员缓存
+  （回退通讯录目录）解析昵称，拼接 `@群昵称\u2005` 并把目标写入 `<atuserlist>`。
+  「拍一拍回复 @ 拍的人」复用同一路径（仅群聊，附在回复的第一条消息前）。
+- 拍一拍：**App 已移除出站 `pat`**（2026-10-21），不再发送原生拍一拍；bridge/hook 仍保留
+  `pat` 解析与 `triggerSendPatMessage` 作为历史路径（`r3PatSend=false`，产品不调用）。
+  入站 `pat_*` 字段保留，App 用它触发自定义文字/AI 回复。原生 sendpat 失败与崩溃记录见
+  [`hook-r3-native-send.md`](hook-r3-native-send.md) §10.9（历史）。
 
 ## 4. App 内部关键类型
 
@@ -188,7 +247,8 @@ bridge/onebot \
    newSendMsgTaskCtorAddr, newSendMsgTaskVtable, r3ClosureVtable, slot13Addr, operatorNewAddr,
    newsendmsgUrl, r3ClosureCapture, r3Slot13Capture, r3QueueUntilSeed, r3MaxClones`。
   App 在 4.1.15.55 上按设置合并出 `enableSend=true, req2bufSendMode=r3, r3Slot13Capture=true,
-  r3QueueUntilSeed=true`（默认开启，可在设置中关闭）；首次使用需本机微信手动发一条消息以捕获种子闭包。
+  r3QueueUntilSeed=true`（默认开启，可在设置中关闭）；首次使用（或微信重启后）需在本机微信
+  手动发一条消息以捕获种子闭包，App/bridge 重启会按微信 PID 从缓存自动恢复。
 - 任何偏移变更必须 runtime 验证文本收发 + 图片上传后才能标记 `matchedVersion = true`。
 - 安装 Gadget 流程：完整备份 → 注入 load command → 复制 Gadget/配置 → ad-hoc 重签整个 App → 校验。
 - 恢复：从备份 zip 还原整个 `/Applications/WeChat.app` 并重签（或直接用备份替换）。
@@ -211,6 +271,7 @@ WeChat AI.app/Contents/Resources/
   bridge/onebot
   bridge/script.js        # 由 hook/script.js 复制（单一事实来源）
   hook/versions/4_1_15_55_mac.json
+  hook/versions/4_1_12_53_mac.json
   hook/gadget/FridaGadget.dylib
   hook/gadget/FridaGadget.config
   tools/install_gadget.sh
@@ -272,5 +333,6 @@ stdout：
 - 群聊 `from` 以 `@chatroom` 结尾；文本 `content` 可能以 `sender_wxid:\n` 前缀，
   JS 会剥离并把 sender 作为 user_id。
 
-安全：Message finalizer hook 为**只读**，不修改寄存器/内存；发送注入默认关闭
-（`HOOK_SEND_DISABLED=true`），避免再次触发 4.1.15 skip-erase 路径。
+安全：Message finalizer hook 为**只读**，不修改寄存器/内存。R3 发送由 App 设置控制
+（默认开启）；如果绕过 App、直接用 `scripts/run_bridge.sh` 调试，它默认
+`HOOK_SEND_DISABLED=true`（只读接收），避免触发 4.1.15 skip-erase 路径。

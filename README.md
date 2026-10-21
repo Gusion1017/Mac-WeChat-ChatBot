@@ -1,4 +1,4 @@
-# 微信 AI 助手 · WeChat AI ChatBot
+# 微信 AI 助手（WeChat AI）
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2026%2B-lightgrey.svg)](#快速开始)
@@ -29,11 +29,14 @@
 
 ## 功能
 
-- **私聊自动回复**；**群聊触发可多选**（@ / 关键词 / 拍一拍；「所有消息」独占），并支持学习群昵称后的纯文本 @ 兜底
+- **私聊自动回复**；**群聊触发可多选**（@ / 关键词 / 拍一拍；「所有消息」独占），并支持学习群昵称后的纯文本 @ 兜底；
+  拍一拍只认「拍的是机器人」的目标，拍别人不会唤醒；可在机器人页开启「拍一拍回复」（默认关闭），配置 AI 前/后自定义文字和/或 AI 回复；
+  群聊回复还可选择「@ 拍的人」（真实 `<atuserlist>` @）。回拍已移除
 - **统一白名单 / 黑名单（会话 ID 或用户 wxid）/ 冷却 / 每分钟限流 / 工作时段**，支持按会话覆盖
 - **按会话人格**、系统提示词、模型覆盖；温度按模型单独配置
 - **记忆系统**：10 条短期窗口 → 窗口外旧消息攒够 8 条批量总结；
-  记忆页按会话「文件夹」组织；综合权重 = 内容重要度 × 召回强化 × 30 天半衰期；
+  记忆页按会话「文件夹」组织；综合权重 = 基础权重 × 内容重要度 × 召回强化 × 30 天半衰期，
+  基础权重可在记忆编辑器自由调整（0.1~10×），核心记忆之间也按权重排序；
   自动总结上限 600 字并自动压缩；核心记忆按所属会话/全局作用域生效，手写编辑不被自动总结覆盖
 - **防睡眠**（通用设置）：永不 / 接入电源适配器时 / 始终；仅阻止系统空闲睡眠，不合盖睡眠
 - **拟人化**：随机延迟、单条回复（默认）、dry-run；多段发送因 4.1.12 canary 风险默认关闭
@@ -41,6 +44,9 @@
   失败原因；详情头部、输入区与会话列表行同步可见，便于判断卡在哪一步
 - **4.1.15.55 原生发送（R3）**：设置 → Hook 内开关（默认开）；无发送句柄时消息自动排队，
   在本机微信手动发一条消息后自动重发；4.1.12 仍走 legacy，互相隔离
+- **通讯录真实昵称 / 群名**：Hook 在微信进程内解密 `contact.db`（SQLCipher 4），
+  把入站事件里的 wxid 映射为真实好友昵称 / 群名；群成员缓存未命中时回退通讯录。
+  见 [通讯录文档](docs/hook-contact-directory.md)
 - **多 AI 通道**：DeepSeek 默认，OpenAI / Ollama / 任意 OpenAI 兼容端点
 - **图片 / 语音 / 表情 / 文件**：文本 / 表情 / 群 @ 已验证；图片 / 文件下载 hook 在 4.1.12 暂缺（见验收报告）
 - **定时主动消息**、**实时会话看板**、**运行日志**
@@ -54,15 +60,16 @@
 
 | 模块 | 状态 |
 | --- | --- |
-| SwiftUI App（10 页面 / 设置 / 首次向导） | ✅ 构建与真机 E2E |
-| Swift 核心（OneBot、AI、SQLite 记忆、触发判定、调度） | ✅ 构建 / 58 项测试通过 |
-| OneBot bridge（Go + frida-core） | ✅ 构建 / 鉴权 / 真机附加通过 |
+| SwiftUI App（9 个侧边栏页面 + 首次向导） | ✅ 构建与真机 E2E |
+| Swift 核心（OneBot、AI、SQLite 记忆、触发判定、调度） | ✅ 构建 / 126 项测试通过 |
+| OneBot bridge（Go + frida-core） | ✅ 构建 / 鉴权 / 真机附加 / 60 项测试通过 |
 | 4.1.12.53 接收 + 主动发送 | ✅ 真机全链路，单条自动回复稳定 |
 | 4.1.15.55 接收（Message finalizer） | ✅ 历史验证 |
 | 4.1.15.55 发送（R3 原生构造） | ✅ 文本私聊真机验证（2026-10-20）；设置内可开关，见 [R3 文档](docs/hook-r3-native-send.md) |
+| 通讯录昵称 / 群名（`contact.db` 进程内解密） | ✅ 4.1.15.55 真机验证（2026-10-21，22 条：21 联系人 + 1 群），见 [通讯录文档](docs/hook-contact-directory.md) |
 | 安装 / 备份 / 重签工具链 | ✅ 已在微信副本上校验通过 |
 | App 打包脚本 / 图标 / Info.plist | ✅ |
-| 最终验收 | ✅ [docs/acceptance.md](docs/acceptance.md) |
+| 首版验收 | ✅ 2026-10-20 通过；未完成项见 [集成状态](docs/integration-status.md) |
 
 目标环境：Apple Silicon、macOS 26+、Xcode 27；支持微信 **4.1.12.53 (269365)**（legacy 收发）
 与 **4.1.15.55 (270135)**（Message finalizer 接收 + R3 文本发送；R3 首次使用需在本机微信
@@ -140,7 +147,7 @@ ChatBot/
 ├── app/                     SwiftUI macOS 应用（SwiftPM）
 │   ├── Package.swift        平台 macOS 26 / Swift 6.2
 │   ├── Sources/WeChatBot/   Models / Core / Services / DesignSystem / Views
-│   ├── Tests/WeChatAITests/ 58 项单元测试
+│   ├── Tests/WeChatAITests/ 126 项单元测试
 │   └── Packaging/Info.plist 打包模板
 ├── bridge/                  OneBot Go 桥接（GPL-3.0 衍生，含 proto/ 协议）
 │   └── NOTICE               上游来源与本项目修改/新增文件清单
@@ -153,9 +160,13 @@ ChatBot/
 ├── scripts/                 构建、打包、安装、运行、清理、自检
 ├── devtools/                本地 Mock（无需微信 / Frida 即可联调）
 ├── assets/                  App 图标源文件（.iconset / .icns）
-├── docs/                    架构、契约、开发手册、Hook 移植、性能与验收
+├── docs/                    架构、契约、开发手册、Hook 移植、通讯录、性能与验收
 ├── .github/                 Issue / PR 模板
+├── .editorconfig            编码、缩进与换行约定
+├── .gitattributes           换行规范化与生成代码标记
+├── .gitignore               构建产物、日志与隐私文件忽略规则
 ├── Makefile                 常用开发命令（make help）
+├── LICENSE                  GPL-3.0 全文
 ├── AGENTS.md                AI 编码代理的仓库指南
 ├── CHANGELOG.md             变更日志
 ├── CONTRIBUTING.md          贡献指南
@@ -175,10 +186,10 @@ ChatBot/
 # 一条命令做静态检查 + Swift 测试
 bash scripts/check.sh
 
-# Swift：构建 + 单元测试（58/58）
+# Swift：构建 + 单元测试（126/126）
 cd app && swift build && swift test
 
-# Go bridge：构建时自动跑 Go 测试（14 项）
+# Go bridge：构建时自动跑 Go 测试（60 项）
 bash scripts/build_bridge.sh
 
 # 仅构建 bridge（跳过测试）
@@ -218,10 +229,22 @@ bash scripts/clean.sh --yes --all          # 额外删除 Frida Gadget（需重�
 git archive --format=zip --prefix=ChatBot/ -o ChatBot-src.zip HEAD
 ```
 
+### 发布前检查清单
+
+准备上传到 GitHub 时按顺序确认：
+
+- [ ] `bash scripts/check.sh --with-go` 通过（Swift 126 项、Go 60 项、文档链接、脚本语法、副本一致）。
+- [ ] `bash scripts/clean.sh --yes` 清理构建缓存、产物与日志（需要保留 `dist/` 时加 `--keep-dist`）。
+- [ ] `git status --short` 只包含预期源码与文档，没有 `_research/`、`dist/`、`log/`、`*.sqlite*`、`*.dmg`。
+- [ ] `git ls-files | grep -Ei '(\.(dylib|dmg|zip|sqlite|sqlite3|db|log)$|^bridge/onebot$)'` 无输出。
+- [ ] 仓库内无真实 wxid / 群 ID / 手机号 / 聊天原文 / 截图 / API Key / OneBot Token。
+- [ ] 按目标仓库修改 `.github/ISSUE_TEMPLATE/config.yml` 与本节的 `<owner>` / `<repo>` 占位符。
+- [ ] 用上面的 `git archive` 导出并抽查压缩包内容，再创建 GitHub 仓库并 push。
+
 上传 GitHub：
 
 ```bash
-git remote add origin git@github.com:<user>/<repo>.git
+git remote add origin git@github.com:<owner>/<repo>.git
 git push -u origin main
 ```
 
@@ -243,6 +266,8 @@ git push -u origin main
 ## 隐私与安全
 
 - **密钥**：仅保存在 macOS Keychain（`service = com.gusionw.wechatai`），`config.json` 只记录引用名。
+- **通讯录密钥**：`contact.db` 的 SQLCipher 密钥只在本机内存与
+  `~/Library/Caches/WeChatAI/db-keys.json` 缓存，不写日志、不入库；删除缓存后需重新登录微信采集。
 - **数据**：消息 / 记忆 / 日志全部保存在本机；无遥测、无云端同步、无 WebView。
 - **仓库**：不包含真实 wxid、群 ID、聊天记录、CDN 密钥、API Key 或界面 / 真机截图；
   示例文本与测试数据均已脱敏。
