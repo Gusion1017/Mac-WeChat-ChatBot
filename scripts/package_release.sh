@@ -66,7 +66,7 @@ ZIP="$ROOT_DIR/dist/WeChat-AI-${VERSION}.zip"
 
 rm -f "$ZIP" "$ZIP.sha256"
 say "打包 ${APP_NAME}.app（version ${VERSION}, build ${BUILD}）…"
-/usr/bin/ditto -c -k --keepParent "$BUNDLE" "$ZIP"
+/usr/bin/ditto -c -k --norsrc --keepParent "$BUNDLE" "$ZIP"
 ( cd "$ROOT_DIR/dist" && shasum -a 256 "$(basename "$ZIP")" > "$(basename "$ZIP").sha256" )
 
 say ""

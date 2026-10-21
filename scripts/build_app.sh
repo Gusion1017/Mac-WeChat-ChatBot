@@ -37,6 +37,15 @@ cp "$EXECUTABLE" "$BUNDLE/Contents/MacOS/WeChatAI"
 cp "$ROOT_DIR/app/Packaging/Info.plist" "$BUNDLE/Contents/Info.plist"
 cp "$ROOT_DIR/assets/AppIcon.icns" "$BUNDLE/Contents/Resources/AppIcon.icns"
 
+# UI strings for the in-app language switch (English + Chinese identity table).
+for lang in en zh-Hans; do
+  strings="$ROOT_DIR/app/Packaging/$lang.lproj/Localizable.strings"
+  if [ -f "$strings" ]; then
+    mkdir -p "$BUNDLE/Contents/Resources/$lang.lproj"
+    cp "$strings" "$BUNDLE/Contents/Resources/$lang.lproj/Localizable.strings"
+  fi
+done
+
 # Runtime resources (bridge + hook + installer).
 RES="$BUNDLE/Contents/Resources"
 mkdir -p "$RES/bridge" "$RES/hook/versions" "$RES/hook/gadget" "$RES/tools"
