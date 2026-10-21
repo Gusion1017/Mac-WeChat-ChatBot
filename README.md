@@ -100,6 +100,12 @@ WeChatAI.app (SwiftUI)
 
 ## 快速开始
 
+> **从 GitHub 下载 ZIP？**
+> - **普通用户**：请下载 **Releases** 里的 `WeChat-AI-<版本>.zip`（已编译 App，免 Xcode）；
+>   解压后右键打开，首次向导会安装 Hook。完整步骤见 [安装与启动](docs/install.md)。
+> - **只有源码 ZIP**：需要 Xcode 27，按本节自行构建；源码包**不含**已编译 App、
+>   `bridge/onebot` 与 `FridaGadget.dylib`。
+
 **环境要求**：Apple Silicon、macOS 26+、Xcode 27（含命令行工具）。
 Go 1.25 与 Frida Gadget 17.8.0 由脚本按固定版本下载并校验，无需预装。
 

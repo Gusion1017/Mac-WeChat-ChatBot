@@ -7,6 +7,7 @@
 
 | 文档 | 内容 | 主要读者 | 类型 |
 | --- | --- | --- | --- |
+| [`install.md`](install.md) | **安装与启动**：Releases App / 源码 ZIP 两种方式、Gatekeeper、菜单栏、首次向导与发布打包 | 普通用户 / 发布者 | 操作手册 |
 | [`development.md`](development.md) | **开发手册**：环境、仓库地图、构建、测试、调试、常见任务 Recipe、发布 | 全部开发者 / AI 代理 | 操作手册 |
 | [`architecture.md`](architecture.md) | 总体架构、目录与写入边界、OneBot 桥接契约 | 全部 | 现行契约 |
 | [`core-services.md`](core-services.md) | Swift 核心服务：AppStore、AI/OneBot/记忆/触发判定/调度、防睡眠、并发与错误处理 | swift-core / swift-ui | 现行契约 |
@@ -42,6 +43,7 @@
 ## 快速导航
 
 - 想跑起来：根目录 [`README.md`](../README.md) 的「快速开始」。
+- 从 GitHub ZIP 安装 / 给普通用户发布：先看 [`install.md`](install.md)。
 - 第一次接手 / 想改代码：[`development.md`](development.md)（文件地图 + 常见任务 Recipe + 排障）。
 - 用 AI 代理开发：[`AGENTS.md`](../AGENTS.md)。
 - 想安装到主目录：`bash scripts/build_app.sh && bash scripts/install_app.sh`（默认 `~/Applications`）。

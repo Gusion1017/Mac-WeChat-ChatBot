@@ -39,9 +39,10 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   `MemoryStore.repairSelfRoutedMessages` 一次性修复历史误路由。
 - **bridge**：`incoming.go` 入站事件归一化、`r3seed.go` 发送句柄按微信 PID 持久化；
   新增 `incoming_msg_test.go`、`incoming_normalize_test.go`、`MessageRoutingTests`。
-- **文档**：新增 `docs/development.md`（开发手册）、`AGENTS.md`（AI 代理指南）、
-  `docs/performance.md`、`docs/hook-contact-directory.md`、本变更日志；新增
-  `scripts/check.sh`、`scripts/check_docs.py`、`scripts/sync_hook_script.sh`、根 `Makefile`。
+- **文档**：新增 `docs/development.md`（开发手册）、`docs/install.md`（安装与启动）、
+  `AGENTS.md`（AI 代理指南）、`docs/performance.md`、`docs/hook-contact-directory.md`、
+  本变更日志；新增 `scripts/check.sh`、`scripts/check_docs.py`、
+  `scripts/sync_hook_script.sh`、根 `Makefile`。
 
 ### 变更
 
