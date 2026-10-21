@@ -4,6 +4,9 @@
 # 文本文件按 LF 规范化（仓库内统一为 LF）
 * text=auto eol=lf
 
+# 本地化字符串
+*.strings text eol=lf
+
 # Shell 与构建入口
 *.sh text eol=lf
 Makefile text eol=lf linguist-language=Makefile

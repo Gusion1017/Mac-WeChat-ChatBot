@@ -32,7 +32,8 @@
    或在「系统设置 → 隐私与安全性」里选择“仍要打开”。
 4. 这是一个**菜单栏 App**（默认不显示 Dock 图标）：启动后看屏幕顶部菜单栏的图标，
    不是 Dock。
-5. 首次启动向导：检测微信 → 备份并安装 Gadget → 配置 AI → 启动机器人。
+5. 首次启动向导（右上角可切换 **语言 / Language**：跟随系统 / 简体中文 / English）：
+   检测微信 → 备份并安装 Gadget → 配置 AI → 启动机器人。
    - 安装 Gadget 前需要完全退出微信；
    - 会完整备份官方 App，可在设置里一键还原；
    - AI Key 存在 macOS Keychain，不写入 `config.json`。
@@ -82,7 +83,7 @@ bash scripts/package_release.sh
 
 ```bash
 bash scripts/build_app.sh
-ditto -c -k --keepParent "dist/WeChat AI.app" "dist/WeChat-AI-1.0.0.zip"
+ditto -c -k --norsrc --keepParent "dist/WeChat AI.app" "dist/WeChat-AI-1.0.0.zip"
 shasum -a 256 "dist/WeChat-AI-1.0.0.zip"
 ```
 

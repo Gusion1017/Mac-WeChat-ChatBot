@@ -51,6 +51,8 @@
 - **多 AI 通道**：DeepSeek 默认，OpenAI / Ollama / 任意 OpenAI 兼容端点
 - **图片 / 语音 / 表情 / 文件**：文本 / 表情 / 群 @ 已验证；图片 / 文件下载 hook 在 4.1.12 暂缺（见验收报告）
 - **定时主动消息**、**实时会话看板**、**运行日志**
+- **中 / 英双语界面**：首次向导右上角或「设置 → 通用 → 界面语言」可切换
+  跟随系统 / 简体中文 / English，切换即时生效
 - **原生苹果风格 UI**：Liquid Glass、SF Symbols、浅 / 深色、键盘快捷键、菜单栏；
   关闭 Dock 图标后仍可从菜单栏恢复窗口；同页重复开关 / 设置已收敛为单一入口；
   再次点击当前会话行或侧边栏「会话」可收起聊天详情
@@ -155,7 +157,7 @@ ChatBot/
 │   ├── Package.swift        平台 macOS 26 / Swift 6.2
 │   ├── Sources/WeChatBot/   Models / Core / Services / DesignSystem / Views
 │   ├── Tests/WeChatAITests/ 126 项单元测试
-│   └── Packaging/Info.plist 打包模板
+│   └── Packaging/            打包模板 / Info.plist / en.lproj、zh-Hans.lproj
 ├── bridge/                  OneBot Go 桥接（GPL-3.0 衍生，含 proto/ 协议）
 │   └── NOTICE               上游来源与本项目修改/新增文件清单
 ├── hook/                    Frida 注入脚本
@@ -235,6 +237,13 @@ bash scripts/clean.sh --yes --all          # 额外删除 Frida Gadget（需重�
 
 清理只删除可再生文件，不触碰源码、`hook/versions/`、`assets/`、`docs/` 与 `_research/`，
 也不影响已安装到 `~/Applications` 的 App；重建见[快速开始](#快速开始)。
+
+构建可上传 GitHub Releases 的 App 压缩包（含 SHA256，需先构建 bridge 与 Gadget）：
+
+```bash
+bash scripts/package_release.sh      # 或 make release
+# 产物：dist/WeChat-AI-<version>.zip / .sha256
+```
 
 导出**仅含 Git 跟踪文件**的源码包（自动排除构建产物、日志、Gadget 与研究数据）：
 

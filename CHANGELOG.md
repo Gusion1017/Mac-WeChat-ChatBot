@@ -12,6 +12,9 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   bridge 暴露 OneBot `get_contact_directory`，App 用真实昵称/群名替换 wxid 标题，
   并在群成员缓存未命中时回退通讯录昵称。详见
   [`docs/hook-contact-directory.md`](docs/hook-contact-directory.md)。
+- **中 / 英双语界面**：首次向导右上角与「设置 → 通用 → 界面语言」可切换
+  跟随系统 / 简体中文 / English；内建 `en.lproj/Localizable.strings`，静态 `Text`
+  与 `L()` 组件/枚举标签均覆盖，切换即时生效。
 - **稳定性与崩溃取证**：`CrashReporter`（未捕获异常报告、会话面包屑、主线程看门狗）、
   `AppKitLayoutGuard`（显示周期断言安全阀），详见 `docs/performance.md`。
 - **回复进度倒计时**：`ReplyProgressBar`，会话详情头部、输入区与会话行同步显示
