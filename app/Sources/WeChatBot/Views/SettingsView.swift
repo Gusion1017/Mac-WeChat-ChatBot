@@ -714,7 +714,7 @@ struct SettingsView: View {
                     SettingsDivider()
                     SettingsRow(
                         title: "R3 原生发送",
-                        subtitle: "微信 4.1.15.55 专用（构造 newsendmsg task + slot13 提交）。首次使用前需在本机微信手动发一条消息以捕获发送句柄；排队消息会在拿到句柄后自动重发。",
+                        subtitle: "微信 4.1.15.55 专用原生文本发送。首次使用前需在本机微信手动发一条消息以捕获发送句柄；排队消息会在拿到句柄后自动重发。",
                         symbol: "paperplane",
                         tint: .secondary
                     ) {
@@ -994,67 +994,67 @@ struct SettingsView: View {
 
             SettingsSection(
                 title: "自研研究与实现",
-                footer: "Hook 地址移植、4.1.15 收发适配、R3 原生发送、SQLCipher4 通讯录解密与真机验证均为本项目自研；上游仅提供基线脚本、地址查找工具与 OneBot 协议实现。"
+                footer: "Hook 版本适配、4.1.15 收发、原生发送与通讯录读取均为本项目自研；上游仅提供基线脚本、地址查找工具与 OneBot 协议实现。具体地址、结构与密钥细节不在界面展开。"
             ) {
                 researchRow(
-                    "微信 4.1.15.55（270135）地址移植",
-                    "addrfind 两段跳（4.1.12 → 4.1.13 → 4.1.15）+ vtable/RTTI 交叉验证；18/18 地址（req2buf、buf2Resp、上传/下载链），全部落盘可复现",
+                    "微信版本适配",
+                    "按微信版本维护 Hook 地址表与开关；只在真机验证文本收发后标记为可用。",
                     symbol: "point.3.connected.trianglepath.dotted",
                     tint: Theme.info
                 )
                 SettingsDivider()
                 researchRow(
-                    "req2buf 双布局 ABI 适配",
-                    "4.1.15 重编译：栈帧 0x1c0、taskId/容器寄存器重排、编码 ABI 变化、AutoBuffer 预写、found 路径 erase/delete；旧版本（≤4.1.12）零回归",
+                    "4.1.15 收发适配",
+                    "入站使用只读消息钩子；出站走原生发送（默认开启，可关闭），与 4.1.12 legacy 互相隔离。",
                     symbol: "arrow.left.arrow.right",
                     tint: Theme.warning
                 )
                 SettingsDivider()
                 researchRow(
-                    "R3 原生发送（4.1.15 自研路线）",
-                    "解析 service→classA、用真 ctor 0x30C2DE4 构造 newsendmsg task、fake B1 serializer 注入 protobuf、运行时 __clone() 真实 hand-off 闭包、slot13 原生提交；2026-10-20 真机文本私聊已送达手机",
+                    "R3 原生文本发送",
+                    "复用本机真实发送上下文提交文本；无句柄时排队，捕获后自动重发；仅文本。",
                     symbol: "paperplane",
                     tint: Theme.accent
                 )
                 SettingsDivider()
                 researchRow(
-                    "发送句柄（种子）捕获与排队",
-                    "slot13 只读 onEnter 捕获种子闭包、发送前 detach 防 JS 重入；无句柄时排队（≤8 条 / 10 分钟），句柄就绪后自动重发",
+                    "发送句柄与排队",
+                    "首次使用或微信重启后需手动发一条消息；句柄按微信进程缓存，App/bridge 重启自动恢复。",
                     symbol: "tray.and.arrow.down",
                     tint: Theme.violet
                 )
                 SettingsDivider()
                 researchRow(
-                    "接收适配：Message finalizer",
-                    "以 0x4cbc3ac 通用终结器替代 buf2Resp，解析 libc++ std::string 与消息字段，接收/发送链路解耦",
+                    "接收适配",
+                    "只读消息钩子替代旧回调；接收与发送链路解耦，发送失败不影响接收。",
                     symbol: "envelope.open",
                     tint: Theme.success
                 )
                 SettingsDivider()
                 researchRow(
-                    "通讯录真实昵称/群名与群成员群昵称（SQLCipher4 进程内解密）",
-                    "入站事件只有 wxid，昵称/群名/群昵称在加密通讯录里。4.1+ 进程内不缓存 raw key：Hook 系统 CommonCrypto 的 CCCryptorCreate 捕获 32B AES key 并用页 1 试解密校验，同时捕获登录期 CCKeyDerivationPBKDF（SHA512 × 256000 轮）；按 4096B 页、IV 16B / MAC 64B 格式解密 contact.db，按 salt/checksum 合并 WAL 当前代帧，进程内 SqliteDatabase 查询后立即删除临时明文库；再解析 chat_room.ext_buffer protobuf 取群成员群昵称（群聊优先于通讯录昵称）。真机 0.06s 返回 20+ 位联系人、群名与 9 名群成员，会话标题落库为真实昵称/群名",
+                    "通讯录昵称 / 群名",
+                    "本机只读读取通讯录，补全会话标题与群昵称；读不到时回退兜底名，不阻塞消息。",
                     symbol: "person.text.rectangle",
                     tint: Theme.info
                 )
                 SettingsDivider()
                 researchRow(
-                    "通讯录密钥捕获与降级",
-                    "密钥只存在于 Hook 内存与 0600 的 db-keys.json：bridge 启动时回灌、WS 回包剥离 keys；未拿到 key 时目录请求按 60s 重试并静默降级为可读兜底名，不阻塞收发；在微信里打开一次通讯录/聊天即可触发页读捕获",
+                    "通讯录密钥处理",
+                    "读取所需密钥只在本机内存与受限缓存中，不写日志、不下发 App；仅用于自己的账号。",
                     symbol: "key.horizontal",
                     tint: Theme.violet
                 )
                 SettingsDivider()
                 researchRow(
-                    "安全边界与复盘方法",
-                    "拒绝伪造 map 节点（C2 已证伪）、不在 owl coroutine 上执行 JS、不做 mid-function PC 跳转；崩溃报告/canary 复盘 + 只读真机探针 + 离线渲染/逻辑测试",
+                    "安全边界",
+                    "只读探针、不伪造底层对象；发送由设置开启，可随时关闭；真机证据只留本机。",
                     symbol: "shield.lefthalf.filled",
                     tint: .secondary
                 )
                 SettingsDivider()
                 researchRow(
-                    "分析工具链（自建/复用）",
-                    "Capstone 反汇编、addrfind 地址移植、pointer_owner 解 chained fixups、frida-python 只读探针；SQLCipher 页格式/WAL 校验和与 CommonCrypto Hook 探针；研究证据保留在 _research/（地址/反汇编/崩溃复盘/真机日志）",
+                    "分析工具链",
+                    "反汇编、地址定位与只读真机探针；研究证据只保存在本地，不随仓库发布。",
                     symbol: "wrench.adjustable",
                     tint: Theme.info
                 )

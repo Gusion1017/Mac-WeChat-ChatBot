@@ -533,9 +533,9 @@ final class RuntimeCoordinator {
 
     // MARK: Start / stop
 
-    /// 4.1.15.55 使用 R3 原生发送（构造 newsendmsg task + slot13 提交）；
+    /// 4.1.15.55 使用 R3 原生文本发送（由 App 设置开启）；
     /// 4.1.12 及更早版本保持 legacy 发送路径，不做任何覆盖。
-    /// 首次使用 R3 前需要在本机微信手动发一条消息以捕获 hand-off 闭包（种子）。
+    /// 首次使用 R3 前需要在本机微信手动发一条消息以捕获发送句柄。
     private func nativeSendConfigOverrides() async -> [String: String] {
         let path = store.settings.hook.wechatPath
         let installation = await Task.detached(priority: .userInitiated) {

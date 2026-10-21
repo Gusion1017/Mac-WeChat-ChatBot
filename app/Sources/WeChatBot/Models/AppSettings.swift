@@ -153,8 +153,8 @@ struct HookSettings: Codable, Hashable {
     var versionConfigPath: String = ""
     var lastBackupPath: String = ""
     var didInstallGadget: Bool = false
-    /// 4.1.15.55 使用 R3 原生发送（构造 newsendmsg task + slot13 提交）。
-    /// 首次使用前需在本机微信手动发送一条消息以捕获 hand-off 闭包（种子）。
+    /// 4.1.15.55 使用 R3 原生文本发送（由 App 设置开启）。
+    /// 首次使用前需在本机微信手动发送一条消息以捕获发送句柄。
     var enableNativeSend: Bool = true
 
     private enum CodingKeys: String, CodingKey {
