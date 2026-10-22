@@ -56,8 +56,8 @@ WeChatAI.app (SwiftUI)          bridge/onebot (Go)              WeChat.app
 
 ### 快速开始
 
-- **普通用户**：下载 [`WeChat-AI-1.0.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.0.0/WeChat-AI-1.0.0.zip)
-  （63 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.0.0/WeChat-AI-1.0.0.zip.sha256)），
+- **普通用户**：下载 [`WeChat-AI-1.1.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.1.0/WeChat-AI-1.1.0.zip)
+  （63 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.1.0/WeChat-AI-1.1.0.zip.sha256)），
   解压后**右键 → 打开**；首启向导会安装 Hook。历史版本见 [Releases](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases)，
   步骤详见 [`docs/install.md`](docs/install.md)。
 - **从源码构建**（需 Xcode 27）：
@@ -176,8 +176,8 @@ Contracts in [`docs/architecture.md`](docs/architecture.md); document index in
 ### Quick Start
 
 - **Regular users**: download
-  [`WeChat-AI-1.0.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.0.0/WeChat-AI-1.0.0.zip)
-  (63 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.0.0/WeChat-AI-1.0.0.zip.sha256)), unzip and
+  [`WeChat-AI-1.1.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.1.0/WeChat-AI-1.1.0.zip)
+  (63 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.1.0/WeChat-AI-1.1.0.zip.sha256)), unzip and
   **right-click → Open**; the first-run wizard installs the hook. Older versions are on
   [Releases](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases); details in [`docs/install.md`](docs/install.md).
 - **Build from source** (Xcode 27 required):

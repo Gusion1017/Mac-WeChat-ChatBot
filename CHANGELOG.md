@@ -8,17 +8,6 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ### 新增
 
-- **微信 4.2.0.5 (270341) 适配**：新增 `hook/versions/4_2_0_5_mac.json`；App 的 R3 原生发送
-  版本门禁同时接受 4.2.0.5 (270341) 与历史 4.1.15.55 (270135)，并按版本生成
-  `hook-4.2.0.5-270341.json` 运行期配置；安装/管理脚本默认支持版本更新为 4.2.0.5，
-  历史 4.1.12.53 / 4.1.15.55 版本文件与说明保留；README、安装/架构/UI 文档与中英界面文案同步。
-  2026-10-22 在 4.2.0.5 (270341) 完成真机验证：Gadget 注入 + ad-hoc 重签（保留 sandbox
-  entitlements）后微信正常启动、gadget 27042 监听；私聊与自消息入站字段正确
-  （`is_self` / `target_id`）；通讯录解密读取真实昵称/群名/群成员；R3 文本发送真机送达
-  （手动发消息捕获 seed、bridge 重启后从 `r3-seed.json` 恢复 seed 再次送达），微信全程存活。
-  版本文件已按真机验证结果修正并生效。群聊 @ / 拍一拍沿用既有逻辑，本轮**未单独复测**；
-  媒体下载维持自 4.1.15 起的已知缺失（4.2.0.5 hook 日志中
-  downloadFile/downloadImag 仍 skipped，non-fatal）。
 - **通讯录真实昵称 / 群名**：hook 在本机**只读**读取通讯录后返回联系人目录，
   bridge 暴露 OneBot `get_contact_directory`，App 用真实昵称/群名替换 wxid 标题，
   并在群成员缓存未命中时回退通讯录昵称（契约见 `docs/architecture.md` §3）。
@@ -137,6 +126,22 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   密钥派生或发送任务构造，只保留行为、开关与安全边界。
 - 新增 `.gitignore` 与文档层面的隐私检查（真实 wxid / 聊天记录 / 截图 / Key 不入库）。
 
+## [1.1.0] — 2026-10-22
+
+### 新增
+
+- **微信 4.2.0.5 (270341) 适配**：新增 `hook/versions/4_2_0_5_mac.json`；App 的 R3 原生发送
+  版本门禁同时接受 4.2.0.5 (270341) 与历史 4.1.15.55 (270135)，并按版本生成
+  `hook-4.2.0.5-270341.json` 运行期配置；安装/管理脚本默认支持版本更新为 4.2.0.5，
+  历史 4.1.12.53 / 4.1.15.55 版本文件与说明保留；README、安装/架构/UI 文档与中英界面文案同步。
+  2026-10-22 在 4.2.0.5 (270341) 完成真机验证：Gadget 注入 + ad-hoc 重签（保留 sandbox
+  entitlements）后微信正常启动、gadget 27042 监听；私聊与自消息入站字段正确
+  （`is_self` / `target_id`）；通讯录解密读取真实昵称/群名/群成员；R3 文本发送真机送达
+  （手动发消息捕获 seed、bridge 重启后从 `r3-seed.json` 恢复 seed 再次送达），微信全程存活。
+  版本文件已按真机验证结果修正并生效。群聊 @ / 拍一拍沿用既有逻辑，本轮**未单独复测**；
+  媒体下载维持自 4.1.15 起的已知缺失（4.2.0.5 hook 日志中
+  downloadFile/downloadImag 仍 skipped，non-fatal）。
+
 ## [1.0.0] — 2026-10-20
 
 ### 新增
@@ -158,5 +163,6 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.1.0...HEAD
 [1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.0.0
+[1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.1.0
