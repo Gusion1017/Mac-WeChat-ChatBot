@@ -300,6 +300,7 @@ final class RuntimeCoordinator {
         await repairSelfRoutingIfNeeded()
         await repairMisroutedConversationsIfNeeded()
         await repairConversationTitlesIfNeeded()
+        await repairAppmsgTextsIfNeeded()
 
         do {
             store.conversations = try await memory.fetchConversations(limit: 300)
@@ -399,6 +400,15 @@ final class RuntimeCoordinator {
     private func repairConversationTitlesIfNeeded() async {
         guard let count = try? await memory.repairPlaceholderConversationTitles(), count > 0 else { return }
         log(.info, "Database", "已清理 \(count) 个会话的 ID 标题，改为可读名称")
+    }
+
+    /// 修复旧 hook 把引用回复 / 链接 / 文件等 appmsg 写成 `[链接/文件]` 的历史消息。
+    /// 与实时事件的归一化共用 `WeChatAppmsg` 解析器；幂等，解析不出的消息保持原样。
+    private func repairAppmsgTextsIfNeeded() async {
+        guard let result = try? await memory.repairAppmsgMessageTexts(),
+              result.didChange else { return }
+        log(.info, "Database", "已还原 \(result.repairedMessages) 条 appmsg 消息文本"
+            + "（引用 / 链接 / 文件等，影响 \(result.affectedConversationIDs.count) 个会话）")
     }
 
     /// 采纳 bridge `get_login_info` 返回的权威账号 wxid。

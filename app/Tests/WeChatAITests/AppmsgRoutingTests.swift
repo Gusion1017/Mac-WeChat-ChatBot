@@ -1,0 +1,338 @@
+import XCTest
+@testable import WeChatAI
+
+/// 旧 hook 把「拍一拍」以外的 appmsg（引用回复 / 链接 / 文件 / 表情 / 聊天记录 /
+/// 转账 / 视频号 …）统一写成 `[链接/文件]`，引用正文与被引用原文因此对 UI、规则引擎
+/// 和 AI 都不可见。这里覆盖两条修复路径：
+///
+/// 1. 实时事件：`OneBotEventParser` 用 `WeChatAppmsg` 从 `raw_message` 还原文本；
+/// 2. 历史消息：`MemoryStore.repairAppmsgMessageTexts()` 幂等重算并刷新会话预览。
+///
+/// 同时守住不回归的边界：拍一拍、普通文本、`at` 段、无法解析的占位都不动。
+final class AppmsgRoutingTests: XCTestCase {
+    // MARK: - 样本（虚构昵称/内容，避免把真实聊天记录带进仓库）
+
+    private enum Sample {
+        /// appmsg type=57：`<title>` 是回复正文，`<refermsg>` 是被引用原文。
+        static let quoteXML = #"""
+        <?xml version="1.0"?>
+        <msg>
+        	<appmsg appid="" sdkver="0">
+        		<title>火锅局改到明晚吧</title>
+        		<type>57</type>
+        		<refermsg>
+        			<type>1</type>
+        			<svrid>1000000000000000001</svrid>
+        			<fromusr>123@chatroom</fromusr>
+        			<chatusr>wxid_zhangsan</chatusr>
+        			<displayname>张三</displayname>
+        			<content>
+        明天晚上七点老地方吃火锅</content>
+        			<createtime>1760000000</createtime>
+        		</refermsg>
+        	</appmsg>
+        	<fromusername>wxid_lisi</fromusername>
+        	<scene>0</scene>
+        </msg>
+        """#
+
+        /// appmsg type=5：链接卡片。
+        static let linkXML = #"""
+        <?xml version="1.0"?>
+        <msg>
+        	<appmsg appid="wx_example" sdkver="0">
+        		<title>一篇值得一读的文章</title>
+        		<des>示例摘要</des>
+        		<action>view</action>
+        		<type>5</type>
+        		<url>https://example.com/article</url>
+        	</appmsg>
+        	<fromusername>wxid_zhangsan</fromusername>
+        </msg>
+        """#
+
+        /// appmsg type=62：拍一拍（hook 会先把 title 写进消息文本）。
+        static let patXML = #"""
+        <msg><appmsg><title>&quot;小明&quot; 拍了拍 &quot;测试机器人&quot;</title><type>62</type><patinfo><fromusername>wxid_zhangsan</fromusername><chatusername>123@chatroom</chatusername><pattedusername>wxid_bot</pattedusername></patinfo></appmsg></msg>
+        """#
+    }
+
+    private func makeEvent(
+        text: String,
+        rawMessage: String,
+        msgType: Int = 49,
+        groupID: String = "123@chatroom",
+        sender: String = "wxid_lisi",
+        extraSegments: [[String: Any]] = []
+    ) -> OneBotEvent? {
+        var raw: [String: Any] = [
+            "self_id": "wxid_bot",
+            "user_id": sender,
+            "sender": ["user_id": sender, "nickname": "李四"],
+            "time": 1_760_000_000.0,
+            "message_id": "m-\(UUID().uuidString)",
+            "message": [["type": "text", "data": ["text": text]]] + extraSegments,
+            "raw_message": rawMessage,
+            "message_type": groupID.isEmpty ? "private" : "group",
+            "msg_type": msgType
+        ]
+        if !groupID.isEmpty { raw["group_id"] = groupID }
+        return OneBotEventParser.parseEvent(raw, rawText: nil)
+    }
+
+    /// 构造引用 appmsg XML；`reply` 为空表示没有回复正文。
+    private func quoteXML(reply: String, quoted: String) -> String {
+        var body = ""
+        if !reply.isEmpty { body += "<title>\(reply)</title>" }
+        body += "<type>57</type><refermsg><type>1</type>"
+        body += "<displayname>张三</displayname><content>\(quoted)</content></refermsg>"
+        return "<msg><appmsg appid=\"\" sdkver=\"0\">\(body)</appmsg></msg>"
+    }
+
+    /// 用指定触发方式在群聊里评估一条文本（冷却/限流关闭），便于对照触发语义。
+    private func evaluateGroup(
+        _ text: String,
+        triggers: [TriggerMode],
+        keywords: [String],
+        rawJSON: String? = nil
+    ) -> RuleEvaluation {
+        var settings = AppSettings.default
+        settings.bot.groupTriggers = triggers
+        settings.bot.keywords = keywords
+        settings.bot.cooldownSeconds = 0
+        settings.bot.maxRepliesPerMinute = 0
+        let conversation = Conversation(id: "123@chatroom", kind: .group, title: "测试群")
+        let message = ChatMessage(
+            id: "m-\(UUID().uuidString)",
+            conversationID: conversation.id,
+            senderID: "wxid_lisi",
+            senderName: "李四",
+            direction: .incoming,
+            text: text,
+            timestamp: Date(),
+            rawJSON: rawJSON
+        )
+        return RuleEngine().evaluate(RuleEngine.Context(
+            conversation: conversation, message: message, settings: settings, selfID: "wxid_bot"
+        ))
+    }
+
+    // MARK: - 实时事件归一化
+
+    func testParserRestoresQuotedReplyText() throws {
+        let event = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: Sample.quoteXML))
+        XCTAssertEqual(
+            event.plainText,
+            "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅"
+        )
+        XCTAssertFalse(event.plainText.contains(WeChatAppmsg.placeholderText))
+        XCTAssertEqual(event.primaryMessageKind, .text)
+    }
+
+    func testParserRestoresLinkCardText() throws {
+        let event = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: Sample.linkXML))
+        XCTAssertEqual(event.plainText, "[链接] 一篇值得一读的文章")
+    }
+
+    /// hook 的拍一拍启发式只看正文是否含「拍了拍」；引用回复里出现该词时
+    /// 会把 `<title>`（回复正文）当拍一拍标题写进 text，引用上下文因此丢失。
+    func testParserRestoresQuoteWhenHookMistookItForPatTitle() throws {
+        let event = try XCTUnwrap(makeEvent(text: "火锅局改到明晚吧", rawMessage: Sample.quoteXML))
+        XCTAssertEqual(
+            event.plainText,
+            "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅"
+        )
+    }
+
+    func testParserKeepsPatMessageTextUntouched() throws {
+        let text = "\"小明\" 拍了拍 \"测试机器人\""
+        let event = try XCTUnwrap(makeEvent(text: text, rawMessage: Sample.patXML))
+        XCTAssertEqual(event.plainText, text)
+    }
+
+    func testParserNormalizesLegacyRawXMLTextSegment() throws {
+        // 4.1.12 legacy 桥接：appmsg 正文就是原始 XML（没有 hook 的占位文本）。
+        let event = try XCTUnwrap(makeEvent(text: Sample.quoteXML, rawMessage: Sample.quoteXML))
+        XCTAssertEqual(event.plainText, "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅")
+
+        // 非 appmsg 的原始 XML（图片/语音）不能用 appmsg 解析覆盖，保持原样。
+        let imageXML = #"<msg><img aeskey="fake-key" /></msg>"#
+        let untouched = try XCTUnwrap(makeEvent(text: imageXML, rawMessage: imageXML, msgType: 3))
+        XCTAssertEqual(untouched.plainText, imageXML)
+    }
+
+    func testParserLeavesOrdinaryMessagesUntouched() throws {
+        let text = try XCTUnwrap(makeEvent(text: "你好", rawMessage: "你好", msgType: 1))
+        XCTAssertEqual(text.plainText, "你好")
+
+        // 有占位文本但 raw_message 不是 appmsg：保守保留原文本，不能丢消息。
+        let placeholder = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: "不是 XML"))
+        XCTAssertEqual(placeholder.plainText, WeChatAppmsg.placeholderText)
+    }
+
+    func testParserKeepsStructuredAtSegments() throws {
+        let event = try XCTUnwrap(makeEvent(
+            text: WeChatAppmsg.placeholderText,
+            rawMessage: Sample.quoteXML,
+            extraSegments: [["type": "at", "data": ["qq": "wxid_bot"]]]
+        ))
+        XCTAssertEqual(event.mentions, ["wxid_bot"])
+        XCTAssertTrue(event.plainText.hasPrefix("火锅局改到明晚吧"))
+        XCTAssertTrue(event.plainText.contains("@wxid_bot"))
+    }
+
+    // MARK: - 触发回归：引用正文里的关键词现在可见
+
+    func testGroupKeywordMatchesQuotedReplyBody() throws {
+        let event = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: Sample.quoteXML))
+
+        // 修复后：事件文本包含引用正文里的「火锅」，关键词触发成立。
+        let evaluation = evaluateGroup(event.plainText, triggers: [.keyword], keywords: ["火锅"])
+        XCTAssertTrue(evaluation.shouldReply)
+        XCTAssertEqual(evaluation.triggerLabel, "群聊·关键词")
+        // 旧行为（占位文本）不会触发——这就是本次修复的用户可见差异。
+        XCTAssertFalse(
+            evaluateGroup(WeChatAppmsg.placeholderText, triggers: [.keyword], keywords: ["火锅"]).shouldReply
+        )
+    }
+
+    /// 被引用原文只作为 AI 上下文，不能让「引用一条含关键词的旧消息」再次触发。
+    func testGroupKeywordIgnoresQuotedOriginal() throws {
+        let xml = quoteXML(reply: "好的", quoted: "明天晚上要不要一起吃火锅")
+        let event = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: xml))
+        XCTAssertTrue(event.plainText.contains("火锅"), "上下文仍应保留给 AI")
+        XCTAssertFalse(evaluateGroup(event.plainText, triggers: [.keyword], keywords: ["火锅"]).shouldReply)
+
+        // 回复正文自己带关键词时照常触发。
+        let bodyHit = quoteXML(reply: "火锅可以", quoted: "明晚见")
+        let bodyEvent = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: bodyHit))
+        XCTAssertTrue(evaluateGroup(bodyEvent.plainText, triggers: [.keyword], keywords: ["火锅"]).shouldReply)
+    }
+
+    /// 引用上下文里的 `@机器人` 不是真实 @（微信引用不产生 @ 提醒），不能触发。
+    func testGroupMentionIgnoresQuotedOriginal() throws {
+        let xml = quoteXML(reply: "哈哈", quoted: "@wxid_bot 你之前说的方案还能用吗")
+        let event = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: xml))
+        XCTAssertTrue(event.plainText.contains("@wxid_bot"), "上下文仍应保留给 AI")
+        XCTAssertFalse(evaluateGroup(event.plainText, triggers: [.mention], keywords: []).shouldReply)
+
+        // 真实结构化 at 段不受影响。
+        let realMention = try XCTUnwrap(makeEvent(
+            text: WeChatAppmsg.placeholderText,
+            rawMessage: Sample.quoteXML,
+            extraSegments: [["type": "at", "data": ["qq": "wxid_bot"]]]
+        ))
+        XCTAssertTrue(
+            evaluateGroup(realMention.plainText, triggers: [.mention], keywords: [],
+                          rawJSON: realMention.rawJSON).shouldReply
+        )
+    }
+
+    /// 没有回复正文的纯引用（只有被引用上下文）不参与关键词/ @ 触发。
+    func testQuoteWithoutReplyBodyNeverTriggersByQuotedContext() throws {
+        let xml = quoteXML(reply: "", quoted: "明天晚上吃火锅 @wxid_bot")
+        let event = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: xml))
+        XCTAssertFalse(evaluateGroup(event.plainText, triggers: [.keyword], keywords: ["火锅"]).shouldReply)
+        XCTAssertFalse(evaluateGroup(event.plainText, triggers: [.mention], keywords: []).shouldReply)
+    }
+
+    // MARK: - 历史消息修复
+
+    func testRepairAppmsgMessageTextsIsIdempotentAndRefreshesPreview() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechatai-appmsg-\(UUID().uuidString)", isDirectory: true)
+        let store = MemoryStore(databaseURL: directory.appendingPathComponent("chatbot.sqlite"))
+        try await store.open()
+        defer {
+            Task { await store.close() }
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let conversation = Conversation(id: "123@chatroom", kind: .group, title: "测试群")
+        try await store.upsertConversations([conversation])
+
+        let now = Date(timeIntervalSince1970: 1_760_000_000)
+        func rawEvent(text: String, rawMessage: String, at: String? = nil) -> String {
+            var segments: [[String: Any]] = [["type": "text", "data": ["text": text]]]
+            var object: [String: Any] = [
+                "self_id": "wxid_bot",
+                "user_id": "wxid_lisi",
+                "group_id": conversation.id,
+                "message_id": "m-\(UUID().uuidString)",
+                "message": segments,
+                "raw_message": rawMessage,
+                "message_type": "group",
+                "msg_type": 49
+            ]
+            if let at {
+                segments.append(["type": "at", "data": ["qq": at]])
+                object["message"] = segments
+                object["mentions"] = [at]
+            }
+            let data = try! JSONSerialization.data(withJSONObject: object)
+            return String(data: data, encoding: .utf8)!
+        }
+
+        func message(
+            id: String,
+            text: String,
+            rawJSON: String,
+            offset: TimeInterval
+        ) -> ChatMessage {
+            ChatMessage(
+                id: id,
+                conversationID: conversation.id,
+                senderID: "wxid_lisi",
+                senderName: "李四",
+                direction: .incoming,
+                text: text,
+                timestamp: now.addingTimeInterval(offset),
+                rawJSON: rawJSON
+            )
+        }
+
+        try await store.upsertMessages([
+            message(id: "m-link", text: WeChatAppmsg.placeholderText,
+                    rawJSON: rawEvent(text: WeChatAppmsg.placeholderText, rawMessage: Sample.linkXML),
+                    offset: 0),
+            message(id: "m-healthy", text: "普通消息", rawJSON: rawEvent(text: "普通消息", rawMessage: "普通消息"),
+                    offset: 10),
+            // 带结构化 at 段的历史文本是 `[链接/文件] @wxid_…`：只替换占位前缀、保留 at。
+            message(id: "m-at", text: "\(WeChatAppmsg.placeholderText) @wxid_zhangsan",
+                    rawJSON: rawEvent(text: WeChatAppmsg.placeholderText, rawMessage: Sample.quoteXML,
+                                      at: "wxid_zhangsan"),
+                    offset: 15),
+            message(id: "m-broken", text: WeChatAppmsg.placeholderText,
+                    rawJSON: #"{"raw_message":"不是 XML"}"#, offset: 20),
+            // 最新一条设为引用回复：修复后会话预览应刷新为可读文本。
+            message(id: "m-quote", text: WeChatAppmsg.placeholderText,
+                    rawJSON: rawEvent(text: WeChatAppmsg.placeholderText, rawMessage: Sample.quoteXML),
+                    offset: 30)
+        ])
+
+        let result = try await store.repairAppmsgMessageTexts()
+        XCTAssertTrue(result.didChange)
+        XCTAssertEqual(result.repairedMessages, 3)
+        XCTAssertEqual(result.affectedConversationIDs, [conversation.id])
+
+        let messages = try await store.fetchMessages(conversationID: conversation.id, limit: 10)
+        let byID = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
+        XCTAssertEqual(byID["m-link"]?.text, "[链接] 一篇值得一读的文章")
+        XCTAssertEqual(byID["m-quote"]?.text,
+                       "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅")
+        XCTAssertEqual(byID["m-at"]?.text,
+                       "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅 @wxid_zhangsan")
+        // 普通消息与解析不出的占位保持原样（幂等、保守）。
+        XCTAssertEqual(byID["m-healthy"]?.text, "普通消息")
+        XCTAssertEqual(byID["m-broken"]?.text, WeChatAppmsg.placeholderText)
+
+        let conversations = try await store.fetchConversations()
+        let preview = try XCTUnwrap(conversations.first?.lastMessagePreview)
+        XCTAssertEqual(preview, "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅")
+
+        // 再跑一次：没有可修复项，不能重复写库。
+        let second = try await store.repairAppmsgMessageTexts()
+        XCTAssertFalse(second.didChange)
+        XCTAssertEqual(second.repairedMessages, 0)
+    }
+}

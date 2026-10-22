@@ -758,7 +758,7 @@ enum OneBotEventParser {
         let messageType = string(raw["message_type"]) ?? (groupID == nil ? "private" : "group")
         let rawMessage = string(raw["raw_message"]) ?? string(raw["rawMessage"]) ?? ""
 
-        let segments = parseSegments(raw["message"])
+        var segments = normalizeAppmsgSegments(parseSegments(raw["message"]), rawMessage: rawMessage)
         // 群系统消息（如拍一拍 appmsg）可能把 group_id 同时写进 self_id/user_id，
         // 不能仅凭两者相等就判定为「自己发出」。
         var isSelf = !selfID.isEmpty && selfID == userID
@@ -807,6 +807,37 @@ enum OneBotEventParser {
                 ["image", "record", "face", "file", "video"].contains($0.type)
             } ?? OneBotSegment(type: "none"))
         )
+    }
+
+    /// 旧 hook 对「拍一拍」以外的 appmsg（引用回复 / 链接 / 文件 / 表情 / 聊天记录 /
+    /// 转账 / 视频号 …）统一写占位文本 `[链接/文件]`，引用回复的正文与被引用原文
+    /// 因此对 UI、规则引擎和 AI 都不可见。这里在事件入口用 App 侧解析器
+    /// （`WeChatAppmsg`）从 `raw_message` 还原本地展示文本。
+    ///
+    /// 只替换三种文本：
+    /// - hook 的笼统占位 `[链接/文件]`；
+    /// - hook 误把「正文含『拍了拍』的引用回复」当拍一拍时写入的 title——
+    ///   该 title 其实就是 appmsg `<title>`（引用正文），替换后补回引用上下文；
+    /// - 旧 bridge（4.1.12 legacy 出站路径）把 appmsg XML 原样当正文，这里一并还原。
+    ///
+    /// 拍一拍（appmsg type 62）的正文、`at` 段与媒体段一律不动，避免回归。
+    private static func normalizeAppmsgSegments(
+        _ segments: [OneBotSegment],
+        rawMessage: String
+    ) -> [OneBotSegment] {
+        guard let appmsg = WeChatAppmsg.parse(rawMessage), !appmsg.text.isEmpty else { return segments }
+        var replaced = false
+        return segments.map { segment in
+            guard !replaced, segment.type == "text" else { return segment }
+            let text = segment.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let isPlaceholder = text == WeChatAppmsg.placeholderText
+            let isHookPatTitle = !appmsg.isPat && !appmsg.title.isEmpty && text == appmsg.title
+            // 旧 bridge 的 appmsg 正文就是原始 XML（解析器已确保含 `<appmsg`）。
+            let isRawXMLText = text.hasPrefix("<") || text.hasPrefix("<?xml")
+            guard isPlaceholder || isHookPatTitle || isRawXMLText else { return segment }
+            replaced = true
+            return .text(appmsg.text)
+        }
     }
 
     static func parseSegments(_ value: Any?) -> [OneBotSegment] {

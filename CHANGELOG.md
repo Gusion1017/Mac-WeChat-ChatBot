@@ -66,7 +66,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   不再报 unbound variable）；`sync_hook_script.sh` 在 Linux 上回退 `sha256sum`，便于 CI 校验。
 - **发布准备**：清理构建产物、运行日志与 `.DS_Store`；新增发布前检查清单（见
   [`README.md`](README.md)「清理、打包与分享」）；文档中的测试数字统一为
-  **Swift 128 项 / Go 60 项**；`docs/README.md` 重新整理文档入口；
+  **Swift 164 项 / Go 60 项**；`docs/README.md` 重新整理文档入口；
   `bridge/NOTICE` 更新为实际修改/新增文件清单。
 - **发布打包**：新增 `scripts/package_release.sh`（构建 + 校验签名 + 生成
   `dist/WeChat-AI-<version>.zip` / `.sha256`）与 `make release`；
@@ -76,6 +76,20 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ### 修复
 
+- **引用消息被归为「链接/文件」（2026-10-22）**：微信引用回复是 appmsg
+  （`msg_type=49` + `<appmsg><type>57</type></appmsg>`），但 hook 只识别拍一拍，
+  其余 appmsg 一律写成 `[链接/文件]`——回复正文（`<title>`）与被引用原文
+  （`<refermsg>`）对 App、规则引擎与 AI 全部不可见（历史数据中有一批消息受影响，
+  其中引用回复占多数）。现在 App 在事件解析时用新增的 `WeChatAppmsg` 按 appmsg
+  `<type>` 还原可读文本：引用 → `回复正文` + 换行 + `[引用 发送者] 原文摘要`；
+  链接 5 / 文件 6 / 视频 4 / 表情 8 / 聊天记录 19 / 小程序 33·36 / 转账 2000 /
+  红包 2001 / 视频号 51 → `[类型] 标题`；拍一拍（62）与 `at`/媒体段保持原样。
+  旧 bridge（4.1.12 legacy 路径）原样透传的 appmsg XML 正文也一并还原。
+  历史消息由 `MemoryStore.repairAppmsgMessageTexts` 启动时幂等重算并刷新会话预览。
+  群聊触发判定只取回复正文（`RuleEngine.triggerText`），被引用原文仅作为 AI 上下文，
+  不会因引用旧的 @/关键词消息而重复唤醒；真实结构化 `at` 段不受影响。
+  新增 `WeChatXML`（共享 XML 工具，`PatMessage` 去重）、`WeChatAppmsgTests`、
+  `AppmsgRoutingTests`（实时替换、拍一拍不回归、历史修复幂等、群触发只看正文）。
 - **英文小字补全**：相对时间、星期、时长、状态标签、计数、错误前缀与图表说明统一
   经 `L()` / `Lf()` 输出；新增 175 条服务层状态/错误文案，并为计数、日期、错误等
   动态拼接增加格式回退，英文界面不再混杂中文小字。

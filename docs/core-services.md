@@ -171,6 +171,12 @@ RuntimeCoordinator.handle(event)
 - 事件模型：`OneBotEvent`（纯值类型）→ 运行时转 `Conversation`/`ChatMessage`；
   `at` 段与 `mentions` 收集 @ 目标，RuleEngine 优先精确匹配机器人 wxid；
   结构化 at 缺失时可用从历史事件学到的「群昵称」做文本 @ 兜底。
+- appmsg（`msg_type=49`）归一化（2026-10-22）：hook 对拍一拍以外的 appmsg 只写
+  `[链接/文件]`，`OneBotEventParser` 用 `WeChatAppmsg.parse`（`Services/WeChatAppmsg.swift`）
+  从 `raw_message` 还原展示文本——引用 57 → `回复正文` + 换行 +
+  `[引用 发送者] 原文摘要`；链接 5 / 文件 6 / 视频 4 / 表情 8 / 聊天记录 19 / 小程序 33·36 /
+  转账 2000 / 红包 2001 / 视频号 51 → `[类型] 标题`。只替换占位文本（以及 hook 误把引用
+  当拍一拍时写入的 title、旧 bridge 原样透传的 appmsg XML），拍一拍、`at` 段与媒体段保持原样。
 
 ### 5.3 AIClient
 
@@ -190,6 +196,10 @@ RuntimeCoordinator.handle(event)
 - ChatEngine 按 `AISettings.retryCount` 对可重试错误做 400ms 递增退避重试。
 
 ### 5.4 RuleEngine
+
+引用消息（2026-10-22）：触发判定只取回复正文（`RuleEngine.triggerText` 去掉
+`WeChatAppmsg` 生成的 `[引用 …]` 行）；被引用原文仍进入 AI 上下文，但不参与
+@ / 关键词 / 前缀匹配，避免「引用旧消息」重复唤醒。真实结构化 `at` 段不受影响。
 
 硬门槛顺序：
 
@@ -360,12 +370,12 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 `SleepPreventionTests.swift`（9）、`MessageRoutingTests.swift`（12）、
 `NativeSendConfigTests.swift`（5）、`ConversationNameTests.swift`（8）、`WorkingHoursStatusTests.swift`（5）、
 `ContactDirectoryTests.swift`（15）、`PatMessageTests.swift`（20）、`PatReplySettingsTests.swift`（7）、
-`HookSelfIDTests.swift`（4），共 128 项）：
+`HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（24）、`AppmsgRoutingTests.swift`（12），共 164 项）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 128 tests, with 0 failures（2026-10-22）
+# Executed 164 tests, with 0 failures（2026-10-22）
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
@@ -376,6 +386,8 @@ swift test --scratch-path .build-verify
 `accessCount` 权重强化与 `sourceCount` 对数增长、`baseWeight` 可调（范围收敛/持久化/
 核心记忆按权重排序与超额时的注入优先级）、旧库 v2→v4 迁移；
 防睡眠旧配置兼容/三档标签/决策表；OneBot 事件解析（群/@/私聊/非法帧）、
+appmsg 分类（引用 57 / 链接 5 / 文件 6 / 表情 8 / 聊天记录 19 / 转账 2000 / 视频号 51、
+嵌套引用与摘要截断）与实时/历史归一化（占位替换、拍一拍不回归、修复幂等、预览刷新）、
 RuleEngine 默认触发+黑名单+关键词冷却、Scheduler daily/once nextFireAt、
 ChatEngine 分段/角色合并/中英分词/流式总开关、SettingsPersistence 原子写/幂等/无明文密钥、
 AIClient endpoint/请求体/无 Key 字段、ProcessRunner 输出收集，
@@ -403,7 +415,7 @@ RuleEngine 白黑名单/@/关键词/冷却、Scheduler 各 repeat 的 nextFireAt
 ChatEngine 分段/角色合并/关键词分词。输出 `[selftest] PASS/FAIL/WARN` 与汇总退出码。
 
 历史 CLI 驱动实测：**63 passed / 0 failed / 0 warnings**；当前 `swift test` 为
-**128/128 通过**（见 8.1；2026-10-22 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
+**164/164 通过**（见 8.1；2026-10-22 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
 Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Keychain 保存/删除、
 `config.json` 无明文 Key。
 
@@ -435,6 +447,11 @@ Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Ke
   `@chatroom` 的伪群会话（例如旧 hook 把私聊拍一拍的 wxid 当群 ID）。
   只搬能由消息 `raw_json` 明确推导目标（真实群 ID 或对方 wxid）的消息，
   不确定则保留；搬完重算预览并删除空会话，幂等（2026-10-21）。
+- **appmsg 展示文本自愈**：启动时在其它修复之后跑 `MemoryStore.repairAppmsgMessageTexts()`：
+  只扫描文本以 `[链接/文件]` 开头且带 `raw_json` 的消息，按 `raw_message` 的 appmsg
+  `<type>` / `<title>` / `<refermsg>` 重算可读文本（引用＝正文 + `[引用 发送者] 原文摘要`），
+  批量更新并刷新受影响会话预览；占位前缀后的结构化 `at` 后缀保留，
+  解析不出的消息保持原样；幂等（2026-10-22）。
 - **历史回放不触发回复**：微信加载历史/补同步会把旧消息重新投递，App 仍入库供检索，
   但超过 120 秒的消息不再触发自动回复，也不会把会话预览/未读回退。
 - **白名单语义**：`effectiveWhitelist` / `effectiveBlacklist` 是“会话 ID 或用户 wxid”的统一名单；

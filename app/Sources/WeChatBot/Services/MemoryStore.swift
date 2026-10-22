@@ -39,6 +39,16 @@ struct MisroutedConversationRepairResult: Sendable, Equatable {
     var didChange: Bool { movedMessages > 0 || !removedConversationIDs.isEmpty || fixedKinds > 0 }
 }
 
+/// 历史 appmsg（引用/链接/文件/…）展示文本修复结果。
+struct AppmsgTextRepairResult: Sendable, Equatable {
+    /// 重算并更新了 text 的消息条数。
+    var repairedMessages: Int = 0
+    /// 预览被刷新的会话。
+    var affectedConversationIDs: [String] = []
+
+    var didChange: Bool { repairedMessages > 0 }
+}
+
 enum MemoryStoreError: LocalizedError {
     case openFailed(String)
     case sqlite(String)
@@ -848,6 +858,67 @@ actor MemoryStore {
             }
         }
         return top
+    }
+
+    // MARK: - appmsg 展示文本修复
+
+    /// 修复旧 hook 把「拍一拍以外」的 appmsg（引用回复 / 链接 / 文件 / 表情 /
+    /// 聊天记录 / 转账 / 视频号 …）统一写成 `[链接/文件]` 的历史消息。
+    ///
+    /// 规则：
+    /// - 只扫描文本**以 `[链接/文件]` 开头**且带 `raw_json` 的消息，健康消息一律不碰。
+    ///   带结构化 `at` 段的群消息入库文本是 `[链接/文件] @wxid_xxx`（`plainText`
+    ///   把 at 拼在文本后），这里保留 at 后缀、只替换占位前缀；
+    /// - 用与实时事件相同的 `WeChatAppmsg` 从 `raw_message` 重算展示文本，
+    ///   解析不出来（不是 appmsg / XML 损坏）的消息保持原样；
+    /// - 批量更新后重算受影响会话预览；幂等，可重复执行。
+    func repairAppmsgMessageTexts() throws -> AppmsgTextRepairResult {
+        try ensureOpen()
+        let placeholder = WeChatAppmsg.placeholderText
+        let select = try prepare("""
+        SELECT id, conversation_id, text, raw_json FROM messages
+        WHERE text LIKE ? AND raw_json IS NOT NULL;
+        """)
+        defer { sqlite3_finalize(select) }
+        // SQLite LIKE 里 `[` `]` 不是通配符，只有 `%` 需要拼在末尾。
+        try bind(select, 1, placeholder + "%")
+
+        var updates: [(messageID: String, conversationID: String, text: String)] = []
+        while sqlite3_step(select) == SQLITE_ROW {
+            let messageID = try text(select, 0)
+            let conversationID = try text(select, 1)
+            let currentText = try text(select, 2)
+            let rawJSON = optionalText(select, 3)
+            guard let appmsg = WeChatAppmsg.parse(eventJSON: rawJSON),
+                  !appmsg.text.isEmpty,
+                  appmsg.text != placeholder else { continue }
+            // 保留旧文本里占位符之后的内容（典型是 ` @wxid_xxx` 的 at 后缀）。
+            let suffix = currentText.hasPrefix(placeholder)
+                ? String(currentText.dropFirst(placeholder.count))
+                : ""
+            let repaired = appmsg.text + suffix
+            guard repaired != currentText else { continue }
+            updates.append((messageID, conversationID, repaired))
+        }
+        guard !updates.isEmpty else { return AppmsgTextRepairResult() }
+
+        let affected = Set(updates.map(\.conversationID))
+        try transaction {
+            let update = try prepare("UPDATE messages SET text = ? WHERE id = ?;")
+            defer { sqlite3_finalize(update) }
+            for item in updates {
+                sqlite3_reset(update)
+                sqlite3_clear_bindings(update)
+                try bind(update, 1, item.text)
+                try bind(update, 2, item.messageID)
+                try stepDone(update)
+            }
+            try refreshConversationPreviewRows(conversationIDs: affected)
+        }
+        return AppmsgTextRepairResult(
+            repairedMessages: updates.count,
+            affectedConversationIDs: affected.sorted()
+        )
     }
 
     /// 清理旧版本写入的裸 ID 标题（`wxid_*` / `*@chatroom` / `wxid==id` / 「群聊 <id>」）。

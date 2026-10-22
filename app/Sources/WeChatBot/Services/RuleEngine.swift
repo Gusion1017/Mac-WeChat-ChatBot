@@ -58,7 +58,9 @@ final class RuleEngine: @unchecked Sendable {
         let conversation = context.conversation
         let message = context.message
         let senderID = message.senderID
-        let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 触发判定只看「本条消息自己的正文」：引用消息的被引用原文只是上下文，
+        // 不能让「引用了一条 @过机器人 / 含关键词的旧消息」在群里重复触发（2026-10-22）。
+        let text = Self.triggerText(message.text)
 
         // 1. Hard gates -------------------------------------------------------
         if !conversation.aiEnabled {
@@ -108,6 +110,25 @@ final class RuleEngine: @unchecked Sendable {
             model: conversation.model,
             triggerLabel: defaults.label
         )
+    }
+
+    /// 触发判定用的正文：去掉 App 为引用消息追加的被引用上下文。
+    ///
+    /// `WeChatAppmsg` 的引用展示格式是 `回复正文\n[引用 发送者] 原文摘要`；
+    /// 回复正文为空时只剩 `[引用 …] 原文摘要`。被引用原文只作为 AI 上下文，
+    /// 不参与 @ / 关键词 / 前缀判定——否则「引用一条 @过机器人的旧消息再回一句
+    /// 哈哈」会再次唤醒机器人，而微信的引用本身并不产生 @ 提醒。
+    static func triggerText(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let range = trimmed.range(of: "\n[引用 ", options: .backwards) {
+            return String(trimmed[..<range.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // 没有回复正文的引用消息：整条都是被引用上下文，没有可触发的内容。
+        if trimmed.hasPrefix("[引用] ") || trimmed.hasPrefix("[引用 ") {
+            return ""
+        }
+        return trimmed
     }
 
     /// Records a successful reply so cooldown / per-minute caps apply to future messages.

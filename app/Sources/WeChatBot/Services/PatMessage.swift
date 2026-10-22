@@ -63,10 +63,10 @@ enum PatMessage {
                 return event(fromEventObject: object)
             }
             if let text = json as? String {
-                return event(fromXML: decodeEscapes(text))
+                return event(fromXML: WeChatXML.decodeEscapes(text))
             }
         }
-        return event(fromXML: decodeEscapes(trimmed))
+        return event(fromXML: WeChatXML.decodeEscapes(trimmed))
     }
 
     /// 规则层判定：这条拍一拍是否拍的是机器人。
@@ -167,7 +167,7 @@ enum PatMessage {
         var xmlFields = RawFields()
         var xmlIsPat = false
         if let xmlText {
-            let xml = decodeEscapes(xmlText)
+            let xml = WeChatXML.decodeEscapes(xmlText)
             xmlIsPat = looksLikePat(xml)
             if xmlIsPat {
                 xmlFields = parseXMLFields(xml)
@@ -236,33 +236,12 @@ enum PatMessage {
 
     private static func parseXMLFields(_ xml: String) -> RawFields {
         RawFields(
-            fromID: xmlField("fromusername", in: xml) ?? "",
-            chatID: xmlField("chatusername", in: xml) ?? "",
-            targetID: xmlField("pattedusername", in: xml) ?? "",
-            suffix: xmlField("patsuffix", in: xml),
-            template: xmlField("template", in: xml)
+            fromID: WeChatXML.field("fromusername", in: xml) ?? "",
+            chatID: WeChatXML.field("chatusername", in: xml) ?? "",
+            targetID: WeChatXML.field("pattedusername", in: xml) ?? "",
+            suffix: WeChatXML.field("patsuffix", in: xml),
+            template: WeChatXML.field("template", in: xml)
         )
-    }
-
-    private static func xmlField(_ tag: String, in xml: String) -> String? {
-        let pattern = "<\(tag)(?:\\s[^>]*)?>(.*?)</\(tag)>"
-        guard let regex = try? NSRegularExpression(
-            pattern: pattern,
-            options: [.caseInsensitive, .dotMatchesLineSeparators]
-        ) else { return nil }
-        let nsXML = xml as NSString
-        guard let match = regex.firstMatch(
-            in: xml,
-            range: NSRange(location: 0, length: nsXML.length)
-        ), match.numberOfRanges >= 2 else { return nil }
-
-        var value = nsXML.substring(with: match.range(at: 1))
-        if let cdataStart = value.range(of: "<![CDATA["),
-           let cdataEnd = value.range(of: "]]>", range: cdataStart.upperBound..<value.endIndex) {
-            value = String(value[cdataStart.upperBound..<cdataEnd.lowerBound])
-        }
-        value = unescapeXML(value).trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? nil : value
     }
 
     // MARK: Text matching
@@ -303,79 +282,6 @@ enum PatMessage {
         default:
             return nil
         }
-    }
-
-    /// 兼容被 JSON 二次转义过的形态：`\u003c` → `<`、`\"` → `"`。
-    private static func decodeEscapes(_ value: String) -> String {
-        var text = value
-        if text.contains("\\u") {
-            text = decodeUnicodeEscapes(in: text)
-        }
-        if text.contains("\\\"") {
-            text = text.replacingOccurrences(of: "\\\"", with: "\"")
-        }
-        if text.contains("\\/") {
-            text = text.replacingOccurrences(of: "\\/", with: "/")
-        }
-        return text
-    }
-
-    private static func decodeUnicodeEscapes(in text: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: #"\\u([0-9a-fA-F]{4})"#) else {
-            return text
-        }
-        let nsText = text as NSString
-        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
-        guard !matches.isEmpty else { return text }
-
-        var result = text
-        // 从后往前替换，保证前面匹配的 Range 仍然有效。
-        for match in matches.reversed() {
-            guard match.numberOfRanges >= 2,
-                  let range = Range(match.range, in: result),
-                  let captureRange = Range(match.range(at: 1), in: result),
-                  let code = UInt32(result[captureRange], radix: 16),
-                  let scalar = UnicodeScalar(code) else { continue }
-            result.replaceSubrange(range, with: String(Character(scalar)))
-        }
-        return result
-    }
-
-    private static func unescapeXML(_ value: String) -> String {
-        var text = value
-        text = replacingNumericEntities(in: text)
-        text = text.replacingOccurrences(of: "&lt;", with: "<")
-        text = text.replacingOccurrences(of: "&gt;", with: ">")
-        text = text.replacingOccurrences(of: "&quot;", with: "\"")
-        text = text.replacingOccurrences(of: "&apos;", with: "'")
-        // `&amp;` 必须最后处理，避免 `&amp;lt;` 被二次解码。
-        text = text.replacingOccurrences(of: "&amp;", with: "&")
-        return text
-    }
-
-    private static func replacingNumericEntities(in text: String) -> String {
-        var result = text
-        let patterns: [(pattern: String, radix: Int)] = [
-            (#"&#x([0-9a-fA-F]+);"#, 16),
-            (#"&#([0-9]+);"#, 10)
-        ]
-        for entry in patterns {
-            guard let regex = try? NSRegularExpression(pattern: entry.pattern) else { continue }
-            let nsResult = result as NSString
-            let matches = regex.matches(
-                in: result,
-                range: NSRange(location: 0, length: nsResult.length)
-            )
-            for match in matches.reversed() {
-                guard match.numberOfRanges >= 2,
-                      let range = Range(match.range, in: result),
-                      let captureRange = Range(match.range(at: 1), in: result),
-                      let code = UInt32(result[captureRange], radix: entry.radix),
-                      let scalar = UnicodeScalar(code) else { continue }
-                result.replaceSubrange(range, with: String(Character(scalar)))
-            }
-        }
-        return result
     }
 
     private static func matches(_ pattern: String, in text: String) -> Bool {

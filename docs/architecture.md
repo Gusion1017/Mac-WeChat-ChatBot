@@ -175,6 +175,19 @@ bridge/onebot \
   （`groups[*].members` 为群成员群昵称）。App 只在标题为空/占位时用目录填
   `Conversation.title`；bridge 转发入站事件时覆盖 `sender.nickname`
   （群聊优先群昵称，再回退通讯录显示名；群事件附 `group_name`），群 @ 昵称同样优先群昵称。
+- appmsg 展示文本（2026-10-22 修复）：hook 只识别拍一拍（appmsg `<type>62</type>`），
+  其它 `msg_type=49` 一律写 `[链接/文件]`，引用回复的正文（`<appmsg><title>`）与被引用
+  原文（`<refermsg>`）对 App / 规则引擎 / AI 都不可见。App 在事件解析时从 `raw_message`
+  按 appmsg `<type>` 还原可读文本：引用 57 → `回复正文` + 换行 + `[引用 发送者] 原文摘要`；
+  链接 5 / 文件 6 / 视频 4 / 表情 8 / 聊天记录 19 / 小程序 33·36 / 转账 2000 / 红包 2001 /
+  视频号 51 → `[类型] 标题`（引用摘要 160 字符、卡片内容 200 字符截断）。`raw_message`
+  仍是原始 XML，拍一拍结构化字段、`at` 段与媒体段不受影响。旧 bridge（4.1.12 legacy
+  路径）把 appmsg XML 原样当正文时同样会还原，非 appmsg 的 XML（图片/语音）保持原样。
+  历史消息由
+  `MemoryStore.repairAppmsgMessageTexts` 启动时按同一解析器幂等重算（只处理文本以
+  `[链接/文件]` 开头的消息，保留结构化 `at` 后缀），并刷新会话预览。
+  触发判定只取引用回复的正文（`RuleEngine.triggerText`）：被引用原文仅作为 AI 上下文，
+  不会因为「引用了一条 @ 过机器人 / 含关键词的旧消息」而重复唤醒。
 - 媒体字段：`data.url` 为 `file://` 本地路径时复制到 App 媒体目录；`data.file` 可能为 base64。
 
 ### 3.3 WebSocket 动作（App → bridge）
