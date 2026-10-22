@@ -1136,3 +1136,8 @@
 "群聊·引用" = "Group chat · Quote";
 "可多选；「所有消息」与其他方式互斥；「引用机器人」= 别人引用机器人发的消息时唤醒" = "Multi-select; \"All messages\" is exclusive; \"Quote\" wakes the bot when someone quotes its message";
 "引用机器人：别人引用机器人发的消息时唤醒机器人（正文无需 @ 或关键词）" = "Quoting the bot wakes it without an @-mention or keyword";
+
+"唤醒后免唤醒词" = "No Wake Word After Wake-Up";
+"窗口时长" = "Window length";
+"群聊被唤醒后，同一发送者在此时长内继续发言无需再次 @ / 关键词 / 引用；仅群聊生效" = "After the bot is woken in a group chat, the same sender can keep chatting for this long without another @ / keyword / quote; group chats only";
+"%d 分钟" = "%d min";

@@ -34,8 +34,15 @@ final class RuleEngine: @unchecked Sendable {
         var recentReplies: [Date] = []
     }
 
+    /// 群聊唤醒窗口状态：记录最近一次唤醒时间，命中窗口内的消息会滑动续期。
+    private struct WakeState {
+        var lastWakeAt: Date
+    }
+
     private let lock = NSLock()
     private var throttles: [String: ThrottleState] = [:]
+    /// key = 会话 ID + 分隔符 + 发送者 wxid；仅群聊使用。
+    private var wakes: [String: WakeState] = [:]
     private let calendar: Calendar
 
     init(calendar: Calendar = .current) {
@@ -92,7 +99,17 @@ final class RuleEngine: @unchecked Sendable {
         // 2. Bot defaults ------------------------------------------------------
         let defaults = botTriggerMatches(bot: bot, conversation: conversation, message: message,
                                          text: text, selfID: context.selfID)
-        guard defaults.matched else {
+        // 唤醒后免唤醒词：群聊命中任一触发方式后，同一发送者在窗口内继续发言无需再次唤醒。
+        // 窗口只放宽触发判定，硬门槛（会话开关/名单/工作时段）已在上面拦截。
+        let wakeWindowSeconds = bot.effectiveWakeWindowSeconds
+        let triggeredByWakeWindow = !defaults.matched
+            && wakeWindowSeconds > 0
+            && conversation.kind == .group
+            && isWakeWindowActive(conversationID: conversation.id,
+                                  senderID: senderID,
+                                  seconds: wakeWindowSeconds,
+                                  now: context.now)
+        guard defaults.matched || triggeredByWakeWindow else {
             return .blocked(defaults.reason)
         }
         let throttle = checkThrottle(conversationID: conversation.id,
@@ -102,13 +119,19 @@ final class RuleEngine: @unchecked Sendable {
         if let throttle {
             return .blocked("触发限流：\(throttle)")
         }
+        // 显式唤醒或窗口内消息都续期（滑动窗口）；冷却拦截的消息不续期。
+        if wakeWindowSeconds > 0, conversation.kind == .group {
+            noteWake(conversationID: conversation.id, senderID: senderID, at: context.now)
+        }
         return RuleEvaluation(
             shouldReply: true,
-            reason: "命中默认触发（\(defaults.label)）",
+            reason: triggeredByWakeWindow
+                ? "唤醒窗口内（\(Int(wakeWindowSeconds)) 秒内无需再次唤醒）"
+                : "命中默认触发（\(defaults.label)）",
             personaID: conversation.personaID ?? bot.defaultPersonaID,
             providerID: conversation.providerID ?? bot.defaultProviderID,
             model: conversation.model,
-            triggerLabel: defaults.label
+            triggerLabel: triggeredByWakeWindow ? "群聊·唤醒窗口" : defaults.label
         )
     }
 
@@ -154,11 +177,13 @@ final class RuleEngine: @unchecked Sendable {
         pruneLocked(now: date)
     }
 
-    /// Clears throttling state (e.g. when the bot restarts).
+    /// Clears ephemeral trigger state (cooldowns, per-minute caps and wake windows),
+    /// e.g. when the bot restarts.
     func resetThrottles() {
         lock.lock()
         defer { lock.unlock() }
         throttles.removeAll()
+        wakes.removeAll()
     }
 
     // MARK: Trigger matching
@@ -304,6 +329,41 @@ final class RuleEngine: @unchecked Sendable {
     // - 4.1.12 及更早：系统消息（localType 10000）/ `<sysmsg type="pat">`；
     // - 4.1.15.55 实测：appmsg（type=49），`<appmsg><type>62</type><patinfo>…</patinfo>`。
     // 只有真实拍一拍事件才参与 .pat 触发；普通消息正文里提到「拍了拍」不算。
+
+    // MARK: Wake window
+
+    /// 群聊唤醒窗口是否仍然有效（只读判定；续期由 `noteWake` 在放行后完成）。
+    private func isWakeWindowActive(conversationID: String, senderID: String,
+                                    seconds: Double, now: Date) -> Bool {
+        guard seconds > 0, !senderID.isEmpty else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let state = wakes[wakeKey(conversationID: conversationID, senderID: senderID)] else {
+            return false
+        }
+        let elapsed = now.timeIntervalSince(state.lastWakeAt)
+        return elapsed >= 0 && elapsed <= seconds
+    }
+
+    /// 记录一次群聊唤醒并滑动续期（显式触发与窗口内消息共用）。
+    private func noteWake(conversationID: String, senderID: String, at date: Date) {
+        guard !senderID.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        wakes[wakeKey(conversationID: conversationID, senderID: senderID)] = WakeState(lastWakeAt: date)
+        pruneWakesLocked(now: date)
+    }
+
+    private func wakeKey(conversationID: String, senderID: String) -> String {
+        conversationID + "\u{1F}" + senderID
+    }
+
+    /// 窗口上限 60 分钟；更早的状态不再可能命中，直接清理。
+    private func pruneWakesLocked(now: Date) {
+        wakes = wakes.filter { _, state in
+            now.timeIntervalSince(state.lastWakeAt) <= 3600
+        }
+    }
 
     // MARK: Throttling
 

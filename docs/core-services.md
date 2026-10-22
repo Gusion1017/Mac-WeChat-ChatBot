@@ -17,7 +17,7 @@
 | `Services/ActivationPolicyController.swift` | Dock 图标与 `NSApplication.ActivationPolicy` 同步（用户设置优先，台前调度不覆盖；bundle 以 `LSUIElement` 启动，仅在设置页用于提示文案） |
 | `Services/OneBotClient.swift` | WS 收事件、HTTP 发送、媒体落地、事件解析、去重、重连 |
 | `Services/AIClient.swift` | OpenAI 兼容 `/chat/completions`，SSE 流式 / 非流式 / 超时 / 错误映射 |
-| `Services/RuleEngine.swift` | 白黑名单、私聊/群触发、冷却、频率、工作时段 |
+| `Services/RuleEngine.swift` | 白黑名单、私聊/群触发、唤醒窗口、冷却、频率、工作时段 |
 | `Services/ChatEngine.swift` | 人设/记忆/近期上下文拼装、AI 调用重试、拟人化分段计划 |
 | `Services/SchedulerService.swift` | 定时任务事件驱动循环、`nextFireAt` 计算、重启恢复 |
 | `Services/HookManager.swift` | 微信/Gadget 检测、安装/恢复脚本、bridge 子进程生命周期 |
@@ -215,6 +215,13 @@ RuntimeCoordinator.handle(event)
 6. 冷却与每分钟上限按会话记账；**只有发送成功后**才 `noteReply` 消耗冷却，
    AI 失败不会误占冷却；运行时对同会话生成做串行化，避免并发穿透。
 
+唤醒后免唤醒词（2026-10-23 新增，默认关闭）：`bot.wakeWindow.enabled && seconds > 0` 时，
+群聊命中任一触发方式后按「会话 ID + 发送者 wxid」记录唤醒时间（内存态，`resetThrottles`
+与机器人启动时清空）。窗口内同一发送者的消息即使没有 @/关键词/引用也放行，标签为
+「群聊·唤醒窗口」；每条被放行的消息都会续期（滑动窗口，最长 60 分钟）。窗口判定发生在
+硬门槛之后、冷却之前，因此只放宽触发方式，不绕过会话开关、白黑名单、工作时段、
+冷却与每分钟上限；其它发送者与其它会话不受影响。私聊本来无需唤醒词，行为不变。
+
 引用机器人（2026-10-22 新增，默认关闭）：`TriggerMode.quote`，群聊触发方式多选新增项。
 `isQuotingBot` 解析 `WeChatAppmsg.parse(eventJSON: rawJSON)?.quote?.senderID` 并与
 `selfID` 比较：`<chatusr>` 优先、`<fromusr>` 回退（群 ID 忽略），昵称不参与判定；
@@ -389,12 +396,13 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 `SleepPreventionTests.swift`（9）、`MessageRoutingTests.swift`（12）、
 `NativeSendConfigTests.swift`（5）、`ConversationNameTests.swift`（8）、`WorkingHoursStatusTests.swift`（5）、
 `ContactDirectoryTests.swift`（15）、`PatMessageTests.swift`（20）、`PatReplySettingsTests.swift`（7）、
-`HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（25）、`AppmsgRoutingTests.swift`（20），共 178 项）：
+`HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（25）、`AppmsgRoutingTests.swift`（20）、
+`WakeWindowTests.swift`（6），共 184 项）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 178 tests, with 0 failures（2026-10-22）
+# Executed 184 tests, with 0 failures（2026-10-23）
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
@@ -407,7 +415,8 @@ swift test --scratch-path .build-verify
 防睡眠旧配置兼容/三档标签/决策表；OneBot 事件解析（群/@/私聊/非法帧）、
 appmsg 分类（引用 57 / 链接 5 / 文件 6 / 表情 8 / 聊天记录 19 / 转账 2000 / 视频号 51、
 嵌套引用与摘要截断）与实时/历史归一化（占位替换、拍一拍不回归、修复幂等、预览刷新）、
-RuleEngine 默认触发+黑名单+关键词冷却、Scheduler daily/once nextFireAt、
+RuleEngine 默认触发+黑名单+关键词冷却+唤醒窗口（同一发送者、滑动续期、旧配置兼容）、
+Scheduler daily/once nextFireAt、
 ChatEngine 分段/角色合并/中英分词/流式总开关、SettingsPersistence 原子写/幂等/无明文密钥、
 AIClient endpoint/请求体/无 Key 字段、ProcessRunner 输出收集，
 以及**取消回归**：启动 `/bin/sleep 5` 后立即取消流，进程被终止且不崩溃、事件流及时结束；
@@ -434,7 +443,7 @@ RuleEngine 白黑名单/@/关键词/冷却、Scheduler 各 repeat 的 nextFireAt
 ChatEngine 分段/角色合并/关键词分词。输出 `[selftest] PASS/FAIL/WARN` 与汇总退出码。
 
 历史 CLI 驱动实测：**63 passed / 0 failed / 0 warnings**；当前 `swift test` 为
-**178/178 通过**（见 8.1；2026-10-22 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
+**184/184 通过**（见 8.1；2026-10-23 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
 Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Keychain 保存/删除、
 `config.json` 无明文 Key。
 

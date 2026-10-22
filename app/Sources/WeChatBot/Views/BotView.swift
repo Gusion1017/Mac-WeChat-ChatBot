@@ -7,6 +7,9 @@ struct BotView: View {
 
     @State private var newKeyword = ""
 
+    /// 唤醒窗口的快捷时长（分钟）；其余数值用 Slider 调整。
+    private static let wakeWindowPresets = [1, 3, 5, 10, 30, 60]
+
     var body: some View {
         ScrollingPage(title: "机器人", subtitle: subtitle) {
             Button(L("保存设置")) {
@@ -150,6 +153,48 @@ struct BotView: View {
                                   : "")
                         }
                     }
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "唤醒后免唤醒词",
+                    subtitle: "群聊被唤醒后，同一发送者在此时长内继续发言无需再次 @ / 关键词 / 引用；仅群聊生效",
+                    symbol: "hourglass",
+                    tint: Theme.info
+                ) {
+                    Toggle(L("唤醒后免唤醒词"), isOn: wakeWindowBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                if store.settings.bot.wakeWindowEnabled {
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack {
+                            Text(L("窗口时长"))
+                                .font(.callout)
+                            Spacer()
+                            Text(Lf("%d 分钟", wakeWindowMinutes))
+                                .font(.callout.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(value: wakeWindowSliderBinding, in: 1...60, step: 1)
+                            .tint(Theme.info)
+                            .accessibilityLabel(L("唤醒后免唤醒词"))
+                            .accessibilityValue(Lf("%d 分钟", wakeWindowMinutes))
+                        HStack(spacing: 5) {
+                            ForEach(Self.wakeWindowPresets, id: \.self) { minutes in
+                                FilterChip(
+                                    title: Lf("%d 分钟", minutes),
+                                    isSelected: wakeWindowMinutes == minutes,
+                                    tint: Theme.info
+                                ) {
+                                    setWakeWindowMinutes(minutes)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
                 }
                 SettingsDivider()
                 SettingsRow(
@@ -521,6 +566,37 @@ struct BotView: View {
                 store.persist()
             }
         )
+    }
+
+    // MARK: Wake window
+
+    private var wakeWindowBinding: Binding<Bool> {
+        Binding(
+            get: { store.settings.bot.wakeWindowEnabled },
+            set: { enabled in
+                store.settings.bot.wakeWindowEnabled = enabled
+                store.persist()
+            }
+        )
+    }
+
+    private var wakeWindowMinutes: Int {
+        min(60, max(1, Int((store.settings.bot.wakeWindowSeconds / 60).rounded())))
+    }
+
+    /// Slider 的 Double 绑定；快捷 chips 与 Slider 共用同一写入函数。
+    private var wakeWindowSliderBinding: Binding<Double> {
+        Binding(
+            get: { Double(wakeWindowMinutes) },
+            set: { value in
+                setWakeWindowMinutes(Int(value.rounded()))
+            }
+        )
+    }
+
+    private func setWakeWindowMinutes(_ minutes: Int) {
+        store.settings.bot.wakeWindowSeconds = Double(min(max(minutes, 1), 60)) * 60
+        store.persist()
     }
 
     private var patFixedTextBinding: Binding<Bool> {

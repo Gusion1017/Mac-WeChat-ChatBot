@@ -934,6 +934,23 @@ enum PatTextTemplate {
     }
 }
 
+/// 群聊唤醒后的免唤醒窗口（2026-10-23 新增）。
+///
+/// 被任一触发方式唤醒后，**同一发送者**在窗口内继续发言无需再次唤醒（滑动续期）。
+/// 作为 `BotSettings.wakeWindow` 的可选值保存：旧 config.json 没有该键时保持 nil，
+/// 不会让整份配置解码失败；默认关闭，关闭时不影响既有触发行为。
+struct WakeWindowSettings: Codable, Hashable {
+    var enabled: Bool = false
+    /// 窗口时长（秒）；默认 5 分钟。
+    var seconds: Double = 300
+
+    /// 生效时长：关闭或非正数时为 0；上限 60 分钟（与 UI 一致）。
+    var effectiveSeconds: Double {
+        guard enabled, seconds > 0 else { return 0 }
+        return min(max(seconds, 1), 3600)
+    }
+}
+
 struct BotSettings: Codable, Hashable {
     var enabled: Bool = false
     var dryRun: Bool = false
@@ -957,6 +974,9 @@ struct BotSettings: Codable, Hashable {
 
     /// 别人拍一拍后的回复设置（不再回拍）。可选以兼容旧配置。
     var pat: PatReplySettings?
+
+    /// 群聊唤醒后的免唤醒窗口（2026-10-23）。可选以兼容旧配置；nil 表示默认关闭。
+    var wakeWindow: WakeWindowSettings?
 
     var patReplyEnabled: Bool {
         get { pat?.enabled ?? false }
@@ -1013,6 +1033,31 @@ struct BotSettings: Codable, Hashable {
             updated.afterText = newValue.isEmpty ? nil : newValue
             pat = updated
         }
+    }
+
+    /// 群聊唤醒后免唤醒词开关（默认关闭）。
+    var wakeWindowEnabled: Bool {
+        get { wakeWindow?.enabled ?? false }
+        set {
+            var updated = wakeWindow ?? WakeWindowSettings()
+            updated.enabled = newValue
+            wakeWindow = updated
+        }
+    }
+
+    /// 免唤醒窗口时长（秒）；未配置时返回默认 5 分钟，保存时收敛到 1 秒–60 分钟。
+    var wakeWindowSeconds: Double {
+        get { wakeWindow?.seconds ?? WakeWindowSettings().seconds }
+        set {
+            var updated = wakeWindow ?? WakeWindowSettings()
+            updated.seconds = min(max(newValue, 1), 3600)
+            wakeWindow = updated
+        }
+    }
+
+    /// 生效的免唤醒窗口秒数；关闭时为 0。
+    var effectiveWakeWindowSeconds: Double {
+        wakeWindow?.effectiveSeconds ?? 0
     }
 
     /// 从结构化 @ 事件学到的「群昵称」映射（群 ID -> 机器人在该群的展示昵称）。

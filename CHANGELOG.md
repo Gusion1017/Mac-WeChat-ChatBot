@@ -133,6 +133,16 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   密钥派生或发送任务构造，只保留行为、开关与安全边界。
 - 新增 `.gitignore` 与文档层面的隐私检查（真实 wxid / 聊天记录 / 截图 / Key 不入库）。
 
+## [1.2.4] — 2026-10-23
+
+### 新增
+
+- **唤醒后免唤醒词**：机器人设置「回复策略」新增唤醒窗口（`bot.wakeWindow`，默认关闭，
+  默认 5 分钟，可用滑块或 1/3/5/10/30/60 分钟快捷 chip 在 1–60 分钟间调整）。
+  群聊被 @ / 关键词 / 拍一拍 / 引用机器人唤醒后，
+  **同一发送者**在窗口内继续发言无需再次唤醒，命中消息会滑动续期；仅群聊生效，
+  不绕过白黑名单、工作时段、冷却与每分钟上限；旧配置缺省保持关闭。
+
 ## [1.2.3] — 2026-10-23
 
 ### 变更
@@ -239,10 +249,11 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.2.3...HEAD
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.2.4...HEAD
 [1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.0
 [1.2.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.1
 [1.2.2]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.2
 [1.2.3]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.3
+[1.2.4]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.4
