@@ -814,11 +814,14 @@ enum OneBotEventParser {
     /// 因此对 UI、规则引擎和 AI 都不可见。这里在事件入口用 App 侧解析器
     /// （`WeChatAppmsg`）从 `raw_message` 还原本地展示文本。
     ///
-    /// 只替换三种文本：
+    /// 只替换四种文本：
     /// - hook 的笼统占位 `[链接/文件]`；
     /// - hook 误把「正文含『拍了拍』的引用回复」当拍一拍时写入的 title——
     ///   该 title 其实就是 appmsg `<title>`（引用正文），替换后补回引用上下文；
-    /// - 旧 bridge（4.1.12 legacy 出站路径）把 appmsg XML 原样当正文，这里一并还原。
+    /// - 旧 bridge（4.1.12 legacy 出站路径）把 appmsg XML 原样当正文，这里一并还原；
+    /// - 旧 bridge 已渲染好的 `正文\n[引用 发送者] 原文`（旧定界符）：历史回放会绕过
+    ///   启动迁移重新入库，必须在入口统一改成 `【引用 发送者：原文】`，否则提示词里的
+    ///   引用规则与真实消息格式不一致，模型会把被引用内容误当成当前发言。
     ///
     /// 拍一拍（appmsg type 62）的正文、`at` 段与媒体段一律不动，避免回归。
     private static func normalizeAppmsgSegments(
@@ -834,7 +837,10 @@ enum OneBotEventParser {
             let isHookPatTitle = !appmsg.isPat && !appmsg.title.isEmpty && text == appmsg.title
             // 旧 bridge 的 appmsg 正文就是原始 XML（解析器已确保含 `<appmsg`）。
             let isRawXMLText = text.hasPrefix("<") || text.hasPrefix("<?xml")
-            guard isPlaceholder || isHookPatTitle || isRawXMLText else { return segment }
+            // 真实引用 appmsg 的旧定界符文本；用户手打的 `[引用 …]` 没有 quote 结构，不误伤。
+            let isLegacyQuote = appmsg.quote != nil
+                && (text.contains("[引用 ") || text.contains("[引用] "))
+            guard isPlaceholder || isHookPatTitle || isRawXMLText || isLegacyQuote else { return segment }
             replaced = true
             return .text(appmsg.text)
         }

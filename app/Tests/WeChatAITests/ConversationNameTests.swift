@@ -59,9 +59,9 @@ final class ConversationNameTests: XCTestCase {
     }
 
     func testCustomTitleWinsOverAutomaticName() {
-        let conversation = Conversation(id: "wxid_test_friend", kind: .direct, title: "老王")
-        XCTAssertEqual(conversation.customTitle, "老王")
-        XCTAssertEqual(conversation.displayTitle, "老王")
+        let conversation = Conversation(id: "wxid_test_friend", kind: .direct, title: "测试好友")
+        XCTAssertEqual(conversation.customTitle, "测试好友")
+        XCTAssertEqual(conversation.displayTitle, "测试好友")
 
         let group = Conversation(id: "123456789@chatroom", kind: .group, title: "群聊 兄弟")
         XCTAssertEqual(group.customTitle, "群聊 兄弟")
@@ -139,7 +139,7 @@ final class ConversationNameTests: XCTestCase {
         let groupID = "123456789@chatroom"
         try await store.upsertConversation(Conversation(id: directWxid, kind: .direct, title: directWxid))
         try await store.upsertConversation(Conversation(id: groupID, kind: .group, title: "群聊 \(groupID)"))
-        try await store.upsertConversation(Conversation(id: "wxid_custom", kind: .direct, title: "老王"))
+        try await store.upsertConversation(Conversation(id: "wxid_custom", kind: .direct, title: "测试好友"))
         try await store.upsertConversation(Conversation(id: "filehelper", kind: .direct, title: "wxid_test_self"))
 
         let repaired = try await store.repairPlaceholderConversationTitles()
@@ -155,7 +155,7 @@ final class ConversationNameTests: XCTestCase {
         XCTAssertEqual(group.displayTitle, "群聊 · 456789")
 
         let custom = try XCTUnwrap(conversations.first { $0.id == "wxid_custom" })
-        XCTAssertEqual(custom.title, "老王")
+        XCTAssertEqual(custom.title, "测试好友")
 
         let filehelper = try XCTUnwrap(conversations.first { $0.id == "filehelper" })
         XCTAssertEqual(filehelper.title, "")

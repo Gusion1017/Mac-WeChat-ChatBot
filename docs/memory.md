@@ -24,15 +24,19 @@
 ### 1.2 群聊发言人标注
 
 - **群聊**：每条 incoming 消息（历史 user 消息与当前消息）内容统一为
-  **「发言人：内容」**：
-  - 发言人优先取 `senderName`；为空时回退 `senderID`；
+  **「昵称(wxid)：内容」**（`senderName` 为空时直接为「wxid：内容」）：
+  - 发言人优先取 `senderName`，同时附上 `senderID`；为空时回退 `senderID`；
   - `我` / `系统` / `self` 等占位名不作为发言人，保留原文；
   - 自己的历史消息作为 `assistant` 原文发送，不加前缀。
+- **为什么带 wxid**：长期记忆里的人员对应关系以 wxid 为键（「wxid：称呼」）；
+  群昵称会被成员修改、也可能重名。只给昵称时模型无法把发言人与记忆精确对齐，
+  会凭印象套用别人的称呼（真机误叫他人的直接原因）。带上 wxid 后，
+  消息与记忆共享同一个稳定键。
 - **私聊**：不加发言人前缀，减少提示词噪声。
-- 群聊的 system prompt 增加说明：消息格式为「发言人：内容」，发言人是微信 ID；
-  请结合长期记忆中的人员对应关系（wxid→昵称）判断谁在说话，**回复时不要输出 wxid**。
-- 实现：`ChatEngine.attributedUserText(_:message:isGroupChat:)` 与
-  `ChatEngine.speakerLabel(for:)`。
+- 群聊的 system prompt 说明消息格式、括号内是微信 ID，要求**以 wxid 对照长期记忆**；
+  记忆里找不到该 wxid 时直接使用消息里的昵称或「你」，**回复时不要输出 wxid**。
+- 实现：`ChatEngine.attributedUserText(_:message:isGroupChat:)`、
+  `ChatEngine.promptSpeakerLabel(for:)` 与 `ChatEngine.speakerLabel(for:)`。
 
 ## 2. 本会话早期片段召回
 
@@ -47,8 +51,8 @@
 - **上限与去重**：去重后最多 **3 条**（`ChatEngine.earlierRecallLimit`），
   每条片段截取前 120 字。
 - **标注**：发出去的消息标「我：」；私聊收到的消息标「对方：」；
-  群聊收到的消息显示发言人（`speakerLabel`：`senderName` 优先、空则回退 `senderID`，
-  通常就是 wxid），取不到时显示「对方」。
+  群聊收到的消息显示发言人（`promptSpeakerLabel`：`senderName(wxid)`，
+  `senderName` 为空时直接用 wxid），取不到时显示「对方」。
 - **注入标题**固定为：
 
   ```
@@ -253,9 +257,9 @@ memory_state(conversation_id, last_summarized_rowid, updated_at)
   自动记忆始终 1 条、`sourceCount` 依次为 8/16；70 条时单批最多 40 条。
 - **游标与阈值**：默认 `minOverflow = 1` 的兼容行为；`minOverflow = 8` 时
   12 条返回 `nil`；游标推进后不重复总结；单批最多 `maxMessages` 条。
-- **群聊发言人标注**：群聊历史与当前 user 消息均为「发言人：内容」，
-  `senderName` 优先、空则回退 `senderID`；私聊不加前缀；
-  system prompt 包含 wxid→昵称映射说明与「回复不输出 wxid」。
+- **群聊发言人标注**：群聊历史与当前 user 消息为「昵称(wxid)：内容」
+  （`senderName` 为空时直接「wxid：内容」）；私聊不加前缀；
+  system prompt 包含「以 wxid 对照长期记忆」与「回复不输出 wxid」。
 - **核心记忆作用域**：`fetchMemoriesForPrompt` 只返回当前会话 + 全局记忆；
   其它会话的核心记忆不注入；当前会话/全局核心记忆注入且排在自动总结之前；
   核心/手写在冲突时优先。
@@ -303,8 +307,10 @@ cd app && swift build --build-tests --scratch-path .build-memory
   需要多个会话生效的核心设定应设为全局记忆。
 - 核心记忆优先占用注入名额，但总数仍受 `ChatEngine.longTermMemoryLimit`
   （默认 6 条）限制；超过时按综合权重取前 6，可用基础权重调整核心之间的优先级。
-- 群聊发言人优先使用 `senderName`；bridge 未提供时回退显示 `senderID`（通常是 wxid），
-  模型仍可能看到 wxid，只是被要求回复时不输出——该约束依赖模型遵守。
+- 群聊发言人标注带 `senderName(wxid)`；bridge 未提供昵称时只显示 wxid。
+  模型被要求以 wxid 对照长期记忆、回复时不输出 wxid，但仍可能出现昵称与记忆
+  对不上或模型不遵守约束的情况；关键人物关系建议写在**本会话手写核心记忆**的
+  「wxid：称呼」清单里，不要只依赖自动总结。
 - `accessCount` 只在提示词召回时记录；注入名额内的当前会话/全局核心记忆每轮都会加入上下文，
   召回次数会较快到达 +40% 上限，这是有意为之。
 - 「未关联会话」文件夹只展示已删除会话残留的记忆，无法恢复会话标题/类型；

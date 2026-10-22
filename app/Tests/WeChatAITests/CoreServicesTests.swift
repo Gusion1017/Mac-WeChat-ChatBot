@@ -595,14 +595,14 @@ final class CoreServicesTests: XCTestCase {
         let direct = Conversation(id: "c1", kind: .direct, title: "私聊")
         let now = Date()
         let history = [
-            ChatMessage(id: "h1", conversationID: "g1", senderID: "wxid_a", senderName: "wxid_a",
+            ChatMessage(id: "h1", conversationID: "g1", senderID: "wxid_a", senderName: "小明",
                         direction: .incoming, text: "早上好", timestamp: now),
             ChatMessage(id: "h2", conversationID: "g1", senderID: "self", senderName: "我",
                         direction: .outgoing, text: "早呀", timestamp: now.addingTimeInterval(1)),
             ChatMessage(id: "h3", conversationID: "g1", senderID: "wxid_b", senderName: "",
                         direction: .incoming, text: "在吗", timestamp: now.addingTimeInterval(2))
         ]
-        let incoming = ChatMessage(id: "h4", conversationID: "g1", senderID: "wxid_c", senderName: "wxid_c",
+        let incoming = ChatMessage(id: "h4", conversationID: "g1", senderID: "wxid_c", senderName: "小红",
                                    direction: .incoming, text: "最新消息", timestamp: now.addingTimeInterval(3))
         let engine = ChatEngine(memory: store, aiClient: AIClient())
 
@@ -612,11 +612,12 @@ final class CoreServicesTests: XCTestCase {
         )
         let groupSystem = groupMessages.first?.content ?? ""
         XCTAssertTrue(groupSystem.contains("群聊消息格式"), "群聊应说明发言人标注规则")
+        XCTAssertTrue(groupSystem.contains("以括号内的 wxid 为准"), "群聊应要求用 wxid 对齐长期记忆")
         let groupBody = groupMessages.dropFirst().map(\.content).joined(separator: "\n")
-        XCTAssertTrue(groupBody.contains("wxid_a：早上好"))
-        XCTAssertTrue(groupBody.contains("wxid_b：在吗"), "senderName 为空时回退 senderID")
-        XCTAssertTrue(groupBody.contains("wxid_c：最新消息"))
-        XCTAssertFalse(groupBody.contains("wxid_a：早呀"), "机器人自己的消息不加发言人前缀")
+        XCTAssertTrue(groupBody.contains("小明(wxid_a)：早上好"), "昵称与 wxid 应同时出现在发言人前缀里")
+        XCTAssertTrue(groupBody.contains("wxid_b：在吗"), "senderName 为空时回退 senderID，且不重复拼接")
+        XCTAssertTrue(groupBody.contains("小红(wxid_c)：最新消息"))
+        XCTAssertFalse(groupBody.contains("小明(wxid_a)：早呀"), "机器人自己的消息不加发言人前缀")
 
         let directMessages = engine.buildMessages(
             conversation: direct, incoming: incoming, settings: settings,
@@ -626,7 +627,50 @@ final class CoreServicesTests: XCTestCase {
         XCTAssertFalse(directSystem.contains("群聊消息格式"), "私聊不应加群聊发言人说明")
         let directBody = directMessages.dropFirst().map(\.content).joined(separator: "\n")
         XCTAssertTrue(directBody.contains("早上好"))
-        XCTAssertFalse(directBody.contains("wxid_a：早上好"), "私聊保持原文，减少提示词噪声")
+        XCTAssertFalse(directBody.contains("wxid_a"), "私聊保持原文，减少提示词噪声")
+    }
+
+    /// 回归：长期记忆以 wxid 为人员键，群聊发言人前缀必须带同一个 wxid，
+    /// 否则模型只能凭昵称猜测，容易套用记忆里另一个人的称呼。
+    func testGroupPromptSpeakerLabelSharesWXIDKeyWithMemory() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechatai-speaker-key-\(UUID().uuidString)", isDirectory: true)
+        let store = MemoryStore(databaseURL: directory.appendingPathComponent("chatbot.sqlite"))
+        try await store.open()
+        defer {
+            Task { await store.close() }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let group = Conversation(id: "test-group@chatroom", kind: .group, title: "测试群")
+        let now = Date()
+        let senderID = "wxid_member_a"
+        let history = [
+            ChatMessage(id: "h1", conversationID: group.id, senderID: senderID,
+                        senderName: "群友甲", direction: .incoming, text: "晚安",
+                        timestamp: now)
+        ]
+        let incoming = ChatMessage(id: "h2", conversationID: group.id, senderID: senderID,
+                                   senderName: "群友甲", direction: .incoming,
+                                   text: "/delate", timestamp: now.addingTimeInterval(1))
+        let memoryNotes = """
+        长期记忆（核心/手写优先，自动总结仅供参考）：
+        - [★核心·本会话·权重 10.0] 群聊中微信号对应的人员：
+        wxid_member_b：测试群友乙/别名乙
+        wxid_member_a：群友甲/别名甲
+        """
+        let engine = ChatEngine(memory: store, aiClient: AIClient())
+        let messages = engine.buildMessages(
+            conversation: group, incoming: incoming, settings: .default,
+            persona: nil, history: history, memoryNotes: memoryNotes
+        )
+        let system = messages.first?.content ?? ""
+        let body = messages.dropFirst().map(\.content).joined(separator: "\n")
+        XCTAssertTrue(system.contains("wxid_member_a：群友甲/别名甲"),
+                      "记忆里应有该人员对应关系")
+        XCTAssertTrue(body.contains("群友甲(wxid_member_a)：/delate"),
+                      "发言前缀必须带记忆使用的同一个 wxid，模型才能精确对齐")
+        XCTAssertFalse(body.contains("测试群友乙(wxid_member_a)"),
+                       "不能把记忆里另一个人的称呼拼到当前发言人上")
     }
 
     func testEarlierRecallStaysInCurrentConversation() async throws {

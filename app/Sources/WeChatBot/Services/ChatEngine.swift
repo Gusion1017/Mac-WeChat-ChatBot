@@ -149,9 +149,15 @@ final class ChatEngine: @unchecked Sendable {
         systemLines.append("当前时间：\(ISO8601DateFormatter.localDateTimeString())")
         systemLines.append("会话类型：\(conversation.kind.label)；会话名称：\(conversation.displayTitle)")
         if conversation.kind == .group {
-            systemLines.append("群聊消息格式为「发言人：内容」，发言人是微信 ID；"
-                + "请结合长期记忆中的人员对应关系（wxid→昵称）判断谁在说话，回复时不要输出 wxid。")
+            systemLines.append("群聊消息格式为「昵称(wxid)：内容」或「wxid：内容」，括号内是发言人的微信 ID；"
+                + "昵称可能重名或被修改，判断谁在说话时请以括号内的 wxid 为准，"
+                + "对照长期记忆中「wxid：称呼」的人员对应关系；"
+                + "记忆里找不到该 wxid 时直接用消息里的昵称或「你」，"
+                + "不要套用记忆中其他人的称呼；回复时不要输出 wxid。")
         }
+        // 引用消息用固定定界符标记被引用内容，帮助模型区分「本轮发言」与「引用的历史消息」。
+        systemLines.append("引用消息的格式为「回复正文」换行「【引用 发言人：被引用原文】」；"
+            + "【引用 …】内是对方引用的历史消息，不是本轮新内容，回复时不要把它当成当前发言人刚说的话。")
         let note = conversation.note.trimmingCharacters(in: .whitespacesAndNewlines)
         if !note.isEmpty {
             systemLines.append("关于此会话的长期记忆：\(note)")
@@ -188,8 +194,23 @@ final class ChatEngine: @unchecked Sendable {
     /// 群聊里给 incoming 内容加上发言人前缀，避免多人群聊丢失说话人；
     /// 私聊保持原文，减少提示词噪声。
     static func attributedUserText(_ content: String, message: ChatMessage, isGroupChat: Bool) -> String {
-        guard isGroupChat, let speaker = speakerLabel(for: message) else { return content }
+        guard isGroupChat, let speaker = promptSpeakerLabel(for: message) else { return content }
         return "\(speaker)：\(content)"
+    }
+
+    /// 提示词用发言人标识：群聊里同时带昵称与 wxid。
+    ///
+    /// 长期记忆以 wxid 为人员对应关系的键（`wxid_xxx：称呼`），只给昵称时
+    /// 群昵称被修改/重名或模型无法把昵称当成键，就会凭印象套用别人的称呼。
+    /// 这里让每条消息自带稳定键，同时保留昵称方便称呼。`senderName` 为空时
+    /// 直接回退 wxid，不再重复拼接。
+    static func promptSpeakerLabel(for message: ChatMessage) -> String? {
+        guard let name = speakerLabel(for: message) else { return nil }
+        let id = message.senderID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, id != "self", id != "system", id != "我", id != "系统", id != name else {
+            return name
+        }
+        return "\(name)(\(id))"
     }
 
     /// 发言人展示名：优先 senderName，缺失时回退 senderID。
@@ -265,7 +286,7 @@ final class ChatEngine: @unchecked Sendable {
                 if message.direction == .outgoing {
                     who = "我"
                 } else if conversation.kind == .group {
-                    who = Self.speakerLabel(for: message) ?? "对方"
+                    who = Self.promptSpeakerLabel(for: message) ?? "对方"
                 } else {
                     who = "对方"
                 }

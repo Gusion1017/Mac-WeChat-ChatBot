@@ -170,7 +170,7 @@ final class ContactDirectoryTests: XCTestCase {
             Conversation(id: "wxid_test_friend", kind: .direct, title: ""),
             Conversation(id: "wxid_test_id_title", kind: .direct, title: "wxid_test_id_title"),
             Conversation(id: "123456@chatroom", kind: .group, title: "群聊 123456@chatroom"),
-            Conversation(id: "wxid_test_renamed", kind: .direct, title: "老王"),
+            Conversation(id: "wxid_test_renamed", kind: .direct, title: "测试好友"),
             Conversation(id: "wxid_test_unknown", kind: .direct, title: ""),
             // 系统账号没有目录记录：保持空标题，展示层继续走中文兜底名。
             Conversation(id: "filehelper", kind: .direct, title: "")
@@ -306,7 +306,7 @@ final class ContactDirectoryTests: XCTestCase {
             """,
             """
             INSERT INTO conversations (id, kind, title, last_message_at, last_message_preview)
-            VALUES ('wxid_test_legacy', 'direct', '老王', \(now), '旧消息');
+            VALUES ('wxid_test_legacy', 'direct', '测试好友', \(now), '旧消息');
             """,
             """
             CREATE TABLE settings (
@@ -328,20 +328,20 @@ final class ContactDirectoryTests: XCTestCase {
         // 旧数据仍在（迁移只补表，不重建/清空）。
         let conversations = try await store.fetchConversations(limit: 10)
         XCTAssertEqual(conversations.first?.id, "wxid_test_legacy")
-        XCTAssertEqual(conversations.first?.title, "老王")
+        XCTAssertEqual(conversations.first?.title, "测试好友")
         let legacyValue = try await store.setting(key: "legacy.key")
         XCTAssertEqual(legacyValue, "legacy.value")
 
         // 新表可用：写入/读取目录缓存后旧会话标题不被改动。
         try await store.replaceContactDirectory(ContactDirectorySnapshot(
             ok: true,
-            users: ["wxid_test_legacy": ContactDirectoryEntry(display: "老王")]
+            users: ["wxid_test_legacy": ContactDirectoryEntry(display: "测试好友")]
         ))
         let loadedSnapshot = try await store.loadContactDirectory()
         let loaded = try XCTUnwrap(loadedSnapshot)
-        XCTAssertEqual(loaded.users["wxid_test_legacy"]?.display, "老王")
+        XCTAssertEqual(loaded.users["wxid_test_legacy"]?.display, "测试好友")
         let after = try await store.fetchConversations(limit: 10)
-        XCTAssertEqual(after.first?.title, "老王")
+        XCTAssertEqual(after.first?.title, "测试好友")
     }
 
     // MARK: SQLite helpers (legacy DB fixture)

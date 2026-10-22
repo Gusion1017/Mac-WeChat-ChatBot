@@ -135,7 +135,7 @@ final class AppmsgRoutingTests: XCTestCase {
         let event = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: Sample.quoteXML))
         XCTAssertEqual(
             event.plainText,
-            "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅"
+            "火锅局改到明晚吧\n【引用 张三：明天晚上七点老地方吃火锅】"
         )
         XCTAssertFalse(event.plainText.contains(WeChatAppmsg.placeholderText))
         XCTAssertEqual(event.primaryMessageKind, .text)
@@ -146,13 +146,33 @@ final class AppmsgRoutingTests: XCTestCase {
         XCTAssertEqual(event.plainText, "[链接] 一篇值得一读的文章")
     }
 
+    /// 历史回放会重新投递旧 bridge 已渲染好的 `[引用 发送者] 原文`，
+    /// 这些消息绕过启动迁移再次入库；入口必须统一成 `【引用 发送者：原文】`，
+    /// 否则提示词里的引用格式与真实消息不一致，模型会把被引用内容当成当前发言。
+    func testParserNormalizesLegacyQuoteDelimiterAtIngestion() throws {
+        let legacy = "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅"
+        let event = try XCTUnwrap(makeEvent(text: legacy, rawMessage: Sample.quoteXML))
+        XCTAssertEqual(
+            event.plainText,
+            "火锅局改到明晚吧\n【引用 张三：明天晚上七点老地方吃火锅】"
+        )
+
+        // 用户自己手打的 `[引用 …]` 没有 quote 结构，不能误伤。
+        let typed = try XCTUnwrap(makeEvent(
+            text: "我打的是 [引用 格式",
+            rawMessage: "我打的是 [引用 格式",
+            msgType: 1
+        ))
+        XCTAssertEqual(typed.plainText, "我打的是 [引用 格式")
+    }
+
     /// hook 的拍一拍启发式只看正文是否含「拍了拍」；引用回复里出现该词时
     /// 会把 `<title>`（回复正文）当拍一拍标题写进 text，引用上下文因此丢失。
     func testParserRestoresQuoteWhenHookMistookItForPatTitle() throws {
         let event = try XCTUnwrap(makeEvent(text: "火锅局改到明晚吧", rawMessage: Sample.quoteXML))
         XCTAssertEqual(
             event.plainText,
-            "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅"
+            "火锅局改到明晚吧\n【引用 张三：明天晚上七点老地方吃火锅】"
         )
     }
 
@@ -165,7 +185,7 @@ final class AppmsgRoutingTests: XCTestCase {
     func testParserNormalizesLegacyRawXMLTextSegment() throws {
         // 4.1.12 legacy 桥接：appmsg 正文就是原始 XML（没有 hook 的占位文本）。
         let event = try XCTUnwrap(makeEvent(text: Sample.quoteXML, rawMessage: Sample.quoteXML))
-        XCTAssertEqual(event.plainText, "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅")
+        XCTAssertEqual(event.plainText, "火锅局改到明晚吧\n【引用 张三：明天晚上七点老地方吃火锅】")
 
         // 非 appmsg 的原始 XML（图片/语音）不能用 appmsg 解析覆盖，保持原样。
         let imageXML = #"<msg><img aeskey="fake-key" /></msg>"#
@@ -260,7 +280,7 @@ final class AppmsgRoutingTests: XCTestCase {
             displayName: "测试机器人"
         )
         let event = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: xml))
-        XCTAssertTrue(event.plainText.contains("[引用 测试机器人]"))
+        XCTAssertTrue(event.plainText.contains("【引用 测试机器人："))
 
         let matched = evaluateGroup(event.plainText, triggers: [.quote], keywords: [],
                                     rawJSON: event.rawJSON)
@@ -405,20 +425,125 @@ final class AppmsgRoutingTests: XCTestCase {
         let byID = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
         XCTAssertEqual(byID["m-link"]?.text, "[链接] 一篇值得一读的文章")
         XCTAssertEqual(byID["m-quote"]?.text,
-                       "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅")
+                       "火锅局改到明晚吧\n【引用 张三：明天晚上七点老地方吃火锅】")
         XCTAssertEqual(byID["m-at"]?.text,
-                       "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅 @wxid_zhangsan")
+                       "火锅局改到明晚吧\n【引用 张三：明天晚上七点老地方吃火锅】 @wxid_zhangsan")
         // 普通消息与解析不出的占位保持原样（幂等、保守）。
         XCTAssertEqual(byID["m-healthy"]?.text, "普通消息")
         XCTAssertEqual(byID["m-broken"]?.text, WeChatAppmsg.placeholderText)
 
         let conversations = try await store.fetchConversations()
         let preview = try XCTUnwrap(conversations.first?.lastMessagePreview)
-        XCTAssertEqual(preview, "火锅局改到明晚吧\n[引用 张三] 明天晚上七点老地方吃火锅")
+        XCTAssertEqual(preview, "火锅局改到明晚吧\n【引用 张三：明天晚上七点老地方吃火锅】")
 
         // 再跑一次：没有可修复项，不能重复写库。
         let second = try await store.repairAppmsgMessageTexts()
         XCTAssertFalse(second.didChange)
         XCTAssertEqual(second.repairedMessages, 0)
+    }
+
+    // MARK: - 引用定界符迁移（旧 `[引用 …]` → `【引用 …】`）
+
+    /// 触发判定兼容新旧定界符：只保留回复正文。
+    func testTriggerTextStripsNewAndLegacyQuoteDelimiters() {
+        XCTAssertEqual(RuleEngine.triggerText("好的\n【引用 张三：原文】"), "好的")
+        XCTAssertEqual(RuleEngine.triggerText("好的\n【引用：原文】"), "好的")
+        XCTAssertEqual(RuleEngine.triggerText("【引用 张三：原文】"), "")
+        XCTAssertEqual(RuleEngine.triggerText("【引用：原文】"), "")
+        XCTAssertEqual(RuleEngine.triggerText("【引用】"), "")
+        // 旧格式兼容（历史库迁移前/迁移失败时）。
+        XCTAssertEqual(RuleEngine.triggerText("好的\n[引用 张三] 原文"), "好的")
+        XCTAssertEqual(RuleEngine.triggerText("[引用 张三] 原文"), "")
+        // 普通文本原样返回。
+        XCTAssertEqual(RuleEngine.triggerText("普通消息"), "普通消息")
+    }
+
+    func testRerenderLegacyQuoteTextsMigratesDelimitersAndIsIdempotent() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechatai-quote-format-\(UUID().uuidString)", isDirectory: true)
+        let store = MemoryStore(databaseURL: directory.appendingPathComponent("chatbot.sqlite"))
+        try await store.open()
+        defer {
+            Task { await store.close() }
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let conversation = Conversation(id: "123@chatroom", kind: .group, title: "测试群")
+        try await store.upsertConversations([conversation])
+        let now = Date(timeIntervalSince1970: 1_760_000_000)
+
+        func rawEventJSON(text: String, rawMessage: String, at: [String] = []) -> String {
+            var segments: [[String: Any]] = [["type": "text", "data": ["text": text]]]
+            segments += at.map { ["type": "at", "data": ["qq": $0]] }
+            var object: [String: Any] = [
+                "self_id": "wxid_bot",
+                "user_id": "wxid_lisi",
+                "group_id": conversation.id,
+                "message_id": "m-\(UUID().uuidString)",
+                "message": segments,
+                "raw_message": rawMessage,
+                "message_type": "group",
+                "msg_type": 49
+            ]
+            if !at.isEmpty { object["mentions"] = at }
+            let data = try! JSONSerialization.data(withJSONObject: object)
+            return String(data: data, encoding: .utf8)!
+        }
+
+        let quoteRaw = quoteXML(reply: "好的", quoted: "原文", senderID: "wxid_zhangsan",
+                                fromID: conversation.id)
+
+        func message(id: String, text: String, rawJSON: String, offset: TimeInterval) -> ChatMessage {
+            ChatMessage(
+                id: id,
+                conversationID: conversation.id,
+                senderID: "wxid_lisi",
+                senderName: "李四",
+                direction: .incoming,
+                text: text,
+                timestamp: now.addingTimeInterval(offset),
+                rawJSON: rawJSON
+            )
+        }
+
+        try await store.upsertMessages([
+            // 旧格式 + 结构化 at 后缀（真实历史数据里出现过）。
+            message(id: "m-legacy",
+                    text: "好的\n[引用 张三] 原文 @wxid_zhangsan",
+                    rawJSON: rawEventJSON(text: WeChatAppmsg.placeholderText,
+                                          rawMessage: quoteRaw, at: ["wxid_zhangsan"]),
+                    offset: 0),
+            // 用户自己打的文本，raw 不是 appmsg：不能被迁移误伤。
+            message(id: "m-user",
+                    text: "我打的是 [引用 格式",
+                    rawJSON: rawEventJSON(text: "我打的是 [引用 格式", rawMessage: "我打的是 [引用 格式"),
+                    offset: 10),
+            // 最新一条：迁移后会话预览应刷新。
+            message(id: "m-legacy-latest",
+                    text: "在吗\n[引用 张三] 原文",
+                    rawJSON: rawEventJSON(
+                        text: WeChatAppmsg.placeholderText,
+                        rawMessage: quoteXML(reply: "在吗", quoted: "原文",
+                                             senderID: "wxid_zhangsan", fromID: conversation.id)
+                    ),
+                    offset: 20)
+        ])
+
+        let migrated = try await store.rerenderLegacyQuoteTexts()
+        XCTAssertEqual(migrated, 2)
+
+        let messages = try await store.fetchMessages(conversationID: conversation.id, limit: 10)
+        let byID = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
+        XCTAssertEqual(byID["m-legacy"]?.text, "好的\n【引用 张三：原文】 @wxid_zhangsan")
+        XCTAssertEqual(byID["m-legacy-latest"]?.text, "在吗\n【引用 张三：原文】")
+        XCTAssertEqual(byID["m-user"]?.text, "我打的是 [引用 格式")
+
+        let conversations = try await store.fetchConversations()
+        let preview = try XCTUnwrap(conversations.first?.lastMessagePreview)
+        XCTAssertEqual(preview, "在吗\n【引用 张三：原文】")
+
+        // 幂等：旧定界符已不存在，第二次运行 0 条。
+        let second = try await store.rerenderLegacyQuoteTexts()
+        XCTAssertEqual(second, 0)
     }
 }

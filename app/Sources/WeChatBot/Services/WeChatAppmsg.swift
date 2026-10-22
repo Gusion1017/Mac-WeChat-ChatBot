@@ -30,7 +30,7 @@ struct WeChatAppmsg: Equatable, Sendable {
     var type: Int
     /// appmsg `<title>`；引用回复时就是回复正文。自闭合/缺失时为空字符串。
     var title: String
-    /// 还原后的展示文本，保证非空。没有可读内容时退回 `[卡片]` / `[引用]` / `[拍一拍]`。
+    /// 还原后的展示文本，保证非空。没有可读内容时退回 `[卡片]` / `【引用】` / `[拍一拍]`。
     var text: String
     /// 只有引用消息（type 57）才有；refermsg 损坏时字段为空但仍是引用消息。
     var quote: Quote?
@@ -176,10 +176,12 @@ struct WeChatAppmsg: Equatable, Sendable {
         return normalized.isEmpty ? label : "\(label) \(normalized)"
     }
 
-    /// 引用消息：回复正文 + 换行 + `[引用 发送者] 原文摘要`。
+    /// 引用消息：回复正文 + 换行 + `【引用 发送者：原文摘要】`。
     ///
+    /// 被引用内容整体用 `【】` 括起来（2026-10-22 调整）：AI 能一眼区分
+    /// 「本轮回复」和「被引用的历史消息」，不会把原文当成当前发言人的新内容。
     /// 回复正文**不压缩内部换行、不截断**（用户可能故意分行）；只 trim 首尾。
-    /// 摘要为空（例如 refermsg 损坏）时只输出正文，不输出空的 `[引用]`。
+    /// 摘要为空（例如 refermsg 损坏）时只输出正文，不输出空的引用行。
     private static func quoteText(title: String, quote: Quote?) -> String {
         let reply = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let snippet = quote?.snippet ?? ""
@@ -189,13 +191,13 @@ struct WeChatAppmsg: Equatable, Sendable {
         if snippet.isEmpty {
             quoteLine = ""
         } else if sender.isEmpty {
-            quoteLine = "[引用] \(snippet)"
+            quoteLine = "【引用：\(snippet)】"
         } else {
-            quoteLine = "[引用 \(sender)] \(snippet)"
+            quoteLine = "【引用 \(sender)：\(snippet)】"
         }
 
         if reply.isEmpty {
-            return quoteLine.isEmpty ? "[引用]" : quoteLine
+            return quoteLine.isEmpty ? "【引用】" : quoteLine
         }
         return quoteLine.isEmpty ? reply : reply + "\n" + quoteLine
     }
@@ -272,8 +274,8 @@ struct WeChatAppmsg: Equatable, Sendable {
         }
         if WeChatXML.containsTag("appmsg", in: xml) {
             guard let nested = parse(xml) else { return "" }
-            // 嵌套引用只取内层 title：否则外层会再套一层 `[引用 …]`，
-            // 出现 `[引用 A] [引用 B] 正文` 这种双层方括号。
+            // 嵌套引用只取内层 title：否则外层会再套一层引用定界符，
+            // 出现 `【引用 A：…【引用 B：…】】` 这种混合嵌套。
             if nested.type == 57 {
                 return nested.title.trimmingCharacters(in: .whitespacesAndNewlines)
             }

@@ -17,7 +17,7 @@ final class WeChatAppmsgTests: XCTestCase {
         let appmsg = try XCTUnwrap(WeChatAppmsg.parse(xml))
         XCTAssertEqual(appmsg.type, 57)
         XCTAssertEqual(appmsg.title, "好呀，那就周六")
-        XCTAssertEqual(appmsg.text, "好呀，那就周六\n[引用 李四] 周末去爬山吗")
+        XCTAssertEqual(appmsg.text, "好呀，那就周六\n【引用 李四：周末去爬山吗】")
         XCTAssertFalse(appmsg.text.contains(WeChatAppmsg.placeholderText))
         XCTAssertEqual(
             appmsg.quote,
@@ -35,7 +35,7 @@ final class WeChatAppmsgTests: XCTestCase {
             extra: referXML(type: 3, displayName: "张三", content: escapedXML(inner))
         )
         let appmsg = try XCTUnwrap(WeChatAppmsg.parse(xml))
-        XCTAssertEqual(appmsg.text, "这是什么\n[引用 张三] [图片]")
+        XCTAssertEqual(appmsg.text, "这是什么\n【引用 张三：[图片]】")
         XCTAssertEqual(appmsg.quote?.snippet, "[图片]")
         XCTAssertEqual(appmsg.quote?.messageType, 3)
     }
@@ -47,7 +47,7 @@ final class WeChatAppmsgTests: XCTestCase {
             title: "看这个",
             extra: referXML(type: 3, displayName: "张三", content: nil)
         )
-        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(xml)).text, "看这个\n[引用 张三] [图片]")
+        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(xml)).text, "看这个\n【引用 张三：[图片]】")
     }
 
     // MARK: - 3. 引用表情
@@ -59,7 +59,7 @@ final class WeChatAppmsgTests: XCTestCase {
             title: "笑死",
             extra: referXML(type: 47, displayName: "李四", content: escapedXML(inner))
         )
-        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(xml)).text, "笑死\n[引用 李四] [表情]")
+        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(xml)).text, "笑死\n【引用 李四：[表情]】")
     }
 
     // MARK: - 4. 引用链接
@@ -72,7 +72,7 @@ final class WeChatAppmsgTests: XCTestCase {
             extra: referXML(type: 49, displayName: "张三", content: escapedXML(inner))
         )
         let appmsg = try XCTUnwrap(WeChatAppmsg.parse(xml))
-        XCTAssertEqual(appmsg.text, "原帖不错\n[引用 张三] [链接] 示例文章标题")
+        XCTAssertEqual(appmsg.text, "原帖不错\n【引用 张三：[链接] 示例文章标题】")
         XCTAssertEqual(appmsg.quote?.snippet, "[链接] 示例文章标题")
     }
 
@@ -90,11 +90,11 @@ final class WeChatAppmsgTests: XCTestCase {
             extra: referXML(type: 49, displayName: "张三", content: escapedXML(inner))
         )
         let appmsg = try XCTUnwrap(WeChatAppmsg.parse(xml))
-        XCTAssertEqual(appmsg.text, "说得对\n[引用 张三] 内层引用正文")
+        XCTAssertEqual(appmsg.text, "说得对\n【引用 张三：内层引用正文】")
         XCTAssertEqual(appmsg.quote?.snippet, "内层引用正文")
         XCTAssertFalse(
-            appmsg.quote?.snippet.contains("[引用") ?? true,
-            "嵌套引用摘要不能再套一层 [引用 …]"
+            appmsg.quote?.snippet.contains("【引用") ?? true,
+            "嵌套引用摘要不能再套一层引用定界符"
         )
     }
 
@@ -346,17 +346,17 @@ final class WeChatAppmsgTests: XCTestCase {
             title: nil,
             extra: referXML(type: 1, displayName: "张三", content: "被引用的原文")
         )
-        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(xml)).text, "[引用 张三] 被引用的原文")
+        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(xml)).text, "【引用 张三：被引用的原文】")
 
         let noSender = appmsgXML(
             type: 57,
             title: nil,
             extra: referXML(type: 1, displayName: nil, content: "没有昵称的原文")
         )
-        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(noSender)).text, "[引用] 没有昵称的原文")
+        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(noSender)).text, "【引用：没有昵称的原文】")
 
         let bare = appmsgXML(type: 57, title: nil, extra: "<refermsg />")
-        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(bare)).text, "[引用]")
+        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(bare)).text, "【引用】")
     }
 
     func testQuoteSnippetTruncatesAt160ButReplyIsNotTruncated() throws {
@@ -371,7 +371,7 @@ final class WeChatAppmsgTests: XCTestCase {
         XCTAssertEqual(appmsg.quote?.snippet, String(repeating: "原", count: 160) + "…")
         XCTAssertEqual(
             appmsg.text,
-            longReply + "\n[引用 张三] " + String(repeating: "原", count: 160) + "…"
+            longReply + "\n【引用 张三：" + String(repeating: "原", count: 160) + "…】"
         )
     }
 

@@ -174,9 +174,10 @@ RuntimeCoordinator.handle(event)
 - appmsg（`msg_type=49`）归一化（2026-10-22）：hook 对拍一拍以外的 appmsg 只写
   `[链接/文件]`，`OneBotEventParser` 用 `WeChatAppmsg.parse`（`Services/WeChatAppmsg.swift`）
   从 `raw_message` 还原展示文本——引用 57 → `回复正文` + 换行 +
-  `[引用 发送者] 原文摘要`；链接 5 / 文件 6 / 视频 4 / 表情 8 / 聊天记录 19 / 小程序 33·36 /
+  `【引用 发送者：原文摘要】`；链接 5 / 文件 6 / 视频 4 / 表情 8 / 聊天记录 19 / 小程序 33·36 /
   转账 2000 / 红包 2001 / 视频号 51 → `[类型] 标题`。只替换占位文本（以及 hook 误把引用
-  当拍一拍时写入的 title、旧 bridge 原样透传的 appmsg XML），拍一拍、`at` 段与媒体段保持原样。
+  当拍一拍时写入的 title、旧 bridge 原样透传的 appmsg XML、旧 bridge 已渲染的
+  `[引用 发送者]` 定界符文本），拍一拍、`at` 段与媒体段保持原样。
 
 ### 5.3 AIClient
 
@@ -198,7 +199,7 @@ RuntimeCoordinator.handle(event)
 ### 5.4 RuleEngine
 
 引用消息（2026-10-22）：触发判定只取回复正文（`RuleEngine.triggerText` 去掉
-`WeChatAppmsg` 生成的 `[引用 …]` 行）；被引用原文仍进入 AI 上下文，但不参与
+`WeChatAppmsg` 生成的 `【引用 …】` 行，兼容旧 `[引用 …]`）；被引用原文仍进入 AI 上下文，但不参与
 @ / 关键词 / 前缀匹配，避免「引用旧消息」重复唤醒。真实结构化 `at` 段不受影响。
 
 硬门槛顺序：
@@ -247,15 +248,17 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 
 - system = persona.systemPrompt（无可用人格时回退到 `Persona.defaultSystemPrompt`）+ 真人聊天约束 +
   当前时间/会话类型/会话名 + `conversation.note`（会话备注）+ 长期记忆注入 + 本会话早期片段召回。
-- 群聊：每条 incoming 消息（含历史 user 消息与当前消息）拼成「发言人：内容」，
-  `senderName` 优先、空则回退 `senderID`（`ChatEngine.attributedUserText` / `speakerLabel`）；
-  私聊不加前缀；自己的消息仍作为 `assistant` 原文。群聊 system prompt 说明
-  「结合长期记忆中的 wxid→昵称映射判断发言人，回复不输出 wxid」。
+- 群聊：每条 incoming 消息（含历史 user 消息与当前消息）拼成「昵称(wxid)：内容」，
+  `senderName` 为空时直接「wxid：内容」（`ChatEngine.attributedUserText` /
+  `promptSpeakerLabel`）；私聊不加前缀；自己的消息仍作为 `assistant` 原文。
+  群聊 system prompt 说明消息格式，要求**以括号内 wxid 对照长期记忆**
+  （记忆里的人员关系是「wxid：称呼」），找不到该 wxid 时不要套用其他人的称呼，
+  回复不输出 wxid。昵称会变、会重名，wxid 是消息与记忆之间唯一稳定的连接键。
 - 近期上下文：`history.suffix(maxContextMessages)`（上限 10），按方向映射 user/assistant，
   同角色相邻消息合并；确保当前消息在末尾。
 - 早期片段召回：只在**当前会话**内按关键词 `LIKE` 检索，排除短期窗口内消息、当前消息、
   系统消息与晚于当前消息的内容；最多 3 条、每条截断 120 字；发出标「我」，
-  私聊收到标「对方」，群聊收到标发言人（`speakerLabel`，通常是 wxid，缺失时「对方」）；
+  私聊收到标「对方」，群聊收到标发言人（`promptSpeakerLabel`，缺失时「对方」）；
   标题为「本会话较早的相关片段（可能已过时，仅供参考）」；不再检索其它会话原文。
 - 拟人化：`humanize.enabled && splitMessages` 时按句末标点/长度切分，
   合并过短片段，`maxSegments` 封顶，单段最长 600 字；每段随机延迟
@@ -371,16 +374,16 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 
 ### 8.1 `swift test`（推荐，无需 UI）
 
-测试 target 位于 `app/Tests/WeChatAITests/`（`CoreServicesTests.swift`（43）、
+测试 target 位于 `app/Tests/WeChatAITests/`（`CoreServicesTests.swift`（44）、
 `SleepPreventionTests.swift`（9）、`MessageRoutingTests.swift`（12）、
 `NativeSendConfigTests.swift`（5）、`ConversationNameTests.swift`（8）、`WorkingHoursStatusTests.swift`（5）、
 `ContactDirectoryTests.swift`（15）、`PatMessageTests.swift`（20）、`PatReplySettingsTests.swift`（7）、
-`HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（25）、`AppmsgRoutingTests.swift`（17），共 170 项）：
+`HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（25）、`AppmsgRoutingTests.swift`（20），共 174 项）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 170 tests, with 0 failures（2026-10-22）
+# Executed 174 tests, with 0 failures（2026-10-22）
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
@@ -420,7 +423,7 @@ RuleEngine 白黑名单/@/关键词/冷却、Scheduler 各 repeat 的 nextFireAt
 ChatEngine 分段/角色合并/关键词分词。输出 `[selftest] PASS/FAIL/WARN` 与汇总退出码。
 
 历史 CLI 驱动实测：**63 passed / 0 failed / 0 warnings**；当前 `swift test` 为
-**170/170 通过**（见 8.1；2026-10-22 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
+**174/174 通过**（见 8.1；2026-10-22 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
 Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Keychain 保存/删除、
 `config.json` 无明文 Key。
 
@@ -454,9 +457,13 @@ Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Ke
   不确定则保留；搬完重算预览并删除空会话，幂等（2026-10-21）。
 - **appmsg 展示文本自愈**：启动时在其它修复之后跑 `MemoryStore.repairAppmsgMessageTexts()`：
   只扫描文本以 `[链接/文件]` 开头且带 `raw_json` 的消息，按 `raw_message` 的 appmsg
-  `<type>` / `<title>` / `<refermsg>` 重算可读文本（引用＝正文 + `[引用 发送者] 原文摘要`），
+  `<type>` / `<title>` / `<refermsg>` 重算可读文本（引用＝正文 + `【引用 发送者：原文摘要】`），
   批量更新并刷新受影响会话预览；占位前缀后的结构化 `at` 后缀保留，
   解析不出的消息保持原样；幂等（2026-10-22）。
+- **引用定界符迁移**（2026-10-22）：旧引用文本 `正文\n[引用 发送者] 原文` 在启动时由
+  `MemoryStore.rerenderLegacyQuoteTexts()` 幂等重排为 `正文\n【引用 发送者：原文】`
+  （从 `raw_json` 重新生成、保留 `at` 后缀、刷新预览）；`RuleEngine.triggerText`
+  同时兼容新旧定界符，历史消息重排失败也不影响触发判定。
 - **历史回放不触发回复**：微信加载历史/补同步会把旧消息重新投递，App 仍入库供检索，
   但超过 120 秒的消息不再触发自动回复，也不会把会话预览/未读回退。
 - **白名单语义**：`effectiveWhitelist` / `effectiveBlacklist` 是“会话 ID 或用户 wxid”的统一名单；

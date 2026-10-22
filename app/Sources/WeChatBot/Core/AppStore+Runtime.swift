@@ -301,6 +301,7 @@ final class RuntimeCoordinator {
         await repairMisroutedConversationsIfNeeded()
         await repairConversationTitlesIfNeeded()
         await repairAppmsgTextsIfNeeded()
+        await rerenderLegacyQuoteTextsIfNeeded()
 
         do {
             store.conversations = try await memory.fetchConversations(limit: 300)
@@ -409,6 +410,13 @@ final class RuntimeCoordinator {
               result.didChange else { return }
         log(.info, "Database", "已还原 \(result.repairedMessages) 条 appmsg 消息文本"
             + "（引用 / 链接 / 文件等，影响 \(result.affectedConversationIDs.count) 个会话）")
+    }
+
+    /// 把历史引用消息的展示定界符重排为 `【引用 发送者：原文】`（AI 更容易辨认）。
+    /// 与实时解析共用 `WeChatAppmsg`；只处理 raw_json 可解析的引用 appmsg，幂等。
+    private func rerenderLegacyQuoteTextsIfNeeded() async {
+        guard let count = try? await memory.rerenderLegacyQuoteTexts(), count > 0 else { return }
+        log(.info, "Database", "已重排 \(count) 条引用消息的展示格式（【引用 …】定界符）")
     }
 
     /// 采纳 bridge `get_login_info` 返回的权威账号 wxid。

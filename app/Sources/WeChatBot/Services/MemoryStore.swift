@@ -921,6 +921,77 @@ actor MemoryStore {
         )
     }
 
+    // MARK: - 引用定界符迁移
+
+    /// 把旧引用展示格式（`正文\n[引用 发送者] 原文`）重排为带完整定界符的
+    /// `正文\n【引用 发送者：原文】`，让 AI 更容易区分「本轮回复」与被引用的历史消息。
+    ///
+    /// 只处理 `raw_json` 能解析出引用 appmsg（`refermsg`）的消息；用户自己打的
+    /// `[引用 …` 文本没有 appmsg 结构，保持原样。结构化 `at` 后缀从 `raw_json`
+    /// 的 message 段重建（与 `OneBotEvent.plainText` 一致），处理完刷新会话预览。
+    /// 幂等：迁移后文本不再匹配旧定界符，重复启动不会重复写库。
+    func rerenderLegacyQuoteTexts() throws -> Int {
+        try ensureOpen()
+        let select = try prepare("""
+        SELECT id, conversation_id, text, raw_json FROM messages
+        WHERE raw_json IS NOT NULL
+          AND (text LIKE '%[引用 %' OR text LIKE '%[引用] %');
+        """)
+        defer { sqlite3_finalize(select) }
+
+        var updates: [(messageID: String, conversationID: String, text: String)] = []
+        while sqlite3_step(select) == SQLITE_ROW {
+            let messageID = try text(select, 0)
+            let conversationID = try text(select, 1)
+            let currentText = try text(select, 2)
+            let rawJSON = optionalText(select, 3)
+            guard let appmsg = WeChatAppmsg.parse(eventJSON: rawJSON),
+                  appmsg.quote != nil,
+                  !appmsg.text.isEmpty else { continue }
+            let rerendered = appmsg.text + Self.atSuffix(fromRawJSON: rawJSON)
+            guard rerendered != currentText else { continue }
+            updates.append((messageID, conversationID, rerendered))
+        }
+        guard !updates.isEmpty else { return 0 }
+
+        let affected = Set(updates.map(\.conversationID))
+        try transaction {
+            let update = try prepare("UPDATE messages SET text = ? WHERE id = ?;")
+            defer { sqlite3_finalize(update) }
+            for item in updates {
+                sqlite3_reset(update)
+                sqlite3_clear_bindings(update)
+                try bind(update, 1, item.text)
+                try bind(update, 2, item.messageID)
+                try stepDone(update)
+            }
+            try refreshConversationPreviewRows(conversationIDs: affected)
+        }
+        return updates.count
+    }
+
+    /// 从事件 `raw_json` 的 `message` 段重建 `at` 后缀（`" @wxid"`），
+    /// 与 `OneBotEvent.plainText` 的拼接方式一致；没有 at 段时返回空串。
+    private static func atSuffix(fromRawJSON rawJSON: String?) -> String {
+        guard let rawJSON, let data = rawJSON.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return ""
+        }
+        // 兼容 `{"data": {...}}` 包装事件。
+        let event = (object["data"] as? [String: Any]) ?? object
+        guard let segments = event["message"] as? [[String: Any]] else { return "" }
+        var targets: [String] = []
+        for segment in segments where (segment["type"] as? String) == "at" {
+            let payload = segment["data"] as? [String: Any] ?? [:]
+            let target = (payload["qq"] as? String)
+                ?? (payload["user_id"] as? String)
+                ?? (payload["target_id"] as? String) ?? ""
+            guard !target.isEmpty else { continue }
+            targets.append("@\(target)")
+        }
+        return targets.isEmpty ? "" : " " + targets.joined(separator: " ")
+    }
+
     /// 清理旧版本写入的裸 ID 标题（`wxid_*` / `*@chatroom` / `wxid==id` / 「群聊 <id>」）。
     ///
     /// 旧 App 直接把事件里的 wxid 写成 `conversations.title`，这些值会渗透到列表、
