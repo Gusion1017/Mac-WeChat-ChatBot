@@ -671,6 +671,108 @@ final class CoreServicesTests: XCTestCase {
                       "发言前缀必须带记忆使用的同一个 wxid，模型才能精确对齐")
         XCTAssertFalse(body.contains("测试群友乙(wxid_member_a)"),
                        "不能把记忆里另一个人的称呼拼到当前发言人上")
+
+        let identity = "【本轮发言人身份】群友甲（wxid_member_a）"
+        let withIdentity = engine.buildMessages(
+            conversation: group, incoming: incoming, settings: .default,
+            persona: nil, history: history, memoryNotes: memoryNotes,
+            speakerIdentity: identity
+        )
+        XCTAssertTrue(withIdentity.first?.content.hasSuffix(identity) ?? false,
+                      "身份硬约束应放在 system 提示词最后，压过最近聊天里的玩梗")
+    }
+
+    /// 手写/核心记忆里的 `wxid：称呼` 是群聊身份的唯一权威来源；
+    /// 最近聊天里「我现在是某某」「某某其实是某某」不能被当成映射。
+    func testSpeakerIdentityNoteUsesAuthoritativeWXIDNotRecentChat() throws {
+        let group = Conversation(id: "test-group@chatroom", kind: .group, title: "测试群")
+        let incoming = ChatMessage(
+            id: "m", conversationID: group.id, senderID: "wxid_member_a",
+            senderName: "群友甲", direction: .incoming,
+            text: "好的，我现在是别名乙", timestamp: Date()
+        )
+        let memories = [
+            LongTermMemory(
+                conversationID: group.id,
+                summary: "群聊人员：\nwxid_member_b：测试群友乙/别名乙\nwxid_member_a：群友甲/别名甲",
+                isCore: true, source: "manual"
+            ),
+            LongTermMemory(
+                conversationID: group.id,
+                summary: "- 人物与称呼：群友甲被称别名乙\n- 偏好：喜欢猫",
+                source: "summary"
+            )
+        ]
+        let note = try XCTUnwrap(ChatEngine.speakerIdentityNote(
+            conversation: group, incoming: incoming, memories: memories
+        ))
+        XCTAssertTrue(note.contains("群友甲"))
+        XCTAssertTrue(note.contains("wxid_member_a"))
+        XCTAssertTrue(note.contains("不要附和"))
+        XCTAssertFalse(note.contains("测试群友乙"), "不能把另一个人的称呼写进本轮身份约束")
+        XCTAssertFalse(note.contains("别名乙"), "不能把群聊里的临时改口当成权威称呼")
+    }
+
+    func testPersonMappingsParseWXIDAliases() {
+        let mappings = ChatEngine.personMappings(in: [
+            """
+            群聊中微信号对应的人员（回答时不要带出 wxid；排在前面的称呼优先）：
+            wxid_member_b：测试群友乙/别名乙
+            wxid_member_a：群友甲/别名甲
+            """,
+            "项目负责人（回答时不要带出 wxid）：wxid_owner：负责人"
+        ])
+        XCTAssertEqual(mappings["wxid_member_a"], ["群友甲", "别名甲"])
+        XCTAssertEqual(mappings["wxid_member_b"], ["测试群友乙", "别名乙"])
+        XCTAssertEqual(mappings["wxid_owner"], ["负责人"])
+    }
+
+    func testAutoSummaryPersonSectionIsStrippedWhenManualMappingExists() {
+        let auto = LongTermMemory(
+            conversationID: "test-group@chatroom",
+            summary: "- 人物与称呼：群友甲被称别名乙\n- 偏好：喜欢猫",
+            source: "summary"
+        )
+        let core = LongTermMemory(
+            conversationID: "test-group@chatroom",
+            summary: "wxid_member_a：群友甲/别名甲",
+            isCore: true, source: "manual"
+        )
+        let stripped = ChatEngine.promptSummary(for: auto, hasAuthoritativePersonMapping: true)
+        XCTAssertFalse(stripped.contains("人物与称呼"))
+        XCTAssertFalse(stripped.contains("别名乙"))
+        XCTAssertTrue(stripped.contains("喜欢猫"))
+        XCTAssertEqual(
+            ChatEngine.promptSummary(for: core, hasAuthoritativePersonMapping: true),
+            core.summary,
+            "手写/核心记忆本身不能被裁剪"
+        )
+        XCTAssertTrue(
+            ChatEngine.promptSummary(for: auto, hasAuthoritativePersonMapping: false)
+                .contains("人物与称呼"),
+            "没有手写映射时保留自动总结的人物信息作为兜底"
+        )
+    }
+
+    func testSummaryPromptForbidsPersonClaimsWhenManualMappingExists() {
+        let group = Conversation(id: "test-group@chatroom", kind: .group, title: "测试群")
+        let core = LongTermMemory(
+            conversationID: group.id,
+            summary: "wxid_member_a：群友甲/别名甲",
+            isCore: true, source: "manual"
+        )
+        let pair = ChatEngine.summaryPrompt(
+            conversation: group,
+            authoritativeMemories: [core],
+            hasAuthoritativePersonMapping: true,
+            existingSummary: "- 人物与称呼：群友甲被称别名乙\n- 偏好：喜欢猫",
+            transcript: "群友甲：好的，我现在是别名乙\n测试群友乙：对，你就是别名乙",
+            newMessageCount: 2
+        )
+        XCTAssertTrue(pair.user.contains("人物与称呼由用户手写的核心记忆维护"))
+        XCTAssertTrue(pair.user.contains("玩笑"))
+        XCTAssertTrue(pair.user.contains("以手写记忆为准"))
+        XCTAssertTrue(pair.user.contains("wxid_member_a：群友甲/别名甲"))
     }
 
     func testEarlierRecallStaysInCurrentConversation() async throws {

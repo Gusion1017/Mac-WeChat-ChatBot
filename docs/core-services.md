@@ -247,13 +247,18 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 ### 5.5 ChatEngine
 
 - system = persona.systemPrompt（无可用人格时回退到 `Persona.defaultSystemPrompt`）+ 真人聊天约束 +
-  当前时间/会话类型/会话名 + `conversation.note`（会话备注）+ 长期记忆注入 + 本会话早期片段召回。
+  当前时间/会话类型/会话名 + `conversation.note`（会话备注）+ 长期记忆注入 + 本会话早期片段召回 +
+  群聊「本轮发言人身份」硬约束（放在 system 最后，压过最近聊天里的玩梗）。
 - 群聊：每条 incoming 消息（含历史 user 消息与当前消息）拼成「昵称(wxid)：内容」，
   `senderName` 为空时直接「wxid：内容」（`ChatEngine.attributedUserText` /
   `promptSpeakerLabel`）；私聊不加前缀；自己的消息仍作为 `assistant` 原文。
   群聊 system prompt 说明消息格式，要求**以括号内 wxid 对照长期记忆**
   （记忆里的人员关系是「wxid：称呼」），找不到该 wxid 时不要套用其他人的称呼，
   回复不输出 wxid。昵称会变、会重名，wxid 是消息与记忆之间唯一稳定的连接键。
+- 本轮身份硬约束：`ChatEngine.speakerIdentityNote` 从**核心/手写**记忆解析
+  `wxid：称呼`（`personMappings`），当前发言人命中时注入其权威称呼并明确
+  「群聊里的玩笑/临时外号/自称/‘某人其实是某人’不能覆盖映射，不要附和」；
+  未命中时提示不要套用他人称呼。这是提示词级约束，不改变数据库。
 - 近期上下文：`history.suffix(maxContextMessages)`（上限 10），按方向映射 user/assistant，
   同角色相邻消息合并；确保当前消息在末尾。
 - 早期片段召回：只在**当前会话**内按关键词 `LIKE` 检索，排除短期窗口内消息、当前消息、
@@ -270,14 +275,20 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
   综合权重 = 基础权重 × 内容重要度 × 使用强化 × 30 天半衰期，其中基础权重可由用户
   在记忆编辑器中自由调整（0.1~10×），核心记忆之间也按该权重排序；提示词注明核心/手写优先、
   自动总结仅供参考、冲突时以核心/手写为准；召回后 `MemoryStore.recordMemoryAccess(ids:)`
-  以 best-effort 累加访问次数。
+  以 best-effort 累加访问次数。当本会话存在核心/手写 `wxid：称呼` 映射时，
+  自动总结的「人物与称呼」段不注入（`ChatEngine.promptSummary` 剔除），
+  避免和权威映射打架；没有权威映射时仍保留自动总结的人物信息作为兜底。
 - 批量总结：短期窗口（10 条）外的未总结消息**攒够 8 条**才调用一次 AI，
   单批最多 40 条；12 条不总结、18 条总结 8 条、26 条再总结 8 条。
-  AI 提示要求结构化（人物与称呼 / 偏好 / 约定与待办 / 其他），最多 5 条要点、
-  总长 ≤600 字，不编造、不罗列成员 wxid 清单；同会话手写记忆作为「权威参考」传入
-  合并提示、不被覆盖；结果经 `MemorySummaryCompactor` 强制 ≤600 字符；
-  无 Key/AI 失败时本地兜底同样压缩；同一会话只保留一条自动滚动总结，
-  历史遗留的多条自动总结会先合并清理。详见 [memory.md](memory.md)。
+  AI 提示由 `ChatEngine.summaryPrompt` 纯函数生成：默认结构化（人物与称呼 / 偏好 /
+  约定与待办 / 其他），最多 5 条要点、总长 ≤600 字，不编造、不罗列成员 wxid 清单；
+  存在本会话核心/手写映射时，要求模型**不输出人物与称呼段**、不记录群聊玩笑/临时外号/
+  自称/“某人其实是某人”的玩梗，冲突时以手写记忆为准；传入的「已有自动记忆」会先剔除
+  人物段，模型输出与本地兜底结果再经 `removingPersonMappingLines` 兜底。
+  核心 + 手写记忆作为「权威参考」传入合并提示、不被覆盖；结果经
+  `MemorySummaryCompactor` 强制 ≤600 字符；无 Key/AI 失败时本地兜底同样压缩；
+  同一会话只保留一条自动滚动总结，历史遗留的多条自动总结会先合并清理。
+  详见 [memory.md](memory.md)。
 - 流式总开关：`settings.ai.streamReplies == false` 时所有通道强制非流式；
   开启时按 `provider.stream` 决定（`ChatEngine.forceStream(for:)`）。
 - 返回 `ChatReplyPlan`（segments/全文本/provider/persona/model/latency/usage/delays/上下文条数）。
@@ -374,16 +385,16 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 
 ### 8.1 `swift test`（推荐，无需 UI）
 
-测试 target 位于 `app/Tests/WeChatAITests/`（`CoreServicesTests.swift`（44）、
+测试 target 位于 `app/Tests/WeChatAITests/`（`CoreServicesTests.swift`（48）、
 `SleepPreventionTests.swift`（9）、`MessageRoutingTests.swift`（12）、
 `NativeSendConfigTests.swift`（5）、`ConversationNameTests.swift`（8）、`WorkingHoursStatusTests.swift`（5）、
 `ContactDirectoryTests.swift`（15）、`PatMessageTests.swift`（20）、`PatReplySettingsTests.swift`（7）、
-`HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（25）、`AppmsgRoutingTests.swift`（20），共 174 项）：
+`HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（25）、`AppmsgRoutingTests.swift`（20），共 178 项）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 174 tests, with 0 failures（2026-10-22）
+# Executed 178 tests, with 0 failures（2026-10-22）
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
@@ -423,7 +434,7 @@ RuleEngine 白黑名单/@/关键词/冷却、Scheduler 各 repeat 的 nextFireAt
 ChatEngine 分段/角色合并/关键词分词。输出 `[selftest] PASS/FAIL/WARN` 与汇总退出码。
 
 历史 CLI 驱动实测：**63 passed / 0 failed / 0 warnings**；当前 `swift test` 为
-**174/174 通过**（见 8.1；2026-10-22 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
+**178/178 通过**（见 8.1；2026-10-22 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
 Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Keychain 保存/删除、
 `config.json` 无明文 Key。
 

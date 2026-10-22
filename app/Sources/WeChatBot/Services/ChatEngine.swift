@@ -92,7 +92,18 @@ final class ChatEngine: @unchecked Sendable {
         history: [ChatMessage],
         dryRun: Bool
     ) async throws -> ChatReplyPlan {
-        let longTermNotes = await recallLongTermMemory(conversation: conversation)
+        let memories = (try? await memory.fetchMemoriesForPrompt(
+            conversationID: conversation.id,
+            limit: Self.longTermMemoryLimit
+        )) ?? []
+        let longTermNotes = await recallLongTermMemory(conversation: conversation, memories: memories)
+        // 本轮发言人的权威身份约束：群昵称会被改、会被开玩笑，长期记忆里的
+        // wxid→称呼才是稳定键。把这条放到 system 末尾，压过最近聊天里的玩梗。
+        let speakerIdentity = Self.speakerIdentityNote(
+            conversation: conversation,
+            incoming: incoming,
+            memories: memories
+        )
         let earlierNotes = await recallEarlierMessages(
             conversation: conversation,
             incoming: incoming,
@@ -109,7 +120,8 @@ final class ChatEngine: @unchecked Sendable {
             settings: settings,
             persona: persona,
             history: history,
-            memoryNotes: memoryNotes
+            memoryNotes: memoryNotes,
+            speakerIdentity: speakerIdentity
         )
         let temperature = settings.ai.temperature(forModel: AIClient.effectiveModel(for: provider))
         let result = try await aiClient.complete(
@@ -139,7 +151,8 @@ final class ChatEngine: @unchecked Sendable {
         settings: AppSettings,
         persona: Persona?,
         history: [ChatMessage],
-        memoryNotes: String?
+        memoryNotes: String?,
+        speakerIdentity: String? = nil
     ) -> [AIMessage] {
         var systemLines: [String] = []
         let basePrompt = (persona?.systemPrompt ?? Persona.defaultSystemPrompt)
@@ -164,6 +177,10 @@ final class ChatEngine: @unchecked Sendable {
         }
         if let memoryNotes, !memoryNotes.isEmpty {
             systemLines.append("相关历史记忆（仅供参考，不要逐字复述）：\n\(memoryNotes)")
+        }
+        // 放在最后：最近聊天里的「我就是某某」「某某其实是某某」不能覆盖这条。
+        if let speakerIdentity, !speakerIdentity.isEmpty {
+            systemLines.append(speakerIdentity)
         }
 
         var messages: [AIMessage] = [.system(systemLines.joined(separator: "\n"))]
@@ -334,19 +351,130 @@ final class ChatEngine: @unchecked Sendable {
         return unique
     }
 
+    // MARK: Speaker identity / person mapping
+
+    /// 从核心/手写记忆里解析 `wxid_xxx：称呼1/称呼2` 形式的人员对应关系。
+    ///
+    /// 只用于群聊提示词的硬约束与自动总结冲突过滤；解析不出的行直接忽略，
+    /// 不影响其它记忆。昵称本身可以包含括号（如「昵称（备注）」），不做过度清洗。
+    static func personMappings(in summaries: [String]) -> [String: [String]] {
+        var result: [String: [String]] = [:]
+        let pattern = #"(wxid_[A-Za-z0-9_-]+)\s*[：:]\s*([^\n]+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return result }
+
+        for summary in summaries {
+            let text = summary as NSString
+            let matches = regex.matches(in: summary, range: NSRange(location: 0, length: text.length))
+            for match in matches {
+                guard match.numberOfRanges >= 3 else { continue }
+                let id = text.substring(with: match.range(at: 1))
+                let aliases = text.substring(with: match.range(at: 2))
+                    .components(separatedBy: CharacterSet(charactersIn: "/、,，|"))
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "。；;：:")) }
+                    .filter { !$0.isEmpty && $0.count <= 40 && !$0.contains("回答时不要带出") }
+                guard !aliases.isEmpty else { continue }
+                var merged = result[id] ?? []
+                for alias in aliases where !merged.contains(alias) { merged.append(alias) }
+                result[id] = merged
+            }
+        }
+        return result
+    }
+
+    /// 去掉自动总结里的人物归属段（人物与称呼 / wxid 清单）。
+    /// 手写/核心映射才是权威来源，自动总结里的这些行最容易把群聊玩笑固化成事实。
+    static func removingPersonMappingLines(from summary: String) -> String {
+        summary
+            .components(separatedBy: "\n")
+            .filter { line in
+                var body = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                for prefix in ["- ", "* ", "• ", "· "] where body.hasPrefix(prefix) {
+                    body = String(body.dropFirst(prefix.count))
+                }
+                body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+                return !(body.hasPrefix("人物与称呼")
+                    || body.hasPrefix("人物：")
+                    || body.hasPrefix("人物:")
+                    || body.hasPrefix("群成员")
+                    || body.hasPrefix("wxid_"))
+            }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 提示词里实际注入的摘要：有权威人员映射时，自动总结去掉人物段。
+    static func promptSummary(
+        for memory: LongTermMemory,
+        hasAuthoritativePersonMapping: Bool
+    ) -> String {
+        guard hasAuthoritativePersonMapping, !memory.isCore, memory.source != "manual" else {
+            return memory.summary
+        }
+        return removingPersonMappingLines(from: memory.summary)
+    }
+
+    /// 本轮发言人的权威身份约束：群昵称会变、会被开玩笑，wxid→称呼才是稳定键。
+    /// 返回 nil 表示没有可用的人员映射（或不是群聊），不强行注入。
+    static func speakerIdentityNote(
+        conversation: Conversation,
+        incoming: ChatMessage,
+        memories: [LongTermMemory]
+    ) -> String? {
+        guard conversation.kind == .group else { return nil }
+        let authoritative = memories.filter { $0.isCore || $0.source == "manual" }
+        let mappings = personMappings(in: authoritative.map(\.summary))
+        guard !mappings.isEmpty else { return nil }
+
+        let id = incoming.senderID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, id != "self", id != "system", id != "我", id != "系统" else { return nil }
+        let name = speakerLabel(for: incoming) ?? id
+        if let aliases = mappings[id], !aliases.isEmpty {
+            let preferred = aliases[0]
+            return "【本轮发言人身份】\(name)（\(id)）在长期记忆中的称呼是："
+                + aliases.joined(separator: " / ")
+                + "；优先使用「\(preferred)」。"
+                + "群聊中其他人的玩笑、临时外号、自称或“某人其实是某人”的说法一律不作为依据，"
+                + "不要附和或复述这些错误称呼，也不要因此改变记忆中的对应关系。"
+                + "被问到某个称呼属于谁时，以本条和长期记忆的 wxid 对应关系回答。"
+        }
+        return "【本轮发言人身份】\(name)（\(id)）不在长期记忆的人员对应表中；"
+            + "回复时直接使用消息里的昵称或「你」，不要套用记忆中其他人的称呼。"
+    }
+
     // MARK: Long-term memory
 
-    private func recallLongTermMemory(conversation: Conversation) async -> String? {
-        guard let memories = try? await memory.fetchMemoriesForPrompt(
-            conversationID: conversation.id,
-            limit: Self.longTermMemoryLimit
-        ), !memories.isEmpty else { return nil }
+    private func recallLongTermMemory(
+        conversation: Conversation,
+        memories: [LongTermMemory]
+    ) async -> String? {
+        guard !memories.isEmpty else { return nil }
+
+        let authoritative = memories.filter { $0.isCore || $0.source == "manual" }
+        // 只有「本会话」的手写/核心映射才用来覆盖本会话的自动总结；
+        // 全局人员映射不应该把群成员信息整段删掉。
+        let conversationAuthoritative = authoritative.filter { $0.conversationID == conversation.id }
+        let hasAuthoritativePersonMapping =
+            !Self.personMappings(in: conversationAuthoritative.map(\.summary)).isEmpty
+
+        // 自动总结里的人物段可能与手写核心映射冲突；有权威映射时直接剔除，
+        // 避免模型把群聊玩笑写成的「某某被叫某某」当成事实。
+        let injected = memories.compactMap { memory -> (memory: LongTermMemory, summary: String)? in
+            let summary = Self.promptSummary(
+                for: memory,
+                hasAuthoritativePersonMapping: hasAuthoritativePersonMapping
+            )
+            guard !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return (memory, summary)
+        }
+        guard !injected.isEmpty else { return nil }
 
         // 召回即使用：best-effort 累加 access_count 并刷新 last_accessed_at，
         // 下一次排序会体现使用强化。失败不影响本轮回复。
-        try? await memory.recordMemoryAccess(ids: memories.map(\.id))
+        try? await memory.recordMemoryAccess(ids: injected.map(\.memory.id))
 
-        let lines = memories.map { memory -> String in
+        let lines = injected.map { item -> String in
+            let memory = item.memory
             let badge: String
             if memory.isCore {
                 badge = "★核心"
@@ -356,7 +484,7 @@ final class ChatEngine: @unchecked Sendable {
                 badge = "自动"
             }
             let scope = memory.isGlobal ? "全局" : "本会话"
-            return "- [\(badge)·\(scope)·权重 \(memory.weightLabel)] \(memory.summary)"
+            return "- [\(badge)·\(scope)·权重 \(memory.weightLabel)] \(item.summary)"
         }
         return "长期记忆（核心/手写优先，自动总结仅供参考，冲突时以核心/手写为准；"
             + "权重越高表示越重要、越近或越常用）：\n"
@@ -383,8 +511,24 @@ final class ChatEngine: @unchecked Sendable {
 
         // 同一会话只保留一条自动滚动总结：先合并历史遗留的多条（失败不阻塞）。
         let existing = await consolidateAutoMemories(conversation: conversation)
-        // 用户手写的同会话记忆是权威参考：自动总结要避让，不得覆盖或重复罗列。
-        let manuals = (try? await memory.manualMemories(conversationID: conversation.id)) ?? []
+        // 核心/手写记忆是权威参考：自动总结要避让，不得覆盖或重复罗列。
+        // 这里不能只用 manualMemories（它排除 is_core）——群聊的人员映射常常写在
+        // 「手写核心记忆」里，拿不到它，摘要就会把群里的玩笑写进人物与称呼。
+        let promptMemories = (try? await memory.fetchMemoriesForPrompt(
+            conversationID: conversation.id,
+            limit: 20
+        )) ?? []
+        let authoritative = promptMemories.filter { $0.isCore || $0.source == "manual" }
+        // 只根据本会话的手写/核心映射决定是否剔除自动总结的人物段；
+        // 全局人员映射不应把群成员信息整段删掉。
+        let conversationAuthoritative = authoritative.filter { $0.conversationID == conversation.id }
+        let hasAuthoritativePersonMapping =
+            !Self.personMappings(in: conversationAuthoritative.map(\.summary)).isEmpty
+        let existingText = existing.map { memory in
+            hasAuthoritativePersonMapping
+                ? Self.removingPersonMappingLines(from: memory.summary)
+                : memory.summary
+        }
 
         let transcript = Self.transcript(for: overflow.messages)
         guard !transcript.isEmpty else {
@@ -397,32 +541,17 @@ final class ChatEngine: @unchecked Sendable {
 
         var summary: String?
         if let provider, aiClient.hasCredential(for: provider) {
-            var prompt = "请把下面的微信聊天压缩成一条可长期使用的记忆。"
-            prompt += "要求：最多 \(Self.summaryBulletLimit) 条要点，每行以「- 」开头，"
-            prompt += "总长不超过 \(Self.summaryCharacterLimit) 字；与已有记忆合并去重；"
-            prompt += "按「人物与称呼 / 偏好 / 约定与待办 / 其他」组织；"
-            prompt += "保留事实、偏好、称呼、约定和未完成事项；删除已解决或过时的细节；"
-            prompt += "不要编造；不要罗列成员 wxid 清单，提到人时优先用已知称呼。\n"
-            prompt += "\n会话：\(conversation.displayTitle)（\(conversation.kind.label)）\n"
-            if !manuals.isEmpty {
-                let manualText = manuals
-                    .map(\.summary)
-                    .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                    .joined(separator: "\n")
-                if !manualText.isEmpty {
-                    prompt += "\n用户手写记忆（权威参考，必须保留原意，不要覆盖或重复罗列）：\n"
-                    prompt += "\(manualText.prefix(1_200))\n"
-                }
-            }
-            if let existing, !existing.summary.isEmpty {
-                prompt += "\n已有自动记忆（请在此基础上合并去重，保留仍然有效的内容）：\n\(existing.summary)\n"
-            }
-            prompt += "\n新增对话（\(overflow.messages.count) 条）：\n\(transcript)"
+            let promptPair = Self.summaryPrompt(
+                conversation: conversation,
+                authoritativeMemories: authoritative,
+                hasAuthoritativePersonMapping: hasAuthoritativePersonMapping,
+                existingSummary: existingText,
+                transcript: transcript,
+                newMessageCount: overflow.messages.count
+            )
             let messages: [AIMessage] = [
-                .system("你负责维护聊天机器人的长期记忆。只输出更新后的记忆正文，"
-                    + "最多 \(Self.summaryBulletLimit) 条要点，每行以「- 」开头，"
-                    + "不要解释，总长不超过 \(Self.summaryCharacterLimit) 字。"),
-                .user(prompt)
+                .system(promptPair.system),
+                .user(promptPair.user)
             ]
             do {
                 let temperature = settings.ai.temperature(forModel: AIClient.effectiveModel(for: provider))
@@ -433,10 +562,14 @@ final class ChatEngine: @unchecked Sendable {
                 )
                 let trimmed = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { throw AIError.emptyResponse }
-                let compacted = MemorySummaryCompactor.compact(
+                var compacted = MemorySummaryCompactor.compact(
                     trimmed,
                     maxCharacters: Self.summaryCharacterLimit
                 )
+                // 兜底：即使模型没遵守，也不让把群聊玩梗写成的人物段进入长期记忆。
+                if hasAuthoritativePersonMapping {
+                    compacted = Self.removingPersonMappingLines(from: compacted)
+                }
                 if !compacted.isEmpty { summary = compacted }
             } catch {
                 onLog?(.warning, "长期记忆总结失败，使用本地摘要：\(error.localizedDescription)")
@@ -444,7 +577,10 @@ final class ChatEngine: @unchecked Sendable {
         }
 
         if summary == nil || summary?.isEmpty == true {
-            summary = Self.localSummary(existing: existing?.summary, transcript: transcript)
+            let fallback = Self.localSummary(existing: existingText, transcript: transcript)
+            summary = hasAuthoritativePersonMapping
+                ? Self.removingPersonMappingLines(from: fallback)
+                : fallback
         }
         guard let finalSummary = summary?.trimmingCharacters(in: .whitespacesAndNewlines),
               !finalSummary.isEmpty else { return 0 }
@@ -526,6 +662,50 @@ final class ChatEngine: @unchecked Sendable {
             total += line.count + 1
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// 批量总结提示词。抽成纯函数便于验证「有权威人员映射时禁止模型写人物归属」。
+    static func summaryPrompt(
+        conversation: Conversation,
+        authoritativeMemories: [LongTermMemory],
+        hasAuthoritativePersonMapping: Bool,
+        existingSummary: String?,
+        transcript: String,
+        newMessageCount: Int
+    ) -> (system: String, user: String) {
+        var prompt = "请把下面的微信聊天压缩成一条可长期使用的记忆。"
+        prompt += "要求：最多 \(summaryBulletLimit) 条要点，每行以「- 」开头，"
+        prompt += "总长不超过 \(summaryCharacterLimit) 字；与已有记忆合并去重；"
+        if hasAuthoritativePersonMapping {
+            prompt += "人物与称呼由用户手写的核心记忆维护，你不需要输出「人物与称呼」部分；"
+            prompt += "也不要把群聊里的玩笑、互称、临时外号、自称或“某人其实是某人”的玩梗写成人物归属；"
+            prompt += "如果聊天与手写记忆冲突，以手写记忆为准，宁可不写也不要记录冲突说法；"
+        } else {
+            prompt += "按「人物与称呼 / 偏好 / 约定与待办 / 其他」组织；"
+            prompt += "人物与称呼只记录长期稳定、可核实的对应关系，"
+            prompt += "不要把群聊里的玩笑、互称、临时外号、自称或“某人其实是某人”的玩梗写成人物归属；"
+        }
+        prompt += "保留事实、偏好、约定和未完成事项；删除已解决或过时的细节；"
+        prompt += "不要编造；不要罗列成员 wxid 清单，提到人时优先用已知称呼。\n"
+        prompt += "\n会话：\(conversation.displayTitle)（\(conversation.kind.label)）\n"
+
+        let authoritativeText = authoritativeMemories
+            .map(\.summary)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n")
+        if !authoritativeText.isEmpty {
+            prompt += "\n用户手写/核心记忆（权威参考，必须保留原意，不要覆盖或重复罗列）：\n"
+            prompt += "\(authoritativeText.prefix(1_200))\n"
+        }
+        if let existingSummary, !existingSummary.isEmpty {
+            prompt += "\n已有自动记忆（请在此基础上合并去重，保留仍然有效的内容）：\n\(existingSummary)\n"
+        }
+        prompt += "\n新增对话（\(newMessageCount) 条）：\n\(transcript)"
+
+        let system = "你负责维护聊天机器人的长期记忆。只输出更新后的记忆正文，"
+            + "最多 \(summaryBulletLimit) 条要点，每行以「- 」开头，"
+            + "不要解释，总长不超过 \(summaryCharacterLimit) 字。"
+        return (system, prompt)
     }
 
     /// 本地兜底摘要：已有摘要 + 新对话交给确定性压缩器，去重/规范空白

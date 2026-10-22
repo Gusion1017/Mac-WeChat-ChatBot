@@ -133,6 +133,22 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   密钥派生或发送任务构造，只保留行为、开关与安全边界。
 - 新增 `.gitignore` 与文档层面的隐私检查（真实 wxid / 聊天记录 / 截图 / Key 不入库）。
 
+## [1.2.3] — 2026-10-23
+
+### 变更
+
+- **群聊发言人身份硬约束（2026-10-23）**：群聊 system prompt 在最后追加本轮发言人的
+  权威身份说明，由核心/手写记忆中的 `wxid：称呼` 映射生成；明确群聊玩笑、临时外号、
+  自称或「某人其实是某人」不能覆盖映射，不得附和。消息正文继续使用
+  「昵称(wxid)：内容」，方便模型精确对齐。
+
+### 修复
+
+- **自动总结人物段污染**：本会话存在核心/手写 `wxid：称呼` 映射时，自动总结的
+  「人物与称呼」段不注入提示词，也不写回长期记忆；模型输出与本地兜底摘要都会再经过
+  人物段过滤。新总结提示要求不记录群聊玩笑/临时外号，冲突时以手写/核心记忆为准。
+  这样群昵称被改、被开玩笑或重名时，模型不会把别人的称呼套到当前发言人身上。
+
 ## [1.2.2] — 2026-10-22
 
 ### 变更
@@ -223,9 +239,10 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.2.3...HEAD
 [1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.0
 [1.2.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.1
 [1.2.2]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.2
+[1.2.3]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.3

@@ -444,7 +444,7 @@ UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网�
 
 已验证：
 
-- `cd app && swift build --scratch-path .build-verify` 通过；`swift test` **174/174** 通过
+- `cd app && swift build --scratch-path .build-verify` 通过；`swift test` **178/178** 通过
   （含批量记忆、压缩器、权重强化、旧库迁移、防睡眠配置兼容与三档决策、回复进度倒计时、
   自消息路由修复、通讯录标题补全、拍一拍回复、appmsg 引用/链接/文件等分类与历史文本修复、
   微信 4.2.0.5 R3 版本门禁/运行期配置合并）。
