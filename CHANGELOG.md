@@ -254,6 +254,6 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 [1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.0
 [1.2.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.1
-[1.2.2]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.2
-[1.2.3]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.3
+[1.2.2]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.2
+[1.2.3]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.3
 [1.2.4]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.4
