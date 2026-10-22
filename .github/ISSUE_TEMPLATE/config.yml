@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 项目文档（docs/）
+    url: https://github.com/Gusion1017/Mac-WeChat-ChatBot/blob/main/docs/README.md
+    about: 架构、契约、记忆、UI 与安装说明；提问前请先阅读。
+  - name: 安装与使用问题
+    url: https://github.com/Gusion1017/Mac-WeChat-ChatBot/blob/main/docs/install.md
+    about: 下载、Gatekeeper、首次向导与 Hook 安装/还原。
+  - name: 私密报告安全问题
+    url: https://github.com/Gusion1017/Mac-WeChat-ChatBot/blob/main/SECURITY.md
+    about: 不要公开披露密钥、wxid 或聊天内容。

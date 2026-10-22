@@ -14,7 +14,11 @@
 | [`ui-design.md`](ui-design.md) | SwiftUI 信息架构、设计 token、组件拆分与交互约定 | 现行契约 |
 
 根目录另见：[`README.md`](../README.md)（项目介绍与快速开始）、
-[`CHANGELOG.md`](../CHANGELOG.md)（变更日志）。
+[`CHANGELOG.md`](../CHANGELOG.md)（变更日志）、
+[`CONTRIBUTING.md`](../CONTRIBUTING.md)（贡献流程）、
+[`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md)（行为准则）、
+[`SECURITY.md`](../SECURITY.md)（私密报告安全问题）、
+[`SUPPORT.md`](../SUPPORT.md)（获取帮助）。
 
 ## 快速导航
 

@@ -1,0 +1,78 @@
+name: 功能建议
+description: 提出新功能、体验改进或版本兼容建议
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢建议！提交前请确认：
+
+        1. 已阅读 `docs/README.md`、`docs/architecture.md` 与 `README.md` 中的已知限制；
+        2. 已搜索已有 issue，确认没有重复建议；
+        3. 涉及 Hook / 微信版本的功能，请说明目标版本与验证条件。
+
+  - type: textarea
+    id: feature
+    attributes:
+      label: 功能描述
+      description: 你希望增加或改变什么？
+      placeholder: 例如：希望记忆页支持按关键词搜索核心记忆。
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 使用场景与动机
+      description: 当前在哪里不方便？这个改动会带来什么收益？
+      placeholder: 例如：核心记忆超过 100 条后只能滚动查找，难以确认某条记忆是否已存在。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案（可选）
+      description: 界面、配置项、接口或数据结构上的初步想法。
+      placeholder: 例如：在记忆页顶部加搜索框，按内容与权重过滤；清空后恢复原列表。
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案（可选）
+      description: 你考虑过的其他做法或临时绕行方式。
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 影响范围
+      multiple: true
+      options:
+        - SwiftUI App（界面 / 交互）
+        - Swift 核心（AI / 记忆 / 触发判定 / 调度）
+        - OneBot bridge（Go）
+        - Hook / 微信版本适配
+        - 构建、打包与工具脚本
+        - 文档
+        - 不确定
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 检查清单
+      options:
+        - label: 我已搜索现有 issue，确认没有重复建议
+          required: true
+        - label: 我已阅读 docs/ 中的相关文档与已知限制
+          required: true
+        - label: 我理解 Hook / 微信版本相关改动需要真机验证，可能无法立即实现
+          required: true
+        - label: 我愿意提交 PR
+          required: false

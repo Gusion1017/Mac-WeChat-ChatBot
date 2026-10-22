@@ -122,6 +122,13 @@ GitHub Actions 只跑 Linux 可完成的检查（文档链接、脚本语法、�
 修改 `/Applications/WeChat.app` 会破坏官方签名，**微信更新后可能失效**；存在账号风控风险，
 建议仅用个人测试账号。`install` 前会完整备份，`restore` 可还原。
 
+### 参与贡献
+
+- 贡献流程：[`CONTRIBUTING.md`](CONTRIBUTING.md)
+- 行为准则：[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
+- 私密报告安全问题：[`SECURITY.md`](SECURITY.md)
+- 获取帮助：[`SUPPORT.md`](SUPPORT.md) · [Issues](https://github.com/Gusion1017/Mac-WeChat-ChatBot/issues)
+
 ### 许可
 
 GPL-3.0，见 [`LICENSE`](LICENSE)。基于
@@ -247,6 +254,13 @@ script syntax, copy equality, no build artifacts).
 Patching `/Applications/WeChat.app` breaks its official signature and **may stop working after a
 WeChat update**; unofficial clients also carry account risk, so use a personal test account.
 `install` backs up first and `restore` brings the official app back.
+
+### Contributing
+
+- Workflow: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- Code of Conduct: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
+- Report security issues privately: [`SECURITY.md`](SECURITY.md)
+- Get help: [`SUPPORT.md`](SUPPORT.md) · [Issues](https://github.com/Gusion1017/Mac-WeChat-ChatBot/issues)
 
 ### License
 

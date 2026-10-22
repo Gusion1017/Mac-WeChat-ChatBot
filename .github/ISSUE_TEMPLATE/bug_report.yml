@@ -1,0 +1,150 @@
+name: Bug 报告
+description: 报告可复现的问题（请先搜索已有 issue 并阅读文档）
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！提交前请确认：
+
+        1. 已阅读 `docs/README.md` 与 `docs/install.md`，并搜索过已有 issue；
+        2. 日志与截图已删除 **wxid、API Key、聊天内容、手机号** 等隐私信息；
+        3. 说明问题是否只在 Hook 注入后出现。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 用一两句话说明现象；必要时附上发生时间与对应页面。
+      placeholder: 例如：4.1.15.55 开启 R3 原生发送后，首条消息一直停在“排队中”，手动发消息后也不重发。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 写出最小复现路径；不要粘贴真实聊天内容。
+      placeholder: |
+        1. 打开 App → 设置 → Hook，开启“R3 原生发送”
+        2. 启动 bridge 并注入微信 4.1.15.55
+        3. 向测试账号发送一条私聊消息
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+      placeholder: 例如：消息应立即发出；没有发送句柄时应提示并排队，而不是静默失败。
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 实际现象、报错弹窗或崩溃堆栈（请先脱敏）。
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### 环境信息
+        请填写可复现的环境；版本不符时请注明实际版本。
+
+  - type: input
+    id: macos_version
+    attributes:
+      label: macOS 版本
+      placeholder: 例如 macOS 26.1（25B78）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: chip
+    attributes:
+      label: 芯片
+      options:
+        - Apple M1
+        - Apple M2
+        - Apple M3
+        - Apple M4
+        - Apple M5
+        - 其他 Apple Silicon（请注明）
+        - Intel（非目标平台）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: wechat_version
+    attributes:
+      label: 微信版本
+      options:
+        - 4.2.0.5 (270341)
+        - 4.1.15.55 (270135)
+        - 4.1.12.53 (269365)
+        - 其他（请在补充信息中注明版本号）
+    validations:
+      required: true
+
+  - type: input
+    id: toolchain
+    attributes:
+      label: Xcode / Go 版本
+      description: Go 版本以 scripts/build_bridge.sh 固定下载的 1.25.14 为准；未涉及可填 N/A。
+      placeholder: 例如 Xcode 27.0、go1.25.14
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build_method
+    attributes:
+      label: App 构建方式
+      options:
+        - bash scripts/build_app.sh（本地构建）
+        - bash scripts/install_app.sh 安装到 ~/Applications
+        - 直接运行 dist/WeChat AI.app
+        - Xcode 打开 app/Package.swift 运行
+        - 其他（请注明）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hook_state
+    attributes:
+      label: Hook / Gadget 状态
+      options:
+        - 已注入 Gadget，bridge 正常运行
+        - 已注入，但 bridge 连接失败
+        - 未注入，问题与 Hook 无关
+        - 注入后微信崩溃
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志与截图
+      description: 可粘贴 App 日志 / bridge 输出 / 崩溃堆栈，或把截图拖入此框。
+      placeholder: 粘贴前请删除 wxid、API Key、Cookie、聊天内容、手机号等隐私信息；截图请打码。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 检查清单
+      options:
+        - label: 我已搜索现有 issue，确认没有重复报告
+          required: true
+        - label: 日志与截图已脱敏（无 wxid、API Key、聊天内容、手机号等）
+          required: true
+        - label: 我已说明该问题是否只在 Hook 注入后出现
+          required: true
+        - label: 我理解非官方客户端存在微信账号风控风险
+          required: true

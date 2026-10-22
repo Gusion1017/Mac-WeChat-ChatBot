@@ -66,7 +66,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   不再报 unbound variable）；`sync_hook_script.sh` 在 Linux 上回退 `sha256sum`，便于 CI 校验。
 - **发布准备**：清理构建产物、运行日志与 `.DS_Store`；新增发布前检查清单（见
   [`README.md`](README.md)「清理、打包与分享」）；文档中的测试数字统一为
-  **Swift 126 项 / Go 60 项**；`docs/README.md` 重新整理文档入口；
+  **Swift 128 项 / Go 60 项**；`docs/README.md` 重新整理文档入口；
   `bridge/NOTICE` 更新为实际修改/新增文件清单。
 - **发布打包**：新增 `scripts/package_release.sh`（构建 + 校验签名 + 生成
   `dist/WeChat-AI-<version>.zip` / `.sha256`）与 `make release`；
