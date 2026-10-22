@@ -24,7 +24,8 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
 
 ### 功能
 
-- **私聊自动回复**；**群聊触发可多选**（@ / 关键词 / 拍一拍，拍一拍只认「拍机器人」，可 @ 拍的人）
+- **私聊自动回复**；**群聊触发可多选**（@ / 关键词 / 拍一拍 / 引用机器人；拍一拍只认「拍机器人」，
+  可 @ 拍的人；「引用机器人」默认可选，别人引用机器人的消息时唤醒）
 - **白 / 黑名单**（会话 ID 或 wxid）、冷却、每分钟限流、工作时段，均可按会话覆盖
 - **按会话人格** / 系统提示词 / 模型与温度覆盖；DeepSeek、OpenAI、Ollama 或任意 OpenAI 兼容端点
 - **记忆**：10 条短期窗口 + 8 条批量总结；会话文件夹；综合权重 = 基础 × 重要度 × 召回 × 30 天半衰期，基础权重可调
@@ -36,7 +37,7 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
 
 | 模块 | 状态 |
 | --- | --- |
-| SwiftUI App / Swift 核心 | ✅ 164 项测试通过；4.1.15.55 / 4.2.0.5 真机 E2E |
+| SwiftUI App / Swift 核心 | ✅ 170 项测试通过；4.1.15.55 / 4.2.0.5 真机 E2E |
 | OneBot bridge（Go） | ✅ 构建 / 鉴权 / 真机附加 / 60 项测试通过 |
 | 微信 4.1.12.53 | ✅ legacy 收发 + 主动发送 |
 | 微信 4.1.15.55 | ✅ Message finalizer 接收 + R3 文本发送（首次需在本机微信手动发一条消息捕获句柄） |
@@ -89,7 +90,7 @@ bash tools/manage_wechat.sh restore   # 还原官方 App
 ### 目录结构
 
 ```
-app/        SwiftUI App（SwiftPM）+ 164 项测试
+app/        SwiftUI App（SwiftPM）+ 170 项测试
 bridge/     Go OneBot 桥接（GPL-3.0 衍生，改动见 NOTICE）
 hook/       script.js（唯一事实来源）与版本地址表
 tools/      Hook 安装、备份、还原
@@ -103,7 +104,7 @@ docs/       架构、契约、记忆与 UI 设计
 ### 开发与测试
 
 ```bash
-bash scripts/check.sh               # 静态检查 + Swift 164 项
+bash scripts/check.sh               # 静态检查 + Swift 170 项
 bash scripts/build_bridge.sh        # Go 构建 + 60 项测试
 bash scripts/package_release.sh     # Releases 用 zip + sha256
 ```
@@ -143,8 +144,9 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
 
 ### Features
 
-- **Automatic private-chat replies**; **multi-select group triggers** (@ / keyword / pat-pat — only
-  pats on the bot count, and it can @ the person who patted)
+- **Automatic private-chat replies**; **multi-select group triggers** (@ / keyword / pat-pat / quote —
+  only pats on the bot count, and it can @ the person who patted; the optional quote trigger wakes
+  the bot when someone quotes its message)
 - **Allow / block lists** (conversation ID or wxid), cooldown, per-minute rate limit and working
   hours, all overridable per conversation
 - **Per-conversation personas**, system prompts, model and temperature overrides; DeepSeek, OpenAI,
@@ -161,7 +163,7 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
 
 | Component | Status |
 | --- | --- |
-| SwiftUI app / Swift core | ✅ 164 tests passing; 4.1.15.55 / 4.2.0.5 real-device E2E |
+| SwiftUI app / Swift core | ✅ 170 tests passing; 4.1.15.55 / 4.2.0.5 real-device E2E |
 | OneBot bridge (Go) | ✅ builds / auth / device attach / 60 tests passing |
 | WeChat 4.1.12.53 | ✅ legacy send + receive |
 | WeChat 4.1.15.55 | ✅ Message-finalizer receive + R3 text sending (send one message in WeChat once to capture the handle) |
@@ -217,7 +219,7 @@ remain in the known-supported list and install directly (their version files are
 ### Repository Layout
 
 ```
-app/        SwiftUI app (SwiftPM) + 164 tests
+app/        SwiftUI app (SwiftPM) + 170 tests
 bridge/     Go OneBot bridge (GPL-3.0 derivative, changes listed in NOTICE)
 hook/       script.js (single source of truth) and version address tables
 tools/      hook install, backup and restore
@@ -232,7 +234,7 @@ Rebuildable, never committed: `app/.build*`, `bridge/onebot`, `dist/`, `log/`,
 ### Build and Test
 
 ```bash
-bash scripts/check.sh               # static checks + 164 Swift tests
+bash scripts/check.sh               # static checks + 170 Swift tests
 bash scripts/build_bridge.sh        # Go build + 60 tests
 bash scripts/package_release.sh     # release zip + sha256
 ```

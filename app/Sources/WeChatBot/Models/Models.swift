@@ -603,6 +603,8 @@ enum TriggerMode: String, Codable, CaseIterable, Hashable, Identifiable {
     case mention
     case keyword
     case pat
+    /// 别人「引用」了机器人发过的消息（2026-10-22 新增，默认关闭）。
+    case quote
     case prefix
 
     var id: String { rawValue }
@@ -614,12 +616,14 @@ enum TriggerMode: String, Codable, CaseIterable, Hashable, Identifiable {
         case .mention: "@"
         case .keyword: L("关键词")
         case .pat: L("拍一拍")
+        case .quote: L("引用机器人")
         case .prefix: L("命令前缀")
         }
     }
 
-    /// 群聊浮层可选触发方式。命令前缀保留给历史配置。
-    static let groupOptions: [TriggerMode] = [.always, .mention, .keyword, .pat]
+    /// 群聊浮层可选触发方式。命令前缀保留给历史配置；
+    /// 「引用机器人」需显式勾选，升级后不会自动改变既有触发行为。
+    static let groupOptions: [TriggerMode] = [.always, .mention, .keyword, .pat, .quote]
 }
 
 // MARK: - Schedules

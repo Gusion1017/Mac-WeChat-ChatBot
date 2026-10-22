@@ -81,11 +81,22 @@ final class AppmsgRoutingTests: XCTestCase {
     }
 
     /// 构造引用 appmsg XML；`reply` 为空表示没有回复正文。
-    private func quoteXML(reply: String, quoted: String) -> String {
+    /// `senderID` / `fromID` 模拟 refermsg 的被引用消息作者字段（群聊 `<chatusr>`、
+    /// 私聊形态 `<fromusr>`），供「引用机器人」触发测试使用。
+    private func quoteXML(
+        reply: String,
+        quoted: String,
+        senderID: String? = nil,
+        fromID: String? = nil,
+        displayName: String = "张三"
+    ) -> String {
         var body = ""
         if !reply.isEmpty { body += "<title>\(reply)</title>" }
         body += "<type>57</type><refermsg><type>1</type>"
-        body += "<displayname>张三</displayname><content>\(quoted)</content></refermsg>"
+        body += "<displayname>\(displayName)</displayname>"
+        if let senderID { body += "<chatusr>\(senderID)</chatusr>" }
+        if let fromID { body += "<fromusr>\(fromID)</fromusr>" }
+        body += "<content>\(quoted)</content></refermsg>"
         return "<msg><appmsg appid=\"\" sdkver=\"0\">\(body)</appmsg></msg>"
     }
 
@@ -94,7 +105,8 @@ final class AppmsgRoutingTests: XCTestCase {
         _ text: String,
         triggers: [TriggerMode],
         keywords: [String],
-        rawJSON: String? = nil
+        rawJSON: String? = nil,
+        selfID: String = "wxid_bot"
     ) -> RuleEvaluation {
         var settings = AppSettings.default
         settings.bot.groupTriggers = triggers
@@ -113,7 +125,7 @@ final class AppmsgRoutingTests: XCTestCase {
             rawJSON: rawJSON
         )
         return RuleEngine().evaluate(RuleEngine.Context(
-            conversation: conversation, message: message, settings: settings, selfID: "wxid_bot"
+            conversation: conversation, message: message, settings: settings, selfID: selfID
         ))
     }
 
@@ -234,6 +246,80 @@ final class AppmsgRoutingTests: XCTestCase {
         let event = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: xml))
         XCTAssertFalse(evaluateGroup(event.plainText, triggers: [.keyword], keywords: ["火锅"]).shouldReply)
         XCTAssertFalse(evaluateGroup(event.plainText, triggers: [.mention], keywords: []).shouldReply)
+    }
+
+    // MARK: - 「引用机器人」触发（2026-10-22 新增）
+
+    /// 引用的是机器人自己发的消息：正文没有任何 @/关键词，也应唤醒。
+    func testGroupQuoteTriggerWakesWhenQuotingBotMessage() throws {
+        let xml = quoteXML(
+            reply: "这个怎么弄",
+            quoted: "记得把日志发我",
+            senderID: "wxid_bot",
+            fromID: "123@chatroom",
+            displayName: "测试机器人"
+        )
+        let event = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: xml))
+        XCTAssertTrue(event.plainText.contains("[引用 测试机器人]"))
+
+        let matched = evaluateGroup(event.plainText, triggers: [.quote], keywords: [],
+                                    rawJSON: event.rawJSON)
+        XCTAssertTrue(matched.shouldReply)
+        XCTAssertEqual(matched.triggerLabel, "群聊·引用")
+
+        // 未勾选该触发方式时保持原行为：引用机器人不触发。
+        XCTAssertFalse(evaluateGroup(event.plainText, triggers: [.mention], keywords: [],
+                                     rawJSON: event.rawJSON).shouldReply)
+    }
+
+    /// 引用的是别人的消息：不是「引用机器人」，不能唤醒。
+    func testGroupQuoteTriggerIgnoresQuotingOthers() throws {
+        let xml = quoteXML(
+            reply: "哈哈哈",
+            quoted: "晚上吃什么",
+            senderID: "wxid_zhangsan",
+            fromID: "123@chatroom"
+        )
+        let event = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: xml))
+        XCTAssertFalse(evaluateGroup(event.plainText, triggers: [.quote], keywords: [],
+                                     rawJSON: event.rawJSON).shouldReply)
+    }
+
+    /// 部分客户端/私聊形态的 refermsg 没有 `<chatusr>`，只有 `<fromusr>`：
+    /// 后者是 wxid 时同样能识别「引用的是机器人」。
+    func testGroupQuoteTriggerFallsBackToFromUser() throws {
+        let xml = quoteXML(reply: "在吗", quoted: "我先睡了", fromID: "wxid_bot")
+        let event = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: xml))
+        XCTAssertTrue(evaluateGroup(event.plainText, triggers: [.quote], keywords: [],
+                                    rawJSON: event.rawJSON).shouldReply)
+    }
+
+    /// 群 ID 不能当发送者；selfID 未知时也不能瞎猜。
+    func testGroupQuoteTriggerRejectsGroupIDAndUnknownSelf() throws {
+        let groupOnly = quoteXML(reply: "嗯", quoted: "原文", fromID: "123@chatroom")
+        let groupEvent = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: groupOnly))
+        XCTAssertFalse(evaluateGroup(groupEvent.plainText, triggers: [.quote], keywords: [],
+                                     rawJSON: groupEvent.rawJSON).shouldReply)
+
+        let botQuote = quoteXML(reply: "嗯", quoted: "原文", senderID: "wxid_bot", fromID: "123@chatroom")
+        let botEvent = try XCTUnwrap(makeEvent(text: WeChatAppmsg.placeholderText, rawMessage: botQuote))
+        XCTAssertFalse(evaluateGroup(botEvent.plainText, triggers: [.quote], keywords: [],
+                                     rawJSON: botEvent.rawJSON, selfID: "").shouldReply)
+    }
+
+    /// 触发方式是设置项：可编码/解码，且 `effectiveGroupTriggers` 保留新选项。
+    func testQuoteTriggerIsSelectableAndCodable() throws {
+        XCTAssertTrue(TriggerMode.groupOptions.contains(.quote))
+        XCTAssertEqual(TriggerMode.quote.rawValue, "quote")
+        XCTAssertEqual(TriggerMode.quote.groupLabel, "引用机器人")
+
+        var bot = BotSettings()
+        bot.groupTriggers = [.mention, .quote]
+        XCTAssertEqual(bot.effectiveGroupTriggers, [.mention, .quote])
+
+        let data = try JSONEncoder().encode(bot.groupTriggers)
+        let decoded = try JSONDecoder().decode([TriggerMode].self, from: data)
+        XCTAssertEqual(decoded, [.mention, .quote])
     }
 
     // MARK: - 历史消息修复

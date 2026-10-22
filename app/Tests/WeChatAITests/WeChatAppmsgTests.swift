@@ -294,6 +294,40 @@ final class WeChatAppmsgTests: XCTestCase {
         XCTAssertFalse(link.isPat)
     }
 
+    // MARK: - 被引用消息作者（「引用机器人」触发用）
+
+    func testQuoteParsesReferSenderID() throws {
+        // 群聊引用：<chatusr> 是被引用消息作者，<fromusr> 是群 ID。
+        let group = appmsgXML(
+            type: 57,
+            title: "好",
+            extra: referXML(type: 1, displayName: "张三", content: "原文",
+                            chatUser: "wxid_zhangsan", fromUser: "123@chatroom")
+        )
+        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(group)).quote?.senderID, "wxid_zhangsan")
+
+        // 私聊形态 / 部分客户端只有 <fromusr>：回退到它。
+        let direct = appmsgXML(
+            type: 57,
+            title: "好",
+            extra: referXML(type: 1, displayName: "张三", content: "原文",
+                            fromUser: "wxid_lisi")
+        )
+        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(direct)).quote?.senderID, "wxid_lisi")
+
+        // 群 ID 不是发送者；两者都缺失时为空字符串。
+        let groupOnly = appmsgXML(
+            type: 57,
+            title: "好",
+            extra: referXML(type: 1, displayName: "张三", content: "原文",
+                            fromUser: "123@chatroom")
+        )
+        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(groupOnly)).quote?.senderID, "")
+        let missing = appmsgXML(type: 57, title: "好",
+                                extra: referXML(type: 1, displayName: nil, content: "原文"))
+        XCTAssertEqual(try XCTUnwrap(WeChatAppmsg.parse(missing)).quote?.senderID, "")
+    }
+
     // MARK: - 引用边界
 
     func testBrokenEmptyRefermsgKeepsReplyTextOnly() throws {
@@ -391,13 +425,27 @@ final class WeChatAppmsgTests: XCTestCase {
     }
 
     /// 组装引用块；content 需要调用方自行按原始 XML 形态传入（纯文本或转义 XML）。
-    private func referXML(type: Int?, displayName: String?, content: String?) -> String {
+    /// `chatUser` / `fromUser` 对应 refermsg 的 `<chatusr>` / `<fromusr>`
+    /// （被引用消息作者，分别用于群聊/私聊形态）。
+    private func referXML(
+        type: Int?,
+        displayName: String?,
+        content: String?,
+        chatUser: String? = nil,
+        fromUser: String? = nil
+    ) -> String {
         var body = ""
         if let type {
             body += "<type>\(type)</type>"
         }
         if let displayName {
             body += "<displayname>\(displayName)</displayname>"
+        }
+        if let chatUser {
+            body += "<chatusr>\(chatUser)</chatusr>"
+        }
+        if let fromUser {
+            body += "<fromusr>\(fromUser)</fromusr>"
         }
         if let content {
             body += "<content>\(content)</content>"

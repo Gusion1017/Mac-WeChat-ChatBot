@@ -197,6 +197,10 @@ final class RuleEngine: @unchecked Sendable {
                 ) {
                     matchedLabels.append("群聊·拍一拍")
                 }
+            case .quote:
+                if isQuotingBot(message: message, selfID: selfID) {
+                    matchedLabels.append("群聊·引用")
+                }
             case .prefix:
                 let prefix = bot.commandPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !prefix.isEmpty, text.hasPrefix(prefix) {
@@ -261,6 +265,20 @@ final class RuleEngine: @unchecked Sendable {
             if target == selfID { return true }
         }
         return false
+    }
+
+    /// 「引用机器人」判定：被引用消息的发送者是不是机器人自己。
+    ///
+    /// 用 `refermsg` 的结构化发送者 wxid（`<chatusr>`，私聊形态回退 `<fromusr>`），
+    /// 不能用 `<displayname>`——昵称可重名，也不是稳定身份。
+    /// 触发只看「引用谁」，与回复正文无关：正文没有 @/关键词时也应唤醒。
+    private func isQuotingBot(message: ChatMessage, selfID: String) -> Bool {
+        let botID = selfID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !botID.isEmpty else { return false }
+        guard let quote = WeChatAppmsg.parse(eventJSON: message.rawJSON)?.quote else { return false }
+        let quotedID = quote.senderID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !quotedID.isEmpty else { return false }
+        return quotedID.caseInsensitiveCompare(botID) == .orderedSame
     }
 
     private func containsKeyword(_ keywords: [String], in text: String) -> Bool {

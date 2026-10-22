@@ -208,11 +208,16 @@ RuntimeCoordinator.handle(event)
 3. 统一白名单 `effectiveWhitelist` 非空时要求会话或发送者命中；
 4. 工作时段（`WorkingHours.contains`）不满足即拒绝（免打扰已从产品移除，`isMuted` 仅保留数据库兼容字段）；
 5. 触发判定：私聊看 `replyToDirect`；群聊看 `effectiveGroupTriggers`
-   （@ / 关键词 / 拍一拍 可多选，「所有消息」独占；旧版 `groupTrigger` 自动回退），
-   关键词取 `bot.keywords`，前缀取 `bot.commandPrefix`；命中后按会话/机器人默认解析
-   persona/provider/model；
+   （@ / 关键词 / 拍一拍 / 引用机器人 可多选，「所有消息」独占；旧版 `groupTrigger`
+   自动回退），关键词取 `bot.keywords`，前缀取 `bot.commandPrefix`；
+   命中后按会话/机器人默认解析 persona/provider/model；
 6. 冷却与每分钟上限按会话记账；**只有发送成功后**才 `noteReply` 消耗冷却，
    AI 失败不会误占冷却；运行时对同会话生成做串行化，避免并发穿透。
+
+引用机器人（2026-10-22 新增，默认关闭）：`TriggerMode.quote`，群聊触发方式多选新增项。
+`isQuotingBot` 解析 `WeChatAppmsg.parse(eventJSON: rawJSON)?.quote?.senderID` 并与
+`selfID` 比较：`<chatusr>` 优先、`<fromusr>` 回退（群 ID 忽略），昵称不参与判定；
+正文无需 @/关键词，命中标签为「群聊·引用」。只在显式勾选时生效，升级不会改变既有触发行为。
 
 拍一拍（2026-10-21 修复）：`PatMessage.event(from: rawJSON)` 优先解析 hook 的
 `pat_*` 结构化字段，回退解析 `raw_message` 里的 `<patinfo>` / `<pat>` XML。
@@ -370,12 +375,12 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 `SleepPreventionTests.swift`（9）、`MessageRoutingTests.swift`（12）、
 `NativeSendConfigTests.swift`（5）、`ConversationNameTests.swift`（8）、`WorkingHoursStatusTests.swift`（5）、
 `ContactDirectoryTests.swift`（15）、`PatMessageTests.swift`（20）、`PatReplySettingsTests.swift`（7）、
-`HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（24）、`AppmsgRoutingTests.swift`（12），共 164 项）：
+`HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（25）、`AppmsgRoutingTests.swift`（17），共 170 项）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 164 tests, with 0 failures（2026-10-22）
+# Executed 170 tests, with 0 failures（2026-10-22）
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
@@ -415,7 +420,7 @@ RuleEngine 白黑名单/@/关键词/冷却、Scheduler 各 repeat 的 nextFireAt
 ChatEngine 分段/角色合并/关键词分词。输出 `[selftest] PASS/FAIL/WARN` 与汇总退出码。
 
 历史 CLI 驱动实测：**63 passed / 0 failed / 0 warnings**；当前 `swift test` 为
-**164/164 通过**（见 8.1；2026-10-22 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
+**170/170 通过**（见 8.1；2026-10-22 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
 Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Keychain 保存/删除、
 `config.json` 无明文 Key。
 

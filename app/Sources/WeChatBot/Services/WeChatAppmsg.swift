@@ -16,6 +16,10 @@ struct WeChatAppmsg: Equatable, Sendable {
     struct Quote: Equatable, Sendable {
         /// `<displayname>`；未知时为空字符串。
         var senderName: String
+        /// 被引用消息的发送者 wxid：群引用取 `<chatusr>`，群内私聊形态/部分客户端
+        /// 只有 `<fromusr>` 时回退（群 ID 会被忽略）。「引用机器人」触发用它和
+        /// selfID 精确比对——昵称可重名，不能作为判定依据。
+        var senderID: String = ""
         /// 被引用内容摘要（图片/表情等媒体转成 `[图片]` 之类）。
         var snippet: String
         /// refermsg `<type>`（1 文字 / 3 图片 / 34 语音 / 43 视频 / 47 表情 / 49 appmsg）。
@@ -69,6 +73,10 @@ struct WeChatAppmsg: Equatable, Sendable {
             let content = WeChatXML.field("content", in: refer) ?? ""
             quote = Quote(
                 senderName: WeChatXML.field("displayname", in: refer) ?? "",
+                senderID: quotedSenderID(
+                    chatUser: WeChatXML.field("chatusr", in: refer) ?? "",
+                    fromUser: WeChatXML.field("fromusr", in: refer) ?? ""
+                ),
                 snippet: snippet(from: content, messageType: messageType),
                 messageType: messageType
             )
@@ -279,6 +287,20 @@ struct WeChatAppmsg: Equatable, Sendable {
             options: .regularExpression
         )
         return WeChatXML.unescape(stripped)
+    }
+
+    // MARK: - 被引用消息的发送者
+
+    /// 被引用消息的发送者 wxid：优先 `<chatusr>`（群聊引用实测可靠），
+    /// 为空时回退 `<fromusr>`（私聊形态 / 部分客户端）。群 ID 是会话而不是发送者，
+    /// 直接忽略；都取不到时返回空字符串。
+    private static func quotedSenderID(chatUser: String, fromUser: String) -> String {
+        for raw in [chatUser, fromUser] {
+            let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty, !id.lowercased().hasSuffix("@chatroom") else { continue }
+            return id
+        }
+        return ""
     }
 
     // MARK: - 字符串工具

@@ -132,7 +132,7 @@ struct BotView: View {
                 SettingsDivider()
                 SettingsRow(
                     title: "群聊触发方式",
-                    subtitle: "可多选；「所有消息」与其他方式互斥",
+                    subtitle: "可多选；「所有消息」与其他方式互斥；「引用机器人」= 别人引用机器人发的消息时唤醒",
                     symbol: "person.3.fill",
                     tint: Theme.violet
                 ) {
@@ -145,6 +145,9 @@ struct BotView: View {
                             ) {
                                 toggleGroupTrigger(mode)
                             }
+                            .help(mode == .quote
+                                  ? L("引用机器人：别人引用机器人发的消息时唤醒机器人（正文无需 @ 或关键词）")
+                                  : "")
                         }
                     }
                 }
