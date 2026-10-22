@@ -87,8 +87,8 @@ bash scripts/package_release.sh
 
 ```bash
 bash scripts/build_app.sh
-ditto -c -k --norsrc --keepParent "dist/WeChat AI.app" "dist/WeChat-AI-1.2.1.zip"
-shasum -a 256 "dist/WeChat-AI-1.2.1.zip"
+ditto -c -k --norsrc --keepParent "dist/WeChat AI.app" "dist/WeChat-AI-1.2.2.zip"
+shasum -a 256 "dist/WeChat-AI-1.2.2.zip"
 ```
 
 把 zip 与 `.sha256` 上传到 GitHub **Releases**，在说明里写清：
