@@ -76,20 +76,6 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ### 修复
 
-- **引用消息被归为「链接/文件」（2026-10-22）**：微信引用回复是 appmsg
-  （`msg_type=49` + `<appmsg><type>57</type></appmsg>`），但 hook 只识别拍一拍，
-  其余 appmsg 一律写成 `[链接/文件]`——回复正文（`<title>`）与被引用原文
-  （`<refermsg>`）对 App、规则引擎与 AI 全部不可见（历史数据中有一批消息受影响，
-  其中引用回复占多数）。现在 App 在事件解析时用新增的 `WeChatAppmsg` 按 appmsg
-  `<type>` 还原可读文本：引用 → `回复正文` + 换行 + `[引用 发送者] 原文摘要`；
-  链接 5 / 文件 6 / 视频 4 / 表情 8 / 聊天记录 19 / 小程序 33·36 / 转账 2000 /
-  红包 2001 / 视频号 51 → `[类型] 标题`；拍一拍（62）与 `at`/媒体段保持原样。
-  旧 bridge（4.1.12 legacy 路径）原样透传的 appmsg XML 正文也一并还原。
-  历史消息由 `MemoryStore.repairAppmsgMessageTexts` 启动时幂等重算并刷新会话预览。
-  群聊触发判定只取回复正文（`RuleEngine.triggerText`），被引用原文仅作为 AI 上下文，
-  不会因引用旧的 @/关键词消息而重复唤醒；真实结构化 `at` 段不受影响。
-  新增 `WeChatXML`（共享 XML 工具，`PatMessage` 去重）、`WeChatAppmsgTests`、
-  `AppmsgRoutingTests`（实时替换、拍一拍不回归、历史修复幂等、群触发只看正文）。
 - **英文小字补全**：相对时间、星期、时长、状态标签、计数、错误前缀与图表说明统一
   经 `L()` / `Lf()` 输出；新增 175 条服务层状态/错误文案，并为计数、日期、错误等
   动态拼接增加格式回退，英文界面不再混杂中文小字。
@@ -140,6 +126,25 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   密钥派生或发送任务构造，只保留行为、开关与安全边界。
 - 新增 `.gitignore` 与文档层面的隐私检查（真实 wxid / 聊天记录 / 截图 / Key 不入库）。
 
+## [1.2.0] — 2026-10-22
+
+### 修复
+
+- **引用消息被归为「链接/文件」（2026-10-22）**：微信引用回复是 appmsg
+  （`msg_type=49` + `<appmsg><type>57</type></appmsg>`），但 hook 只识别拍一拍，
+  其余 appmsg 一律写成 `[链接/文件]`——回复正文（`<title>`）与被引用原文
+  （`<refermsg>`）对 App、规则引擎与 AI 全部不可见（历史数据中有一批消息受影响，
+  其中引用回复占多数）。现在 App 在事件解析时用新增的 `WeChatAppmsg` 按 appmsg
+  `<type>` 还原可读文本：引用 → `回复正文` + 换行 + `[引用 发送者] 原文摘要`；
+  链接 5 / 文件 6 / 视频 4 / 表情 8 / 聊天记录 19 / 小程序 33·36 / 转账 2000 /
+  红包 2001 / 视频号 51 → `[类型] 标题`；拍一拍（62）与 `at`/媒体段保持原样。
+  旧 bridge（4.1.12 legacy 路径）原样透传的 appmsg XML 正文也一并还原。
+  历史消息由 `MemoryStore.repairAppmsgMessageTexts` 启动时幂等重算并刷新会话预览。
+  群聊触发判定只取回复正文（`RuleEngine.triggerText`），被引用原文仅作为 AI 上下文，
+  不会因引用旧的 @/关键词消息而重复唤醒；真实结构化 `at` 段不受影响。
+  新增 `WeChatXML`（共享 XML 工具，`PatMessage` 去重）、`WeChatAppmsgTests`、
+  `AppmsgRoutingTests`（实时替换、拍一拍不回归、历史修复幂等、群触发只看正文）。当前 Swift 测试 164 项通过。
+
 ## [1.1.0] — 2026-10-22
 
 ### 新增
@@ -177,6 +182,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.2.0...HEAD
 [1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.1.0
+[1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.0
