@@ -76,6 +76,13 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ### 修复
 
+- **群聊身份被聊天玩梗覆盖（2026-10-22）**：补上消息 wxid 之后仍可能出现
+  「群里多人说某人是某某，机器人跟着改口」。现在群聊每轮在 system prompt 末尾追加
+  「本轮发言人身份」硬约束：由本会话核心/手写记忆解析 `wxid：称呼`，明确禁止模型
+  附和群聊里的玩笑、临时外号、自称或“某人其实是某人”的说法；当前 wxid 不在映射表时
+  提示不要套用他人称呼。自动总结也加了防污染：有本会话核心/手写映射时不再写
+  「人物与称呼」段，传入模型的已有自动记忆先剔除人物段，模型输出与本地兜底
+  再经 `removingPersonMappingLines` 兜底，避免把群聊玩梗固化成长期记忆。
 - **英文小字补全**：相对时间、星期、时长、状态标签、计数、错误前缀与图表说明统一
   经 `L()` / `Lf()` 输出；新增 175 条服务层状态/错误文案，并为计数、日期、错误等
   动态拼接增加格式回退，英文界面不再混杂中文小字。
@@ -217,8 +224,8 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
 [Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.2.2...HEAD
-[1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.0.0
-[1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.1.0
-[1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.0
-[1.2.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.1
+[1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.0.0
+[1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.1.0
+[1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.0
+[1.2.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.1
 [1.2.2]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.2
