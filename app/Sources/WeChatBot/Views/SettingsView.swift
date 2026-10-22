@@ -723,7 +723,7 @@ struct SettingsView: View {
                     SettingsDivider()
                     SettingsRow(
                         title: "R3 原生发送",
-                        subtitle: "微信 4.1.15.55 专用原生文本发送。首次使用前需在本机微信手动发一条消息以捕获发送句柄；排队消息会在拿到句柄后自动重发。",
+                        subtitle: "微信 4.1.15.55 / 4.2.0.5 专用原生文本发送。首次使用前需在本机微信手动发一条消息以捕获发送句柄；排队消息会在拿到句柄后自动重发。",
                         symbol: "paperplane",
                         tint: .secondary
                     ) {
@@ -1003,7 +1003,7 @@ struct SettingsView: View {
 
             SettingsSection(
                 title: "自研研究与实现",
-                footer: "Hook 版本适配、4.1.15 收发、原生发送与通讯录读取均为本项目自研；上游仅提供基线脚本、地址查找工具与 OneBot 协议实现。具体地址、结构与密钥细节不在界面展开。"
+                footer: "Hook 版本适配、4.1.15 / 4.2 收发、原生发送与通讯录读取均为本项目自研；上游仅提供基线脚本、地址查找工具与 OneBot 协议实现。具体地址、结构与密钥细节不在界面展开。"
             ) {
                 researchRow(
                     "微信版本适配",
@@ -1013,7 +1013,7 @@ struct SettingsView: View {
                 )
                 SettingsDivider()
                 researchRow(
-                    "4.1.15 收发适配",
+                    "4.1.15 / 4.2 收发适配",
                     "入站使用只读消息钩子；出站走原生发送（默认开启，可关闭），与 4.1.12 legacy 互相隔离。",
                     symbol: "arrow.left.arrow.right",
                     tint: Theme.warning

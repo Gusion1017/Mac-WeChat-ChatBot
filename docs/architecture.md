@@ -66,7 +66,7 @@
 bridge/onebot \
   -type=gadget \
   -gadget_addr=127.0.0.1:27042 \
-  -wechat_conf=/path/to/hook/versions/4_1_15_55_mac.json \
+  -wechat_conf=/path/to/hook/versions/4_2_0_5_mac.json \
   -receive_host=127.0.0.1:58080 \
   -token=<随机 32 字节十六进制> \
   -conn_type=websocket \
@@ -82,7 +82,7 @@ bridge/onebot \
 - `-self_id` 是当前登录账号的权威来源（App 已知时传入）；缺失时 bridge 才从 `image_path`
   的 `xwechat_files/<wxid>_xxxx/` 推导。多账号目录下 App 取最近有活动的账号。
 - `-wechat_conf` 由 App **运行期生成**：读取 `hook/versions/<version>_mac.json` 后合并 App 设置
-  （4.1.15.55 为 R3 发送开关），写入
+  （4.1.15.55 / 4.2.0.5 为 R3 发送开关），写入
   `~/Library/Application Support/WeChatAI/runtime/hook-<version>-<build>.json` 再传给 bridge；
   仓库 JSON 始终保持默认 `off`，产品行为只由设置决定。
 - `image_path` 用于图片/视频临时目录；不存在时上游会报错，App 负责创建/探测。
@@ -231,8 +231,13 @@ bridge/onebot \
 - 版本文件：`hook/versions/<version_with_underscores>_mac.json`，字段与上游/本项目脚本
   保持一致；**具体键名、地址与发送开关只以文件本身为准，文档不重复**。
 - 版本文件是 Hook 地址与开关的唯一数据源；修改必须真机验证并同步 `bridge/NOTICE`。
-- 当前目标：WeChat 4.1.15.55 (270135)，arm64，`/Applications/WeChat.app/Contents/Resources/wechat.dylib`。
-- 4.1.15.55 发送附加配置（R3，仓库默认 `enableSend=false` / `req2bufSendMode=off`）：
+- 当前目标：WeChat 4.2.0.5 (270341)，arm64，`/Applications/WeChat.app/Contents/Resources/wechat.dylib`；
+  历史版本 4.1.15.55 (270135) 与 4.1.12.53 (269365) 的版本文件保留，安装脚本默认目标为 4.2.0.5。
+- 2026-10-22 在 4.2.0.5 (270341) 完成真机验证：Gadget 注入 + ad-hoc 重签（保留 sandbox
+  entitlements）后微信正常启动、gadget 27042 监听；私聊/自消息入站、通讯录解密读取、
+  R3 文本发送（含 bridge 重启后从本地缓存恢复发送句柄）均通过；版本文件已按真机验证结果
+  修正并生效。群聊 @ / 拍一拍沿用既有逻辑，本轮未单独复测；媒体下载维持已知缺失。
+- 4.1.15.55 / 4.2.0.5 发送附加配置（R3，仓库默认 `enableSend=false` / `req2bufSendMode=off`）：
   由 App 读取版本 JSON 后按设置合并生成运行期配置；具体键名、运行期参数与地址表只维护在
   `hook/versions/*.json` 与 `hook/script.js`，文档不展开。
   App 默认开启 R3（可在设置中关闭）；首次使用（或微信重启后）需在本机微信手动发一条消息
@@ -258,6 +263,7 @@ bridge/onebot \
 WeChat AI.app/Contents/Resources/
   bridge/onebot
   bridge/script.js        # 由 hook/script.js 复制（单一事实来源）
+  hook/versions/4_2_0_5_mac.json
   hook/versions/4_1_15_55_mac.json
   hook/versions/4_1_12_53_mac.json
   hook/gadget/FridaGadget.dylib
@@ -313,6 +319,8 @@ stdout：
 
 - Frida 在微信进程内挂**只读的 Message 终结器**；具体函数地址与字段布局由
   `hook/versions/*.json` 与 `hook/script.js` 按微信版本维护，**不在公开文档展开**。
+  WeChat 4.2.0.5 (270341) 沿用同一路径、使用新增的版本文件；2026-10-22 真机验证私聊与
+  自消息入站正常（群聊 @ / 拍一拍未单独复测，解析逻辑未变）。
 - Hook 读取到新消息后发送 `incoming_message` 给 Go bridge；Go 的 `incoming.go` 转成
   OneBot 事件并经 WebSocket/HTTP 推送。App 的 OneBotClient 消费。
 - 群聊 `from` 以 `@chatroom` 结尾；文本可能带 `sender_wxid:` 前缀，JS 会剥离并把

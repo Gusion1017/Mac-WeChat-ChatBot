@@ -26,7 +26,7 @@ enum AppPaths {
     static var bridgeLogFile: URL { bridgeLogDirectory.appendingPathComponent("macos.log") }
     static var backupsDirectory: URL { supportDirectory.appendingPathComponent("backups", isDirectory: true) }
     static var mediaDirectory: URL { supportDirectory.appendingPathComponent("media", isDirectory: true) }
-    /// 运行期生成的 Hook 配置（含 4.1.15.55 R3 发送开关），不写仓库资源。
+    /// 运行期生成的 Hook 配置（含 4.1.15.55 / 4.2.0.5 R3 发送开关），不写仓库资源。
     static var runtimeDirectory: URL { supportDirectory.appendingPathComponent("runtime", isDirectory: true) }
 
     static func ensureDirectories() {
@@ -153,7 +153,7 @@ struct HookSettings: Codable, Hashable {
     var versionConfigPath: String = ""
     var lastBackupPath: String = ""
     var didInstallGadget: Bool = false
-    /// 4.1.15.55 使用 R3 原生文本发送（由 App 设置开启）。
+    /// 4.1.15.55 / 4.2.0.5 使用 R3 原生文本发送（由 App 设置开启）。
     /// 首次使用前需在本机微信手动发送一条消息以捕获发送句柄。
     var enableNativeSend: Bool = true
 

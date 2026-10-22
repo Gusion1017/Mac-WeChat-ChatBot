@@ -753,7 +753,7 @@
 "非工作时段不自动回复" = "No auto-replies outside working hours";
 "%@ · 尚未保存密钥" = "%@ · API key not saved";
 "%d 分 %02d 秒" = "%d min %02d s";
-"4.1.15 收发适配" = "4.1.15 send/receive adaptation";
+"4.1.15 / 4.2 收发适配" = "4.1.15 / 4.2 send/receive adaptation";
 "Gadget 连接中…" = "Connecting to Gadget…";
 "R3: init 完成" = "R3: init complete";
 "bridge 启动中…" = "Starting bridge…";
@@ -1071,7 +1071,7 @@
 "API Key 仅保存在 macOS Keychain，配置文件只记录引用名。" = "The API Key is stored only in the macOS Keychain; the config file records just the reference name.";
 "OpenAI 兼容接口（DeepSeek / OpenAI / Ollama）" = "OpenAI-compatible API (DeepSeek / OpenAI / Ollama)";
 "主线程看门狗：WECHATAI_DISABLE_WATCHDOG=1，跳过启动" = "Main thread watchdog: WECHATAI_DISABLE_WATCHDOG=1, skipping startup";
-"微信 4.1.15.55：R3 原生发送已关闭，主动发送不可用（接收不受影响）" = "WeChat 4.1.15.55: R3 native sending is off. Proactive sending is unavailable (receiving is unaffected).";
+"微信 4.1.15.55 / 4.2.0.5：R3 原生发送已关闭，主动发送不可用（接收不受影响）" = "WeChat 4.1.15.55 / 4.2.0.5: R3 native sending is off. Proactive sending is unavailable (receiving is unaffected).";
 "核心记忆在所属会话内优先注入并可自由调整权重；关联“全局记忆”时对所有会话生效" = "Core memories are injected first within their chat and can use a custom weight; linking “Global Memory” applies them to all chats.";
 "DeepSeek / OpenAI / Ollama 任一兼容通道，按会话切换。" = "Use any compatible channel — DeepSeek, OpenAI or Ollama — and switch per conversation.";
 "仅在「AI 模型 → 全局请求」开启流式回复时生效；全局关闭时所有通道都不流式。" = "Only applies when streaming is on in AI Model → Global Requests; with it off, no channel streams.";
@@ -1105,7 +1105,7 @@
 "已忽略与 image_path 账号目录不一致的 self_id，bridge 将按目录重新推导" = "Ignored a self_id that doesn't match the image_path account directory; the bridge will re-derive it from the directory";
 "选择一个 OpenAI 兼容通道并保存 API Key。密钥只写入 macOS Keychain。" = "Choose an OpenAI-compatible channel and save the API Key. Keys are written only to the macOS Keychain.";
 "入站使用只读消息钩子；出站走原生发送（默认开启，可关闭），与 4.1.12 legacy 互相隔离。" = "Inbound uses a read-only message hook; outbound uses native sending (on by default, can be turned off), isolated from the 4.1.12 legacy path.";
-"微信 4.1.15.55：启用 R3 原生发送（首次使用前需在本机微信手动发一条消息以捕获发送句柄）" = "WeChat 4.1.15.55: enable R3 native sending (before first use, send a message manually in WeChat on this Mac to capture the send handle)";
+"微信 4.1.15.55 / 4.2.0.5：启用 R3 原生发送（首次使用前需在本机微信手动发一条消息以捕获发送句柄）" = "WeChat 4.1.15.55 / 4.2.0.5: enable R3 native sending (before first use, send a message manually in WeChat on this Mac to capture the send handle)";
 "微信接口只下发会话 ID，App 取不到真实昵称；给常用会话起名后，列表、AI 提示词与日志都会使用它。" = "WeChat only provides the chat ID, so the app can't read real nicknames. Once you name a chat, the list, AI prompts and logs all use it.";
 "%d 条长期记忆 · 核心 %d · 短期窗口 %d 条 · 每 %d 条批量总结 · 本地 SQLite" = "%d long-term memories · core %d · short-term window %d · batch summary every %d · local SQLite";
 "Frida Gadget 文件缺失：hook/gadget/FridaGadget.dylib 或配置文件" = "Frida Gadget files missing: hook/gadget/FridaGadget.dylib or its config file";
@@ -1116,7 +1116,7 @@
 "核心记忆优先占用注入名额（最多 %d 条），核心之间也按综合权重排序；保存会刷新更新时间，时间衰减从头计算。" = "Core memories take priority for injection slots (up to %d) and are sorted by combined weight; saving refreshes the timestamp and restarts time decay.";
 "会先完整备份 /Applications/WeChat.app，再注入 Gadget 并 ad-hoc 重签。" = "Fully backs up /Applications/WeChat.app, then injects Gadget and re-signs ad-hoc.";
 "启动机器人后会连接本地 OneBot 桥接。若仍无法连接，请在设置 → Hook 中检查微信与 Hook 状态。" = "Starting the bot connects to the local OneBot bridge. If it still can't connect, check WeChat and Hook status in Settings → Hook.";
-"需要已安装官方微信 4.1.15.55（arm64）。安装 Hook 会修改微信应用包，请先退出微信并确认了解风险。" = "Requires official WeChat 4.1.15.55 (arm64). Installing the Hook modifies the WeChat app bundle, so quit WeChat first and make sure you understand the risks.";
+"需要已安装官方微信 4.1.15.55 / 4.2.0.5（arm64）。安装 Hook 会修改微信应用包，请先退出微信并确认了解风险。" = "Requires official WeChat 4.1.15.55 / 4.2.0.5 (arm64). Installing the Hook modifies the WeChat app bundle, so quit WeChat first and make sure you understand the risks.";
 "仅阻止系统因空闲进入睡眠，不会阻止合盖睡眠、手动睡眠，也不会让显示器保持点亮。使用电池且选择「接入电源时」时不会阻止。" = "Only blocks idle system sleep. It doesn't block lid-close or manual sleep and doesn't keep the display awake. When on battery with \"On power adapter\" selected, it stays inactive.";
 "登录项需要 App 以 .app 形式安装后生效；Dock 图标切换会立即生效。关闭 Dock 图标后会保留菜单栏入口。" = "The login item works only when the app is installed as a .app; Dock icon changes apply immediately. Turning off the Dock icon keeps the menu bar entry.";
 "会先完整备份 /Applications/WeChat.app，再注入 Frida Gadget 并 ad-hoc 重签。" = "The app first makes a full backup of /Applications/WeChat.app, then injects Frida Gadget and re-signs it ad hoc.";
@@ -1124,10 +1124,10 @@
 "未找到应用资源目录（bridge/hook/tools）；请通过 App bundle 或 WECHATAI_ROOT 运行" = "App resource directory not found (bridge/hook/tools). Run from the app bundle or set WECHATAI_ROOT.";
 "未找到微信媒体临时目录（xwechat_files/<账号>/temp）；请先登录微信，或在设置中填写 image_path" = "WeChat media temp directory not found (xwechat_files/<account>/temp). Sign in to WeChat or set image_path in Settings.";
 "App 全部界面与服务层：Swift Concurrency、SQLite WAL 记忆库、Keychain、IOKit 防睡眠" = "Entire app UI and service layer: Swift Concurrency, SQLite WAL memory store, Keychain, IOKit sleep prevention";
-"微信 4.1.15.55 专用原生文本发送。首次使用前需在本机微信手动发一条消息以捕获发送句柄；排队消息会在拿到句柄后自动重发。" = "Native text sending for WeChat 4.1.15.55. Before first use, send a message manually in WeChat to capture the send handle; queued messages are resent automatically once it's captured.";
+"微信 4.1.15.55 / 4.2.0.5 专用原生文本发送。首次使用前需在本机微信手动发一条消息以捕获发送句柄；排队消息会在拿到句柄后自动重发。" = "Native text sending for WeChat 4.1.15.55 / 4.2.0.5. Before first use, send a message manually in WeChat to capture the send handle; queued messages are resent automatically once it's captured.";
 "仅群聊生效；@ 附在第一条回复前（自定义前文字 → AI 首段 → 自定义后文字）。bridge 解析不到群昵称时按普通文本发送。" = "Group chats only. The @-mention goes before the first reply (custom pre-text → first AI paragraph → custom post-text). Sent as plain text if bridge can't resolve the group nickname.";
 "唯一实例方案：Gadget 注入后由 bridge 经 frida-core 附加，脚本读取/调用 wechat.dylib 内部函数" = "Single-instance approach: after Gadget injection, the bridge attaches via frida-core and the script reads and calls internal wechat.dylib functions";
 "OneBot 仅监听 127.0.0.1，不暴露到局域网。请勿将端口转发到公网；如更换 Token，需要同时更新正在运行的 bridge。" = "OneBot listens on 127.0.0.1 only and isn't exposed to the LAN. Don't forward the port to the internet; if you change the token, update the running bridge as well.";
 "权重越高越优先进入提示词；核心记忆优先占用注入名额（最多 %d 条），核心之间也按权重排序。基础权重可在记忆编辑器中自由调整（0.1~10×）。" = "The higher the weight, the earlier it enters the prompt; core memories take priority for injection slots (up to %d), and cores are sorted by weight as well. Base weight can be adjusted in the memory editor (0.1–10×).";
 "API Key 保存在 macOS Keychain（service com.gusionw.wechatai），config.json 仅保存 Keychain 引用名。" = "API Keys are stored in the macOS Keychain (service com.gusionw.wechatai); config.json only keeps the Keychain reference name.";
-"Hook 版本适配、4.1.15 收发、原生发送与通讯录读取均为本项目自研；上游仅提供基线脚本、地址查找工具与 OneBot 协议实现。具体地址、结构与密钥细节不在界面展开。" = "Hook version adaptation, 4.1.15 send/receive, native sending, and contact reading are all built in-house; upstream provides only baseline scripts, address lookup tools, and the OneBot protocol implementation. Specific addresses, structures, and key details aren't exposed in the UI.";
+"Hook 版本适配、4.1.15 / 4.2 收发、原生发送与通讯录读取均为本项目自研；上游仅提供基线脚本、地址查找工具与 OneBot 协议实现。具体地址、结构与密钥细节不在界面展开。" = "Hook version adaptation, 4.1.15 / 4.2 send/receive, native sending, and contact reading are all built in-house; upstream provides only baseline scripts, address lookup tools, and the OneBot protocol implementation. Specific addresses, structures, and key details aren't exposed in the UI.";

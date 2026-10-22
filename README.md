@@ -29,17 +29,18 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
 - **按会话人格** / 系统提示词 / 模型与温度覆盖；DeepSeek、OpenAI、Ollama 或任意 OpenAI 兼容端点
 - **记忆**：10 条短期窗口 + 8 条批量总结；会话文件夹；综合权重 = 基础 × 重要度 × 召回 × 30 天半衰期，基础权重可调
 - **拟人化延迟**、回复进度倒计时、防睡眠、定时主动消息、实时会话看板、运行日志
-- **4.1.15.55 R3 原生文本发送**（设置内开关，无句柄时自动排队）；**通讯录真实昵称 / 群名**（本机只读）
+- **4.1.15.55 / 4.2.0.5 R3 原生文本发送**（设置内开关，无句柄时自动排队）；**通讯录真实昵称 / 群名**（本机只读）
 - **中 / 英双语界面**；原生 Liquid Glass 风格、菜单栏常驻；无 WebView / Electron
 
 ### 状态
 
 | 模块 | 状态 |
 | --- | --- |
-| SwiftUI App / Swift 核心 | ✅ 126 项测试通过，真机 E2E |
+| SwiftUI App / Swift 核心 | ✅ 128 项测试通过；4.1.15.55 / 4.2.0.5 真机 E2E |
 | OneBot bridge（Go） | ✅ 构建 / 鉴权 / 真机附加 / 60 项测试通过 |
 | 微信 4.1.12.53 | ✅ legacy 收发 + 主动发送 |
 | 微信 4.1.15.55 | ✅ Message finalizer 接收 + R3 文本发送（首次需在本机微信手动发一条消息捕获句柄） |
+| 微信 4.2.0.5 | ✅ 真机验证（2026-10-22）：私聊/自消息入站、通讯录、R3 文本发送（含 bridge 重启句柄恢复）；群聊 @ / 拍一拍沿用既有逻辑未单独复测，媒体下载维持已知缺失 |
 
 环境：Apple Silicon、macOS 26+；从源码构建另需 Xcode 27。
 
@@ -82,11 +83,13 @@ bash tools/manage_wechat.sh restore   # 还原官方 App
 ```
 
 `install` 前需完全退出微信；安装会先完整备份，App 内可一键还原。
+当前脚本默认目标是微信 4.2.0.5 (270341)；历史 4.1.15.55 / 4.1.12.53 仍在已知支持列表，
+可直接安装（版本文件保留），其他版本可用 `WECHAT_SUPPORTED_VERSION` / `WECHAT_SUPPORTED_BUILD` 覆盖。
 
 ### 目录结构
 
 ```
-app/        SwiftUI App（SwiftPM）+ 126 项测试
+app/        SwiftUI App（SwiftPM）+ 128 项测试
 bridge/     Go OneBot 桥接（GPL-3.0 衍生，改动见 NOTICE）
 hook/       script.js（唯一事实来源）与版本地址表
 tools/      Hook 安装、备份、还原
@@ -100,7 +103,7 @@ docs/       架构、契约、记忆与 UI 设计
 ### 开发与测试
 
 ```bash
-bash scripts/check.sh               # 静态检查 + Swift 126 项
+bash scripts/check.sh               # 静态检查 + Swift 128 项
 bash scripts/build_bridge.sh        # Go 构建 + 60 项测试
 bash scripts/package_release.sh     # Releases 用 zip + sha256
 ```
@@ -143,7 +146,7 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
   weight = base × importance × recall × 30-day half-life, with an adjustable base weight
 - **Human-like delay**, reply progress countdown, sleep prevention, scheduled messages, live
   conversation board and runtime logs
-- **4.1.15.55 R3 native text sending** (toggle in Settings, auto-queues without a send handle);
+- **4.1.15.55 / 4.2.0.5 R3 native text sending** (toggle in Settings, auto-queues without a send handle);
   **real contact nicknames / group names** (local, read-only)
 - **Chinese / English UI**; native Liquid Glass look, menu-bar app; no WebView / Electron
 
@@ -151,10 +154,11 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
 
 | Component | Status |
 | --- | --- |
-| SwiftUI app / Swift core | ✅ 126 tests passing, real-device E2E |
+| SwiftUI app / Swift core | ✅ 128 tests passing; 4.1.15.55 / 4.2.0.5 real-device E2E |
 | OneBot bridge (Go) | ✅ builds / auth / device attach / 60 tests passing |
 | WeChat 4.1.12.53 | ✅ legacy send + receive |
 | WeChat 4.1.15.55 | ✅ Message-finalizer receive + R3 text sending (send one message in WeChat once to capture the handle) |
+| WeChat 4.2.0.5 | ✅ Real-device verified (2026-10-22): private-chat/self-message receive, contact directory, R3 text sending incl. bridge-restart handle recovery; group @ / pat-pat reuse existing logic and were not separately retested; media download remains a known limitation |
 
 Requirements: Apple Silicon, macOS 26+; building from source also needs Xcode 27.
 
@@ -199,11 +203,14 @@ bash tools/manage_wechat.sh restore   # restore the official app
 ```
 
 Quit WeChat before `install`; it backs up first, and the app offers one-click restore.
+The scripts target WeChat 4.2.0.5 (270341) by default; the historical 4.1.15.55 / 4.1.12.53
+remain in the known-supported list and install directly (their version files are kept); use
+`WECHAT_SUPPORTED_VERSION` / `WECHAT_SUPPORTED_BUILD` to override for other builds.
 
 ### Repository Layout
 
 ```
-app/        SwiftUI app (SwiftPM) + 126 tests
+app/        SwiftUI app (SwiftPM) + 128 tests
 bridge/     Go OneBot bridge (GPL-3.0 derivative, changes listed in NOTICE)
 hook/       script.js (single source of truth) and version address tables
 tools/      hook install, backup and restore
@@ -218,7 +225,7 @@ Rebuildable, never committed: `app/.build*`, `bridge/onebot`, `dist/`, `log/`,
 ### Build and Test
 
 ```bash
-bash scripts/check.sh               # static checks + 126 Swift tests
+bash scripts/check.sh               # static checks + 128 Swift tests
 bash scripts/build_bridge.sh        # Go build + 60 tests
 bash scripts/package_release.sh     # release zip + sha256
 ```

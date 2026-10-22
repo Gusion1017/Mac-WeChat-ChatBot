@@ -150,7 +150,7 @@ struct Conversation: Identifiable, Codable, Hashable {
 
 /// 会话展示名解析。
 ///
-/// 微信 4.1.15.55 的入站事件只有 wxid（Message 对象不含昵称，通讯录是加密 SQLite），
+/// 微信 4.1.15.55 / 4.2.0.5 的入站事件只有 wxid（Message 对象不含昵称，通讯录是加密 SQLite），
 /// 所以「取不到真实名称」是常态。这里集中处理三件事，避免裸 wxid 渗透到列表、AI 提示词和日志：
 /// 1. 判断标题是否真实可读（用户重命名 / 微信昵称）还是占位值；
 /// 2. 决定某个 `sender.nickname` 能不能作为会话标题学习；
@@ -814,7 +814,7 @@ struct HookStatus: Codable, Hashable {
     var gatewayConnected: Bool = false
     var versionConfigFile: String = ""
     var matchedVersion: Bool = false
-    /// 4.1.15.55 R3 原生发送是否启用/已拿到发送句柄（种子闭包）。
+    /// 4.1.15.55 / 4.2.0.5 R3 原生发送是否启用/已拿到发送句柄（种子闭包）。
     var r3Active: Bool = false
     var r3Seeded: Bool = false
     var r3Queued: Int = 0

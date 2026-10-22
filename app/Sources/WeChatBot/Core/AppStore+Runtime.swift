@@ -533,7 +533,7 @@ final class RuntimeCoordinator {
 
     // MARK: Start / stop
 
-    /// 4.1.15.55 使用 R3 原生文本发送（由 App 设置开启）；
+    /// 4.1.15.55 / 4.2.0.5 使用 R3 原生文本发送（由 App 设置开启）；
     /// 4.1.12 及更早版本保持 legacy 发送路径，不做任何覆盖。
     /// 首次使用 R3 前需要在本机微信手动发一条消息以捕获发送句柄。
     private func nativeSendConfigOverrides() async -> [String: String] {
@@ -541,10 +541,13 @@ final class RuntimeCoordinator {
         let installation = await Task.detached(priority: .userInitiated) {
             WeChatInstallation.inspect(path: path)
         }.value
-        let is415 = installation.version == "4.1.15.55" || installation.build == "270135"
-        guard is415 else { return [:] }
+        let isR3Supported = NativeSendVersionSupport.supports(
+            version: installation.version,
+            build: installation.build
+        )
+        guard isR3Supported else { return [:] }
         if store.settings.hook.enableNativeSend {
-            log(.info, "Hook", "微信 4.1.15.55：启用 R3 原生发送（首次使用前需在本机微信手动发一条消息以捕获发送句柄）")
+            log(.info, "Hook", "微信 4.1.15.55 / 4.2.0.5：启用 R3 原生发送（首次使用前需在本机微信手动发一条消息以捕获发送句柄）")
             var overrides = [
                 "enableSend": "true",
                 "req2bufSendMode": "r3",
@@ -554,7 +557,7 @@ final class RuntimeCoordinator {
             ]
             return overrides
         } else {
-            log(.warning, "Hook", "微信 4.1.15.55：R3 原生发送已关闭，主动发送不可用（接收不受影响）")
+            log(.warning, "Hook", "微信 4.1.15.55 / 4.2.0.5：R3 原生发送已关闭，主动发送不可用（接收不受影响）")
             return [
                 "enableSend": "false",
                 "req2bufSendMode": "off"

@@ -143,7 +143,7 @@ App 启动时会把 `-log_file` 指向 `~/Library/Logs/WeChatAI/bridge/macos.log
    Gadget 监听 `127.0.0.1:27042`（端口可在 App 设置中改，脚本用 `--gadget-addr` 或
    `GADGET_ADDR`）；
 2. 微信已启动，且 Gadget 已启动；
-3. Hook 版本 JSON 存在，默认 `hook/versions/4_1_15_55_mac.json`；
+3. Hook 版本 JSON 存在，默认 `hook/versions/4_2_0_5_mac.json`；
 4. 微信图片临时目录存在（`.../xwechat_files/<wxid>/temp/<...>/Img/`），
    App 侧会探测/创建；脚本会检查；
 5. `bridge/onebot` 与 `bridge/script.js` 已构建/同目录存在。
@@ -160,7 +160,7 @@ scripts/run_bridge.sh [选项]
 
 | 环境变量 | 命令行参数 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `WECHAT_CONF` | `--wechat-conf` | `hook/versions/4_1_15_55_mac.json` | Hook 版本 JSON |
+| `WECHAT_CONF` | `--wechat-conf` | `hook/versions/4_2_0_5_mac.json` | Hook 版本 JSON |
 | `PORT` | `--port` | `58080` | HTTP/WS 监听端口；始终只绑定 `127.0.0.1` |
 | `TOKEN` | `--token` | 随机生成 64 字符 hex | OneBot token；HTTP 鉴权用 |
 | `IMAGE_PATH` | `--image-path` | 无（**必填**） | 微信图片/语音/视频/文件临时目录，必须已存在 |
@@ -180,7 +180,7 @@ IMAGE_PATH="$HOME/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwecha
 scripts/run_bridge.sh \
   --port 58081 \
   --token "$(openssl rand -hex 32)" \
-  --wechat-conf hook/versions/4_1_15_55_mac.json \
+  --wechat-conf hook/versions/4_2_0_5_mac.json \
   --image-path "/Users/me/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/wxid_x/temp/2026-10/Img"
 ```
 
@@ -191,7 +191,7 @@ scripts/run_bridge.sh \
 bridge/onebot \
   -type=gadget \
   -gadget_addr=127.0.0.1:27042 \
-  -wechat_conf=/path/to/hook/versions/4_1_15_55_mac.json \
+  -wechat_conf=/path/to/hook/versions/4_2_0_5_mac.json \
   -receive_host=127.0.0.1:58080 \
   -token=<token> \
   -conn_type=websocket \

@@ -11,7 +11,7 @@ import SwiftUI
 /// - `completed` / `failed`：完成后自动收起，失败保留并提供手动关闭。
 struct ReplyProgressBar: View {
     let progress: ReplyProgress
-    /// 4.1.15.55 R3 原生发送状态：用于在「发送中」阶段说明是否在等待发送句柄。
+    /// 4.1.15.55 / 4.2.0.5 R3 原生发送状态：用于在「发送中」阶段说明是否在等待发送句柄。
     var r3Active = false
     var r3Seeded = false
     var r3Queued = 0

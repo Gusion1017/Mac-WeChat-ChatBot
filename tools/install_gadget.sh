@@ -50,6 +50,17 @@ fail() {
   exit 1
 }
 
+# 已知可用版本（version:build）；未显式设置环境变量时历史版本仍可安装。
+KNOWN_VERSION_PAIRS="4.2.0.5:270341 4.1.15.55:270135 4.1.12.53:269365"
+version_is_known_supported() {
+  local v="$1" b="$2" pair
+  for pair in $KNOWN_VERSION_PAIRS; do
+    [ "${pair%%:*}" = "$v" ] || continue
+    [ "${pair##*:}" = "$b" ] && return 0
+  done
+  return 1
+}
+
 [ -d "$APP" ] || fail "wechat app not found: $APP"
 [ -f "$GADGET" ] || fail "frida gadget not found: $GADGET"
 [ -f "$CONFIG" ] || fail "frida gadget config not found: $CONFIG"
@@ -66,8 +77,15 @@ stage 0.03 "检查微信版本与文件"
 if [ "$FORCE" -ne 1 ]; then
   V="$(/usr/libexec/PlistBuddy -c 'Print :WeChatBundleVersion' "$APP/Contents/Info.plist" 2>/dev/null || true)"
   B="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist" 2>/dev/null || true)"
-  if [ "$V" != "${WECHAT_SUPPORTED_VERSION:-4.1.15.55}" ] || [ "$B" != "${WECHAT_SUPPORTED_BUILD:-270135}" ]; then
-    fail "微信版本不匹配：${V:-?} (${B:-?})，当前适配 4.1.15.55 (270135)"
+  EXPECTED_VERSION="${WECHAT_SUPPORTED_VERSION:-4.2.0.5}"
+  EXPECTED_BUILD="${WECHAT_SUPPORTED_BUILD:-270341}"
+  if [ "$V" != "$EXPECTED_VERSION" ] || [ "$B" != "$EXPECTED_BUILD" ]; then
+    if [ -z "${WECHAT_SUPPORTED_VERSION:-}" ] && [ -z "${WECHAT_SUPPORTED_BUILD:-}" ] \
+      && version_is_known_supported "$V" "$B"; then
+      stage 0.04 "检测到已支持的历史版本：${V} (${B})"
+    else
+      fail "微信版本不匹配：${V:-?} (${B:-?})，当前适配 4.2.0.5 (270341) 与历史 4.1.15.55 / 4.1.12.53（可用 WECHAT_SUPPORTED_VERSION / WECHAT_SUPPORTED_BUILD 覆盖）"
+    fi
   fi
 fi
 

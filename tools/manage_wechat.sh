@@ -25,8 +25,11 @@ GADGET_SRC="${WECHAT_GADGET_SRC:-$ROOT_DIR/hook/gadget/FridaGadget.dylib}"
 CONFIG_SRC="${WECHAT_GADGET_CONFIG:-$ROOT_DIR/hook/gadget/FridaGadget.config}"
 INJECTOR="$ROOT_DIR/tools/inject_load_dylib.py"
 BACKUP_ROOT="${WECHAT_BACKUP_DIR:-$HOME/Library/Application Support/WeChatAI/backups}"
-SUPPORTED_VERSION="${WECHAT_SUPPORTED_VERSION:-4.1.15.55}"
-SUPPORTED_BUILD="${WECHAT_SUPPORTED_BUILD:-270135}"
+SUPPORTED_VERSION="${WECHAT_SUPPORTED_VERSION:-4.2.0.5}"
+SUPPORTED_BUILD="${WECHAT_SUPPORTED_BUILD:-270341}"
+# 已知可用版本（version:build）。未显式设置 WECHAT_SUPPORTED_VERSION/BUILD 时，
+# 历史版本仍可安装，避免新增默认版本后旧版向导/Hook 安装被误拒。
+KNOWN_VERSION_PAIRS="4.2.0.5:270341 4.1.15.55:270135 4.1.12.53:269365"
 LOAD_PATH="@executable_path/../Frameworks/FridaGadget.dylib"
 
 ACTION="${1:-status}"
@@ -54,6 +57,15 @@ bundle_version() {
 }
 bundle_build() {
   /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST" 2>/dev/null
+}
+
+version_is_known_supported() {
+  local v="$1" b="$2" pair
+  for pair in $KNOWN_VERSION_PAIRS; do
+    [ "${pair%%:*}" = "$v" ] || continue
+    [ "${pair##*:}" = "$b" ] && return 0
+  done
+  return 1
 }
 is_running() {
   /usr/bin/pgrep -x WeChat >/dev/null 2>&1
@@ -179,10 +191,14 @@ do_install() {
   local v b
   v="$(bundle_version || true)"; b="$(bundle_build || true)"
   if [ "$v" != "$SUPPORTED_VERSION" ] || [ "$b" != "$SUPPORTED_BUILD" ]; then
-    if [ "$FORCE" -ne 1 ]; then
-      die "unsupported WeChat version ${v:-?} (${b:-?}); expected ${SUPPORTED_VERSION} (${SUPPORTED_BUILD}). Use --force to override."
+    if [ -z "${WECHAT_SUPPORTED_VERSION:-}" ] && [ -z "${WECHAT_SUPPORTED_BUILD:-}" ] \
+      && version_is_known_supported "$v" "$b"; then
+      note "installing on known supported historical WeChat $v ($b)"
+    elif [ "$FORCE" -ne 1 ]; then
+      die "unsupported WeChat version ${v:-?} (${b:-?}); expected ${SUPPORTED_VERSION} (${SUPPORTED_BUILD}) or a known pair in: ${KNOWN_VERSION_PAIRS}. Set WECHAT_SUPPORTED_VERSION/WECHAT_SUPPORTED_BUILD or use --force to override."
+    else
+      note "WARNING: forcing install on unsupported version $v ($b)"
     fi
-    note "WARNING: forcing install on unsupported version $v ($b)"
   fi
 
   ensure_backup

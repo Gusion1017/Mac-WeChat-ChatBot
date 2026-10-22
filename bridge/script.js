@@ -31,6 +31,11 @@ var structVer = "{{.structVer}}";
 //   - 新版 found 路径新增 map erase + operator delete(0x4635ed0..0x4635f18)。
 // 地址与开关的权威数据源：hook/versions/*.json。
 //
+// 4.2.0.5(270341): req2buf 函数同样被重编译, 但 R3 task 布局沿用 v4_1_15, 因此其版本
+// JSON 仍置 "req2bufLayout": "v4_1_15" 仅作为 R3/结构布局开关, 地址仍全部由该 JSON 提供。
+// 注意: C1/C2/legacy 路径里硬编码的 L415 常量(下方 L415, 0x4635xxx 段)以及 cgi 路径内联的
+// slot13(0x4634710)/0xE0 模板常量都只适用于 4.1.15, 对 4.2.0.5 无效; 4.2.0.5 目前只走 R3。
+//
 // Go text/template 缺键渲染为 "<no value>", 所以只有精确等于 "v4_1_15" 才走新布局,
 // 其余(含旧版 JSON 无该键)全部走 4.1.12 及以前的旧路径, 行为不变。
 var req2bufLayout = "{{.req2bufLayout}}";
@@ -2261,8 +2266,8 @@ function triggerSendVoiceMessage(taskId, sender, receiver, protoHex, payloadHex)
 }
 // -------------------------发送语音消息分区-------------------------
 
-// ================= R3: 原生 task 构造 + slot13 提交(默认 off) =================
-// 真机探针(2026-10-20)确认:
+// ============ R3: 原生 task 构造 + slot13 提交 (4.1.15/4.2.0.5, 默认 off) ============
+// 真机探针(2026-10-20, 4.1.15.55)确认:
 //   - 全局 service holder: [0xA45DF38]; holder->vt[3]() 返回 class A 的 +0x10 次基址;
 //     class A 主对象 = service - 0x10, vptr = base+0x9E8FC30;
 //   - class A +0x70/+0x78 = slot13 使用的 RB-tree(root/size), 节点 0x30B:
@@ -2274,6 +2279,8 @@ function triggerSendVoiceMessage(taskId, sender, receiver, protoHex, payloadHex)
 // +0x68 填真实闭包 clone → 直接调 slot13(classA, task)。B2(+0xA8) 保留真实对象,
 // 由 req2buf 的 encoder#2 原生 ParseFromArray 接收 B1 产出的字节(避免在 worker 线程跑 JS)。
 // 前置: 先捕获一次真实 newsendmsg 闭包(人工发一条文本), 否则发送安全 fail。
+// 4.2.0.5(270341) 沿用同一 R3 布局, 但任务类 ctor/vtable/闭包 vtable 与各地址全部不同,
+// 一律以版本 JSON 为准; task 尺寸同为 0xE0, 仍由 newSendMsgTaskSize 显式给出。
 var r3Cfg = {
     classAVtable: "{{.classAVtable}}",
     globalServiceHolder: "{{.globalServiceHolder}}",
@@ -2282,6 +2289,7 @@ var r3Cfg = {
     serviceScopeAddr: "{{.serviceScopeAddr}}",
     taskCtorAddr: "{{.newSendMsgTaskCtorAddr}}",
     taskVtable: "{{.newSendMsgTaskVtable}}",
+    newSendMsgTaskSize: "{{.newSendMsgTaskSize}}",
     closureVtable: "{{.r3ClosureVtable}}",
     slot13Addr: "{{.slot13Addr}}",
     operatorNewAddr: "{{.operatorNewAddr}}",
@@ -2406,9 +2414,14 @@ function r3Ready() {
     cfg.queueUntilSeed = (r3Cfg.queueUntilSeed === "true");
     cfg.maxClones = parseInt(r3Cfg.maxClones, 10);
     if (isNaN(cfg.maxClones) || cfg.maxClones < 1) cfg.maxClones = 8;
+    // task 结构尺寸: 缺省 0xE0(4.1.15); 4.2.0.5 同样为 0xE0, 由版本 JSON 的
+    // newSendMsgTaskSize 显式提供, 便于未来版本变化时不改脚本。
+    // 缺键("<no value>")/非法/过小一律回退 0xE0, 保证旧版 4.1.15 JSON 行为不变。
+    cfg.taskSize = r3ParseAddr(r3Cfg.newSendMsgTaskSize);
+    if (cfg.taskSize === null || isNaN(cfg.taskSize) || cfg.taskSize < 0xE0) cfg.taskSize = 0xE0;
     if (missing.length) {
         r3State.lastError = "R3 JSON 缺少地址键: " + missing.join(",");
-        console.error("[!] R3: " + r3State.lastError + " (需要 4.1.15.55 版本 JSON)");
+        console.error("[!] R3: " + r3State.lastError + " (需要与当前微信版本对应的版本 JSON)");
         return false;
     }
     r3State.cfg = cfg;
@@ -3015,7 +3028,7 @@ function r3SendProtoTask(taskId, protoHex, opcode, url, label, opts) {
         opts = opts || {};
         var ctorAddr = opts.ctor || cfg.taskCtorAddr;
         var taskVtable = opts.vtable || cfg.taskVtable;
-        var taskSize = opts.size || 0xE0;
+        var taskSize = opts.size || cfg.taskSize || 0xE0;
         var closureVtableAddr = opts.closureVtable || cfg.closureVtable;
         var closureSeed = opts.seed || r3State.seed;
         console.log("[r3] step1 (" + label + ") proto bytes=" + bytes.length);
@@ -3046,7 +3059,8 @@ function r3SendProtoTask(taskId, protoHex, opcode, url, label, opts) {
         desc.add(0x30).writeU8(1);
         console.log("[r3] step3 (" + label + ") desc=" + desc + " opcode=0x" + opcode.toString(16) + " url=" + url);
 
-        // task := operator new(0xE0); ctor(task, desc)
+        // task := operator new(cfg.taskSize); ctor(task, desc)
+        // 尺寸来自版本 JSON(4.1.15/4.2.0.5 均为 0xE0), opts.size 仅 sendpat 等特殊路径覆盖。
         var operatorNew = new NativeFunction(baseAddr.add(cfg.operatorNewAddr), 'pointer', ['size_t']);
         var task = operatorNew(taskSize);
         if (!task || task.isNull()) throw new Error("operator new(0x" + taskSize.toString(16) + ") 失败");

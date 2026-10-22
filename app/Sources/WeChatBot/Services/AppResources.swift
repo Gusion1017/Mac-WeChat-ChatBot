@@ -98,7 +98,7 @@ enum AppResources {
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
-    /// 把仓库里的版本 JSON 与运行期覆盖项（例如 4.1.15.55 的 R3 发送开关）合并，
+    /// 把仓库里的版本 JSON 与运行期覆盖项（例如 4.1.15.55 / 4.2.0.5 的 R3 发送开关）合并，
     /// 写入 `Application Support/WeChatAI/runtime/`，返回给 bridge 使用的路径。
     /// 仓库 JSON 保持默认 off，产品行为完全由 App 设置决定。
     static func materializedVersionConfig(
