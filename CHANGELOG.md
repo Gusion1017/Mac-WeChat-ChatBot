@@ -8,14 +8,6 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ### 新增
 
-- **引用机器人唤醒（2026-10-22）**：机器人设置「群聊触发方式」新增「引用机器人」
-  （`TriggerMode.quote`，默认关闭，需显式勾选）。别人引用机器人发过的消息时唤醒，
-  正文无需 @ 或关键词；判定用 `refermsg` 的结构化发送者 wxid（`<chatusr>`，
-  私聊形态/部分客户端回退 `<fromusr>`，群 ID 忽略），与 selfID 大小写不敏感比较，
-  昵称不作为依据。被引用原文仍只作为 AI 上下文，不参与 @/关键词/前缀触发。
-  新增 `WeChatAppmsg.Quote.senderID` 与 `RuleEngine.isQuotingBot`，
-  单测覆盖引用机器人/引用他人、`<fromusr>` 回退、群 ID 与 selfID 缺失、
-  触发方式编解码；真机验证：引用机器人的消息可命中，引用他人消息不会误触发。
 - **通讯录真实昵称 / 群名**：hook 在本机**只读**读取通讯录后返回联系人目录，
   bridge 暴露 OneBot `get_contact_directory`，App 用真实昵称/群名替换 wxid 标题，
   并在群成员缓存未命中时回退通讯录昵称（契约见 `docs/architecture.md` §3）。
@@ -134,6 +126,19 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   密钥派生或发送任务构造，只保留行为、开关与安全边界。
 - 新增 `.gitignore` 与文档层面的隐私检查（真实 wxid / 聊天记录 / 截图 / Key 不入库）。
 
+## [1.2.1] — 2026-10-22
+
+### 新增
+
+- **引用机器人唤醒（2026-10-22）**：机器人设置「群聊触发方式」新增「引用机器人」
+  （`TriggerMode.quote`，默认关闭，需显式勾选）。别人引用机器人发过的消息时唤醒，
+  正文无需 @ 或关键词；判定用 `refermsg` 的结构化发送者 wxid（`<chatusr>`，
+  私聊形态/部分客户端回退 `<fromusr>`，群 ID 忽略），与 selfID 大小写不敏感比较，
+  昵称不作为依据。被引用原文仍只作为 AI 上下文，不参与 @/关键词/前缀触发。
+  新增 `WeChatAppmsg.Quote.senderID` 与 `RuleEngine.isQuotingBot`，
+  单测覆盖引用机器人/引用他人、`<fromusr>` 回退、群 ID 与 selfID 缺失、
+  触发方式编解码；真机验证：引用机器人的消息可命中，引用他人消息不会误触发。
+
 ## [1.2.0] — 2026-10-22
 
 ### 修复
@@ -190,7 +195,8 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.2.1...HEAD
 [1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.0
+[1.2.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.1
