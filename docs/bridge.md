@@ -164,6 +164,7 @@ scripts/run_bridge.sh [选项]
 | `PORT` | `--port` | `58080` | HTTP/WS 监听端口；始终只绑定 `127.0.0.1` |
 | `TOKEN` | `--token` | 随机生成 64 字符 hex | OneBot token；HTTP 鉴权用 |
 | `IMAGE_PATH` | `--image-path` | 无（**必填**） | 微信图片/语音/视频/文件临时目录，必须已存在 |
+| `MEDIA_DIR` | `--media-dir` | `$HOME/Library/Application Support/WeChatAI/media` | 入站图片获取的落盘根目录；只写该目录，不写 app bundle |
 | `GADGET_ADDR` | `--gadget-addr` | `127.0.0.1:27042` | Frida Gadget 地址 |
 | `LOG_LEVEL` | `--log-level` | `info` | `debug` / `info` / `warn` / `error` |
 | `BRIDGE_BIN` | `--bin` | `bridge/onebot` | 自定义可执行文件 |
@@ -196,6 +197,7 @@ bridge/onebot \
   -token=<token> \
   -conn_type=websocket \
   -image_path=/path/to/.../Img \
+  -media_dir="$HOME/Library/Application Support/WeChatAI/media" \
   -log_level=info
 ```
 
@@ -208,6 +210,13 @@ bridge/onebot \
   不会开监听端口，也不会重试**。
 - 日志同时输出到 stdout 与 `bridge/log/macos.log`（lumberjack：单文件 100 MB，
   最多 10 份，保留 30 天）。
+- 事件推送不经过 `-send_interval` 节流：入站事件与发送回执在 `HandleIncomingMessage` /
+  `SendWebSocketMsg` / `SendHttpReq` 中立即写出；`-send_interval`（默认 1000ms，App 运行期
+  传 100）只约束真正发往微信的消息（`worker.go SendWechatMsg`）。2026-10-23 前事件推送
+  也会固定 sleep 该时长，历史回放时表现为每条事件固定延迟 + 额外定时器唤醒。
+- 事件级日志（`收到消息` / `发送数据` / `收到入站消息事件`）为 Debug 级，只记录字节长度与
+  最多 256 字符的截断预览；默认 `-log_level=info` 下不产生每事件日志（排障时显式
+  `-log_level=debug`）。Warn/Error 不受影响。
 - 上游启动时会把完整 token 打印到 stdout（`OnebotToken <token>`）；App 侧日志
   如需脱敏，由 App 处理。
 - 按 `Ctrl-C`/SIGTERM 时上游会清理 Frida script/session/device 后退出。
@@ -228,6 +237,8 @@ bridge/onebot \
 ### 3.1 WebSocket 事件（bridge → App）
 
 - 地址：`ws://127.0.0.1:58080/ws`；**无鉴权**，只应监听回环地址。
+- 事件在 `HandleIncomingMessage` 完成身份归一化与入站图片登记后**立即**写出（不等待
+  `-send_interval`），WS 写由 `wsWriteMu` 串行化；HTTP 推送同样立即发出。
 - 上游通过 `json.Marshal(WechatMessage)` 发送紧凑 JSON；`message` 为数组；
   `sender`、`group_id`、`raw_message` 等在 protobuf 解析路径上通常存在。
 - 实际字段集合比契约示例多：`post_type`、`msgsource`、`show_content`。
@@ -236,9 +247,20 @@ bridge/onebot \
   10 位秒级时间戳；App 解析时需按毫秒处理或按位数兼容。
 - `message[]` 类型：`text`（`data.text`）、`image`（`data.url` 为
   `file://...`，`data.text` 保留微信 XML）、`record`/`voice`、`video`、`file`、
-  `face`。媒体事件在推送前会同步下载/落盘，失败时整条事件可能被丢弃（见 §6）。
+  `face`。legacy `HandleMsg` 路径的媒体事件在推送前会同步下载/落盘，失败时整条事件
+  可能被丢弃（见 §6）。
 - 事件在 `HandleMsg` 中同步处理：图片/文件/视频/语音会先下载到 `image_path`
-  再推送，因此大文件会拖慢该条事件。
+  再推送，因此大文件会拖慢该条事件（仅 legacy protobuf 路径；4.1.15 / 4.2.0.5 的
+  Message finalizer 入站路径不再同步下载，见下一条）。
+- **入站图片（4.1.15 / 4.2.0.5，2026-10-23）**：hook 只给文本占位 `[图片]`，图片 XML
+  在 `raw_message`。`incoming.go` 的 `registerIncomingImage` 在推送前解析
+  `<img>` 的 `aeskey` / `cdnmidimgurl` / `cdnthumburl` / `cdnthumbaeskey` / `md5` /
+  `length`，按 `message_id` 登记下载候选（mid → thumb），并把文本占位替换成
+  **无 data 的** `{"type":"image","data":{}}`。新增的结构化字段不携带 aeskey/CDN key，
+  运行日志也不打印它们；`raw_message` 仍保留 hook 原始图片 XML（与历史行为一致）。
+  实际下载发生在 App 调用 `POST /fetch_image` 时（按需，见 §3.4），不会阻塞事件推送。
+  该链路已于 2026-10-23 在微信 4.2.0.5 真机验证（修正了下载 Hook 点与下载请求里
+  变长字符串的长度处理；细节只在 `hook/` 实现中维护，不在公开文档展开）。
 
 ### 3.2 WebSocket 动作（App → bridge）
 
@@ -279,6 +301,36 @@ Content-Type: application/json
 - HTTP handler 会把消息交给发送 worker 并等待结果；`conn_type=websocket` 不影响 HTTP 发送。
 - 额外的未鉴权调试端点：`/test_ws`（向当前 WS 连接写任意 body）以及
   `net/http/pprof` 注册的 `/debug/pprof/*`。它们只在 127.0.0.1 上暴露，详见 §7。
+
+### 3.4 入站图片获取接口
+
+```http
+POST http://127.0.0.1:58080/fetch_image
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"message_id":"<OneBot message_id>"}
+```
+
+- 鉴权与 `/send_*` 一致（Bearer + `hmac.Equal`）；非 POST → 405，未授权 → 401，
+  `message_id` 缺失/未登记/已过期 → 400，下载失败 → 502。
+- 成功：HTTP 200
+
+  ```json
+  {"status":"ok","data":{"file":"file:///Users/<user>/Library/Application%20Support/WeChatAI/media/2026-10-23/<name>.jpg","message_id":"..."}}
+  ```
+
+- 失败：HTTP 502 `{"status":"failed","error":"中文原因"}`。
+- 处理流程：查 `pendingImageJobs` → 并发槽（上限 2）→ 对 mid/thumb 候选逐个
+  `triggerDownload`（Frida 导出）触发微信 CDN 下载 → 等待下载分片稳定 → 用 XML 的
+  `aeskey` AES-ECB 解密（与 legacy `GetFilePath` 相同的补齐/截断规则）→ 校验图片魔数
+  → 写入 `<media_dir>/<yyyy-MM-dd>/<md5>.<ext>`（缩略图回退加 `-thumb` 后缀）
+  → 返回 `file://` 路径。
+  单次总预算约 12 秒；成功/失败都会移除该 `message_id` 的登记（不重复下载）。
+- 图片只写入 `-media_dir`（`filepath.Rel` 校验，拒绝目录穿越），绝不写入 app bundle；
+  日志不打印 aeskey / CDN key / XML。
+- 该接口**不会**主动下载：该会话的「获取图片」关闭时 App 不会调用，因此不会发起新的下载
+  （已在途的单次请求可能完成）。
 
 ---
 
@@ -393,12 +445,14 @@ go test -count=1 -timeout=120s -run 'TestSendHandlerAuth|TestWebSocketGetLoginIn
 1. **构建方式**：上游 `setup_frida_and_build.sh` 使用 `go build`（未 strip）；
    本项目用 `-trimpath -buildvcs=false -ldflags="-s -w"`，产物约 95 MB（上游约 133 MB）。
    调用方只是 App 启动进程，不受影响；如需保留符号调试，去掉这些参数即可。
-2. **已修改文件**：`main.go`（`-self_id`、`-log_file`、通讯录 DB key 回灌）、
-   `logger.go`（`-log_file`）、`param.go`（自消息方向与 `pat_*` 字段）、
-   `incoming.go`（Message finalizer 归一化、非法群 ID 清洗、通讯录昵称补全）、
-   `websocket.go`（`get_contact_directory`、`at` 昵称回退）、
-   `http.go`（`at` 昵称回退）、`worker.go`（R3 提交后跳过 buf2resp）。
+2. **已修改文件**：`main.go`（`-self_id`、`-log_file`、`-media_dir`、通讯录 DB key 回灌、
+   `/fetch_image` 路由）、`logger.go`（`-log_file`）、`param.go`（自消息方向与 `pat_*`
+   字段、`media_dir`）、`incoming.go`（Message finalizer 归一化、非法群 ID 清洗、
+   通讯录昵称补全、入站图片登记）、`websocket.go`（`get_contact_directory`、`at` 昵称回退）、
+   `http.go`（`at` 昵称回退、`/fetch_image` handler）、`worker.go`（R3 提交后跳过 buf2resp）、
+   `msg.go`（下载代次 `latestDownloadAfter`，供入站图片等待触发后的新下载）。
 3. **本项目新增**：`contact.go`（通讯录目录与本地受限密钥缓存）、
+   `media.go`（入站图片登记、按需下载/解密/落盘）、
    `r3seed.go`（发送句柄按 PID 持久化）、`NOTICE`、`.gitignore`、
    `*_test.go`、`UPSTREAM_README.md`（上游 `readme.md` 重命名）与
    `Makefile.upstream`（上游 Makefile，仅参考）。
@@ -439,6 +493,16 @@ go test -count=1 -timeout=120s -run 'TestSendHandlerAuth|TestWebSocketGetLoginIn
 14. **`pat` 出站段保留但产品不再使用**：bridge 的 HTTP/WS 仍能解析 `{"type":"pat"}`
     并调用 hook 的 `triggerSendPatMessage`，属于历史/实验路径；App 已移除 `sendPat`，
     `r3PatSend` 永久保持 `false`，不要启用原生回拍。
+15. **入站图片获取（2026-10-23 真机验证）**：bridge 优先使用微信收到图片后**自然下载**
+    的分片（通常事件到达时已开始），没有分片时才用 Frida 导出 `triggerDownload` 主动
+    触发；触发被拒绝也不直接失败，会继续等待自然分片。收到分片后用 XML 的 `aeskey`
+    AES-ECB 解密并落盘。不按 XML 的 `length`/`cdnthumblength` 截断（该字段不总是真实
+    明文长度，会切掉 JPEG 的 EOI 导致半张图）；改为按图片自身结束标记（JPEG EOI /
+    PNG IEND 等）裁掉 AES 补齐字节，数据不完整时不落盘并继续等分片增长。4.2 的 mid 图
+    常见 HEVC（`hevc_mid_size` / `cdnmidheight=0`），当前没有 HEVC 解码，自动改用
+    JPEG 缩略图（实测完整 JPEG 图片）。4.2.0.5 端到端实测通过。
+    限制：只处理实时入站图片，历史消息不回填；只支持图片（不含表情/语音/视频/文件）；
+    触发调用带 10 秒超时。
 
 ---
 
@@ -446,7 +510,7 @@ go test -count=1 -timeout=120s -run 'TestSendHandlerAuth|TestWebSocketGetLoginIn
 
 - **仅回环**：`run_bridge.sh` 固定 `-receive_host=127.0.0.1:<port>`，App 同样如此；
   不要把端口暴露到局域网。
-- **HTTP token**：`/send_*` 要求 `Authorization: Bearer <token>`；token 建议用
+- **HTTP token**：`/send_*` 与 `/fetch_image` 要求 `Authorization: Bearer <token>`；token 建议用
   `openssl rand -hex 32` 生成（App 首次启动机器人时生成 64 字符 hex）。
   `run_bridge.sh` 未提供 token 时会随机生成并打印。
 - **token 可见性**：上游启动时把完整 token 打印到 stdout，且 token 通过命令行参数
@@ -456,6 +520,10 @@ go test -count=1 -timeout=120s -run 'TestSendHandlerAuth|TestWebSocketGetLoginIn
   当前 App WS 连接注入任意 JSON）。它们只监听 127.0.0.1；本机其他进程仍可访问，
   因此不要在不受信任的多用户机器上运行。
 - **日志**：`bridge/log/macos.log` 含消息内容，轮转上限 100 MB × 10、保留 30 天。
+  入站图片获取的日志只记 `message_id`、字节数与失败原因，**不记** aeskey / CDN key / XML。
+- **媒体写入边界**：`/fetch_image` 只写 `-media_dir`（默认
+  `~/Library/Application Support/WeChatAI/media`），写入前用 `filepath.Rel` 拒绝
+  `..`/绝对路径越界；不会写 app bundle（避免破坏 ad-hoc 签名）。
 - **许可证**：本项目是 GPL-3.0 衍生作品。分发 App/二进制时需按 GPL-3.0 提供
   `bridge/` 对应源码（含本项目修改），并保留 `LICENSE`、`NOTICE`。
   Frida 静态链接遵循 wxWindows Library Licence 3.1 的二进制例外；Go module

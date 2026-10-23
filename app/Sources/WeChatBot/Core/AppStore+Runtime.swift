@@ -83,6 +83,12 @@ final class RuntimeCoordinator {
     private var startedOneBotConfiguration: OneBotClient.Configuration?
     private var selfID = ""
     private var inFlightConversations: Set<String> = []
+    /// 识图（视觉模型）状态：只记录本次运行尝试过的消息，描述本身落库
+    /// （`ChatMessage.imageDescription`）。避免同一条图片在一次运行内反复请求付费模型。
+    private var visionAttempted: Set<String> = []
+    /// 已成功入队的图片获取 ID（`ChatMessage.id`）。识图等待本地文件时据此判断
+    /// 「还在下载」还是「已失败/从未请求」，不需要额外轮询 ImageFetcher 内部状态。
+    private var pendingImageFetchIDs: Set<String> = []
     private var memoryMaintenanceInFlight: Set<String> = []
     private var lastSchedulerTasks: [ScheduledTask] = []
     /// 最近一次可用的通讯录目录（内存副本）；数据库缓存由 `MemoryStore` 负责。
@@ -96,6 +102,15 @@ final class RuntimeCoordinator {
     private static let preloadedMessagePageSize = 30
     /// 超过该时长的事件视为历史回放/补同步，只入库、不触发自动回复。
     private static let staleReplyWindow: TimeInterval = 120
+
+    /// 设置键：selfID 的来源。`login` 表示由 bridge `get_login_info` 写入（权威），
+    /// 启动时的历史修复可以直接信任它，不再从历史事件反推账号。
+    private static let selfIDSourceKey = "onebot.self_id_source"
+    private static let selfIDSourceLogin = "login"
+    /// 一次性全表文本迁移的版本号（设置键 `data.repairs_version`）。
+    /// 两项迁移都成功后写入；之后启动直接跳过，避免每次启动都全表 LIKE 扫描历史消息。
+    private static let dataRepairVersion = 1
+    private static let dataRepairVersionKey = "data.repairs_version"
     private var backgroundPrefetchTask: Task<Void, Never>?
     private var selfMentionBackfillTask: Task<Void, Never>?
 
@@ -297,11 +312,25 @@ final class RuntimeCoordinator {
         if let id = try? await memory.setting(key: "onebot.self_id"), !id.isEmpty {
             selfID = id
         }
-        await repairSelfRoutingIfNeeded()
-        await repairMisroutedConversationsIfNeeded()
+        // bridge get_login_info 写入的 selfID 是权威值：来源为 "login" 时修复直接信任它，
+        // 不再从历史事件反推账号（反推要全表读取并逐行解析 raw_json，是大库启动主开销之一）。
+        let source: String? = try? await memory.setting(key: Self.selfIDSourceKey)
+        let trustedSelfID = source == Self.selfIDSourceLogin
+        await repairSelfRoutingIfNeeded(trusted: trustedSelfID)
+        await repairMisroutedConversationsIfNeeded(trusted: trustedSelfID)
         await repairConversationTitlesIfNeeded()
-        await repairAppmsgTextsIfNeeded()
-        await rerenderLegacyQuoteTextsIfNeeded()
+        // 两个全表文本迁移只在版本未达标时执行一次；任一失败则不写版本，下次启动重试。
+        let repairedVersion = Int((try? await memory.setting(key: Self.dataRepairVersionKey)) ?? "") ?? 0
+        if repairedVersion < Self.dataRepairVersion {
+            let appmsgRepaired = await repairAppmsgTextsIfNeeded()
+            let quotesRerendered = await rerenderLegacyQuoteTextsIfNeeded()
+            if appmsgRepaired, quotesRerendered {
+                try? await memory.setSetting(
+                    key: Self.dataRepairVersionKey,
+                    value: String(Self.dataRepairVersion)
+                )
+            }
+        }
 
         do {
             store.conversations = try await memory.fetchConversations(limit: 300)
@@ -341,7 +370,7 @@ final class RuntimeCoordinator {
             if merged.count > AppStore.logBufferLimit {
                 merged.removeFirst(merged.count - AppStore.logBufferLimit)
             }
-            store.logs = merged
+            store.replaceLogs(merged)
         }
 
         if let memories = try? await memory.fetchMemories(limit: 500) {
@@ -363,8 +392,13 @@ final class RuntimeCoordinator {
 
     /// 修复旧 hook/App 把「自己发出的私聊消息」记进「自己 wxid」会话的历史数据。
     /// 幂等；selfID 为空时也能跑（内部会从历史事件反推账号）。
-    private func repairSelfRoutingIfNeeded() async {
-        guard let result = try? await memory.repairSelfRoutedMessages(selfID: selfID) else { return }
+    /// - Parameter trusted: selfID 来自 bridge `get_login_info` 时为 `true`，
+    ///   不再反推历史事件（避免启动时全表解析 raw_json）。
+    private func repairSelfRoutingIfNeeded(trusted: Bool) async {
+        guard let result = try? await memory.repairSelfRoutedMessages(
+            selfID: selfID,
+            trusted: trusted
+        ) else { return }
         if let inferred = result.inferredSelfID, inferred != selfID {
             // 旧事件可能把 selfID 污染成好友 wxid；历史事件反推的账号更可信。
             selfID = inferred
@@ -382,9 +416,13 @@ final class RuntimeCoordinator {
     /// 以及 kind=group 但 ID 不是 `@chatroom` 的伪群会话。
     /// 只搬 `raw_json` 能明确推导目标的消息；幂等，selfID 为空时也能跑
     /// （内部会从历史事件反推账号）。
-    private func repairMisroutedConversationsIfNeeded() async {
-        guard let result = try? await memory.repairMisroutedConversations(selfID: selfID),
-              result.didChange else { return }
+    /// - Parameter trusted: selfID 来自 bridge `get_login_info` 时为 `true`，
+    ///   不再反推历史事件（避免启动时全表解析 raw_json）。
+    private func repairMisroutedConversationsIfNeeded(trusted: Bool) async {
+        guard let result = try? await memory.repairMisroutedConversations(
+            selfID: selfID,
+            trusted: trusted
+        ), result.didChange else { return }
         var summary = "已修复历史误归类会话：移动 \(result.movedMessages) 条消息，"
             + "影响 \(result.affectedConversationIDs.count) 个会话"
         if result.fixedKinds > 0 {
@@ -405,36 +443,62 @@ final class RuntimeCoordinator {
 
     /// 修复旧 hook 把引用回复 / 链接 / 文件等 appmsg 写成 `[链接/文件]` 的历史消息。
     /// 与实时事件的归一化共用 `WeChatAppmsg` 解析器；幂等，解析不出的消息保持原样。
-    private func repairAppmsgTextsIfNeeded() async {
-        guard let result = try? await memory.repairAppmsgMessageTexts(),
-              result.didChange else { return }
-        log(.info, "Database", "已还原 \(result.repairedMessages) 条 appmsg 消息文本"
-            + "（引用 / 链接 / 文件等，影响 \(result.affectedConversationIDs.count) 个会话）")
+    /// - Returns: 是否执行成功（失败时下次启动会重试这项一次性迁移）。
+    private func repairAppmsgTextsIfNeeded() async -> Bool {
+        do {
+            let result = try await memory.repairAppmsgMessageTexts()
+            guard result.didChange else { return true }
+            log(.info, "Database", "已还原 \(result.repairedMessages) 条 appmsg 消息文本"
+                + "（引用 / 链接 / 文件等，影响 \(result.affectedConversationIDs.count) 个会话）")
+            return true
+        } catch {
+            log(.warning, "Database", "还原历史 appmsg 文本失败：\(error.localizedDescription)")
+            return false
+        }
     }
 
     /// 把历史引用消息的展示定界符重排为 `【引用 发送者：原文】`（AI 更容易辨认）。
     /// 与实时解析共用 `WeChatAppmsg`；只处理 raw_json 可解析的引用 appmsg，幂等。
-    private func rerenderLegacyQuoteTextsIfNeeded() async {
-        guard let count = try? await memory.rerenderLegacyQuoteTexts(), count > 0 else { return }
-        log(.info, "Database", "已重排 \(count) 条引用消息的展示格式（【引用 …】定界符）")
+    /// - Returns: 是否执行成功（失败时下次启动会重试这项一次性迁移）。
+    private func rerenderLegacyQuoteTextsIfNeeded() async -> Bool {
+        do {
+            let count = try await memory.rerenderLegacyQuoteTexts()
+            guard count > 0 else { return true }
+            log(.info, "Database", "已重排 \(count) 条引用消息的展示格式（【引用 …】定界符）")
+            return true
+        } catch {
+            log(.warning, "Database", "重排历史引用消息失败：\(error.localizedDescription)")
+            return false
+        }
     }
 
     /// 采纳 bridge `get_login_info` 返回的权威账号 wxid。
     private func adoptSelfID(_ raw: String) async {
         let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !id.isEmpty, id != selfID else { return }
+        guard !id.isEmpty else { return }
+        // 来源标记必须在 early-return 之前写：即使 id 与已有 selfID 相同（例如上次启动
+        // 已从设置恢复），也要让下次启动知道这是 get_login_info 的权威值，从而跳过反推。
+        try? await memory.setSetting(key: Self.selfIDSourceKey, value: Self.selfIDSourceLogin)
+        guard id != selfID else { return }
         let previous = selfID
         selfID = id
         try? await memory.setSetting(key: "onebot.self_id", value: id)
         log(.info, "Bot", "已确认登录账号：\(id)")
         // selfID 从空/错误值变成正确值时，补跑一次修复并刷新 UI。
+        // 这里的 selfID 来自 get_login_info，修复可以信任它、不再反推历史事件。
         var repaired = false
-        if let result = try? await memory.repairSelfRoutedMessages(selfID: id), result.didChange {
+        if let result = try? await memory.repairSelfRoutedMessages(
+            selfID: id,
+            trusted: true
+        ), result.didChange {
             log(.info, "Database", "已修复历史自消息归属：移动 \(result.movedMessages) 条，"
                 + "影响 \(result.affectedConversationIDs.count) 个会话")
             repaired = true
         }
-        if let result = try? await memory.repairMisroutedConversations(selfID: id), result.didChange {
+        if let result = try? await memory.repairMisroutedConversations(
+            selfID: id,
+            trusted: true
+        ), result.didChange {
             var summary = "已修复历史误归类会话：移动 \(result.movedMessages) 条消息，"
                 + "影响 \(result.affectedConversationIDs.count) 个会话"
             if result.fixedKinds > 0 {
@@ -664,6 +728,20 @@ final class RuntimeCoordinator {
         }
         oneBotClient = client
         startedOneBotConfiguration = configuration
+        store.imageFetcher.configure(
+            fetch: { [weak self] bridgeMessageID in
+                guard let client = self?.oneBotClient else { throw OneBotError.notRunning }
+                return try await client.fetchImage(messageID: bridgeMessageID)
+            },
+            onFetched: { [weak self] request, path in
+                await self?.applyFetchedImage(request: request, path: path)
+            },
+            onFailed: { [weak self] request, reason in
+                // 失败只记 debug，避免网络/图片异常时刷屏；不重试由队列保证。
+                self?.pendingImageFetchIDs.remove(request.chatMessageID)
+                self?.log(.debug, "Media", "图片获取失败（\(request.chatMessageID)）：\(reason)")
+            }
+        )
         client.start()
 
         ruleEngine.resetThrottles()
@@ -695,6 +773,9 @@ final class RuntimeCoordinator {
         startedOneBotConfiguration = nil
         inFlightConversations.removeAll()
         clearReplyProgresses()
+        store.imageFetcher.cancelAll()
+        pendingImageFetchIDs.removeAll()
+        visionAttempted.removeAll()
         await scheduler.stop()
         if store.settings.hook.autoStartBridge {
             hookManager.stopBridge()
@@ -845,6 +926,14 @@ final class RuntimeCoordinator {
             log(.warning, "Database", "写入消息失败：\(error.localizedDescription)")
         }
 
+        // 图片获取与自动回复共用同一个「历史回放」门禁：只处理实时入站图片。
+        scheduleImageFetchIfNeeded(
+            event: event,
+            message: chatMessage,
+            conversation: conversation,
+            receivedAt: receivedAt
+        )
+
         if !event.isSelf {
             store.stats.receivedToday += 1
             scheduleStatsPersist()
@@ -975,6 +1064,279 @@ final class RuntimeCoordinator {
             replyToID: nil,
             rawJSON: event.rawJSON
         )
+    }
+
+    // MARK: 入站图片获取
+
+    /// 消息入库后决定是否向 bridge 请求图片。门槛见 `ImageFetchPolicy`，另加
+    /// 与自动回复相同的历史回放门禁：只处理实时入站图片，打开旧会话重放历史
+    /// 图片时不触发批量下载。「是否获取」按会话生效值：会话覆盖 → 旧全局默认 → true。
+    private func scheduleImageFetchIfNeeded(
+        event: OneBotEvent,
+        message: ChatMessage,
+        conversation: Conversation,
+        receivedAt: Date
+    ) {
+        guard receivedAt.timeIntervalSince(event.timestamp) <= Self.staleReplyWindow else { return }
+        guard ImageFetchPolicy.shouldFetch(
+            kind: message.kind,
+            enabled: conversation.effectiveImageFetchEnabled(
+                global: store.settings.bot.fetchImagesEnabled
+            ),
+            isSelf: event.isSelf,
+            messageID: event.messageID,
+            mediaPath: message.mediaPath,
+            mediaURL: message.mediaURL
+        ) else { return }
+
+        let request = ImageFetcher.Request(
+            bridgeMessageID: event.messageID,
+            chatMessageID: message.id,
+            conversationID: event.conversationID
+        )
+        guard store.imageFetcher.enqueue(request) else { return }
+        pendingImageFetchIDs.insert(message.id)
+        // 只记 message_id 尾号，不打印 XML / key / 完整 ID。
+        let suffix = event.messageID.count > 6 ? String(event.messageID.suffix(6)) : event.messageID
+        log(.debug, "Media", "已排队获取图片（\(event.conversationID)，message_id 尾号 \(suffix)）")
+    }
+
+    /// 图片获取成功：更新该消息的 `mediaPath` 并写库，气泡随即显示图片。
+    /// 消息可能已被内存裁剪/会话已删除：此时跳过内存更新，仍按 ID 从库里补写。
+    private func applyFetchedImage(request: ImageFetcher.Request, path: String) async {
+        pendingImageFetchIDs.remove(request.chatMessageID)
+        let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else { return }
+
+        var updated: ChatMessage?
+        if var list = store.messages[request.conversationID],
+           let index = list.firstIndex(where: { $0.id == request.chatMessageID }) {
+            list[index].mediaPath = trimmedPath
+            store.messages[request.conversationID] = list
+            updated = list[index]
+        } else if var stored = try? await memory.message(id: request.chatMessageID) {
+            stored.mediaPath = trimmedPath
+            updated = stored
+        }
+        guard let updated else {
+            log(.debug, "Media", "图片已获取，但消息已不存在，跳过更新（\(request.chatMessageID)）")
+            return
+        }
+        do {
+            try await memory.upsertMessages([updated])
+        } catch {
+            log(.warning, "Database", "写入图片路径失败：\(error.localizedDescription)")
+        }
+        let title = store.conversations.first(where: { $0.id == request.conversationID })?.displayTitle
+            ?? request.conversationID
+        log(.info, "Media", "已获取图片：\(title)（\(URL(fileURLWithPath: trimmedPath).lastPathComponent)）")
+    }
+
+    // MARK: 识图（视觉模型）
+
+    /// 生成回复前按需识别上下文里的近期图片（2026-10-23）。
+    ///
+    /// 只处理「入站图片 + 最近 10 分钟 + 尚无描述」，一次回复最多 2 张；图片还没落盘时
+    /// 最多等 8 秒（只等本轮已入队的图片）。识别结果写回消息与数据库，之后
+    /// `ChatEngine.promptText` 会以 `[图片：描述]` 参与文本上下文。
+    /// 任何失败只写日志，不阻断回复。
+    private func prepareVisionDescriptions(conversation: Conversation, incoming: ChatMessage) async {
+        let settings = store.settings
+        guard settings.isVisionEnabled, let provider = settings.visionProvider else { return }
+
+        var context = Array((store.messages[conversation.id] ?? []).suffix(ChatEngine.shortTermMemoryLimit))
+        if !context.contains(where: { $0.id == incoming.id }) {
+            context.append(incoming)
+        }
+        let candidates = VisionSupport.candidates(in: context)
+        guard !candidates.isEmpty else { return }
+
+        let requestProvider = settings.visionRequestProvider(from: provider)
+        guard aiClient.credentialState(for: requestProvider) == .available else {
+            log(.debug, "Vision", "识图跳过：通道「\(provider.name)」缺少可用 API Key")
+            return
+        }
+        let prompt = settings.ai.vision?.promptText ?? VisionSettings.defaultPrompt
+        // 整个识图阶段共用一个等待预算：避免 2 张图各等 8 秒。
+        let imageWaitDeadline = Date().addingTimeInterval(8)
+
+        for candidate in candidates {
+            if Task.isCancelled { return }
+            _ = await recognizeVisionImage(
+                candidate,
+                conversation: conversation,
+                provider: requestProvider,
+                prompt: prompt,
+                canWaitForImage: true,
+                imageWaitDeadline: imageWaitDeadline
+            )
+        }
+    }
+
+    /// 识别一张图片并把描述写回消息/数据库；成功返回描述，失败返回 nil。
+    ///
+    /// 调用方负责已确认「识图开启 + 通道凭据可用」。`visionAttempted` 保证同一消息
+    /// 在本次运行内最多请求一次；`canWaitForImage` 只用于本轮刚收到、可能仍在
+    /// `ImageFetcher` 队列里的图片（引用旧图不需要等待）。
+    private func recognizeVisionImage(
+        _ message: ChatMessage,
+        conversation: Conversation,
+        provider: AIProvider,
+        prompt: String,
+        canWaitForImage: Bool,
+        imageWaitDeadline: Date?
+    ) async -> String? {
+        if let existing = ChatEngine.normalizedImageDescription(message) {
+            return existing
+        }
+        guard !visionAttempted.contains(message.id) else { return nil }
+
+        let path: String?
+        if let existing = message.mediaPath, !existing.isEmpty {
+            path = existing
+        } else if let existing = mediaPath(conversationID: conversation.id, messageID: message.id) {
+            path = existing
+        } else if canWaitForImage,
+                  pendingImageFetchIDs.contains(message.id),
+                  let imageWaitDeadline {
+            let remaining = imageWaitDeadline.timeIntervalSinceNow
+            guard remaining > 0 else {
+                log(.debug, "Vision", "识图跳过：图片获取超时（\(message.id)）")
+                return nil
+            }
+            path = await waitForImagePath(
+                conversationID: conversation.id,
+                messageID: message.id,
+                timeout: remaining
+            )
+        } else {
+            path = nil
+        }
+        guard let path, !path.isEmpty else { return nil }
+        visionAttempted.insert(message.id)
+
+        do {
+            let dataURL = try VisionSupport.imageDataURL(forFileAt: path)
+            let messages = VisionSupport.requestMessages(prompt: prompt, imageDataURL: dataURL)
+            let result = try await aiClient.complete(
+                messages: messages,
+                provider: provider,
+                forceStream: false,
+                thinking: VisionSupport.thinkingMode(for: provider)
+            )
+            guard let description = VisionSupport.normalizedDescription(result.text) else {
+                log(.debug, "Vision", "识图返回空描述（\(message.id)）")
+                return nil
+            }
+            await applyImageDescription(
+                conversationID: conversation.id,
+                messageID: message.id,
+                description: description
+            )
+            log(.info, "Vision", "已识图：\(conversation.displayTitle)（\(description.count) 字，模型 \(provider.model)）")
+            return description
+        } catch {
+            if case AIError.emptyResponse = error {
+                log(.warning, "Vision", "识图失败（\(conversation.displayTitle)）：模型返回空内容；"
+                    + "请确认「\(provider.name)」的模型 \(provider.model) 支持图片输入（将跳过本条图片）")
+            } else {
+                log(.debug, "Vision", "识图失败（\(conversation.displayTitle)）：\(error.localizedDescription)")
+            }
+            return nil
+        }
+    }
+
+    /// 当前消息引用的如果是图片，返回一段可附加到用户消息末尾的说明（2026-10-23）。
+    ///
+    /// 微信引用只带 `svrid`（与 `ChatMessage.id` 的 `ob-<id>` 精确对应）和摘要
+    /// `[图片]`，主回复模型看不到被引用图片本体。这里按 `svrid` 找回原图：
+    /// - 已有识图描述：直接复用；
+    /// - 还没描述但有本地图片：借用识图通道现场识别（不受「最近 10 分钟」限制，
+    ///   因为用户明确引用了它）；
+    /// - 找不到原图/无法识别：明确告诉模型「内容暂不可用」，避免它猜图。
+    ///
+    /// 未开启识图且原图也没有旧描述时返回 nil，不改变旧行为。
+    private func prepareQuotedImageNote(conversation: Conversation, incoming: ChatMessage) async -> String? {
+        guard let quote = WeChatAppmsg.parse(eventJSON: incoming.rawJSON)?.quote,
+              quote.isImage else { return nil }
+
+        let settings = store.settings
+        var referenced: ChatMessage?
+        if let imageID = quote.imageMessageID {
+            referenced = store.messages[conversation.id]?.first(where: { $0.id == imageID })
+            if referenced == nil {
+                referenced = try? await memory.message(id: imageID)
+            }
+        }
+
+        var description = referenced.flatMap(ChatEngine.normalizedImageDescription)
+        if description == nil,
+           let referenced,
+           settings.isVisionEnabled,
+           let provider = settings.visionProvider {
+            let requestProvider = settings.visionRequestProvider(from: provider)
+            if aiClient.credentialState(for: requestProvider) == .available {
+                description = await recognizeVisionImage(
+                    referenced,
+                    conversation: conversation,
+                    provider: requestProvider,
+                    prompt: settings.ai.vision?.promptText ?? VisionSettings.defaultPrompt,
+                    canWaitForImage: false,
+                    imageWaitDeadline: nil
+                )
+            }
+        }
+
+        guard settings.isVisionEnabled || description != nil else { return nil }
+        return VisionSupport.quotedImageNote(description: description)
+    }
+
+    /// 已获取图片的本地路径；没有/尚未获取返回 nil。
+    private func mediaPath(conversationID: String, messageID: String) -> String? {
+        guard let list = store.messages[conversationID],
+              let message = list.first(where: { $0.id == messageID }),
+              let path = message.mediaPath,
+              !path.isEmpty else { return nil }
+        return path
+    }
+
+    /// 等待 `ImageFetcher` 把图片写回内存。只在本轮图片确实在队列里时调用；
+    /// 100ms 低频检查 store（描述只在准备回复时用，不属于 UI 刷新热路径）。
+    private func waitForImagePath(
+        conversationID: String,
+        messageID: String,
+        timeout: TimeInterval
+    ) async -> String? {
+        let deadline = Date().addingTimeInterval(max(0, timeout))
+        while !Task.isCancelled {
+            if let path = mediaPath(conversationID: conversationID, messageID: messageID) {
+                return path
+            }
+            guard pendingImageFetchIDs.contains(messageID) else { return nil }
+            guard Date() < deadline else { return nil }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return nil
+    }
+
+    /// 把识图描述写回内存消息与数据库；消息可能已被裁剪/删除，此时按 ID 从库里补写。
+    private func applyImageDescription(conversationID: String, messageID: String, description: String) async {
+        var updated: ChatMessage?
+        if var list = store.messages[conversationID],
+           let index = list.firstIndex(where: { $0.id == messageID }) {
+            list[index].imageDescription = description
+            store.messages[conversationID] = list
+            updated = list[index]
+        } else if var stored = try? await memory.message(id: messageID) {
+            stored.imageDescription = description
+            updated = stored
+        }
+        guard let updated else { return }
+        do {
+            try await memory.upsertMessages([updated])
+        } catch {
+            log(.warning, "Database", "写入识图描述失败：\(error.localizedDescription)")
+        }
     }
 
     // MARK: @ 文本回退
@@ -1291,13 +1653,32 @@ final class RuntimeCoordinator {
         if let personaModel = persona?.model, !personaModel.isEmpty { provider.model = personaModel }
         setReplyProgressProvider(conversationID: conversation.id, provider: provider)
 
+        // 识图：生成回复前把上下文里的近期图片转成文字描述（按需、最多 2 张）。
+        // 图片获取可能仍在队列中，本轮消息最多等待 8 秒；超时按 [图片] 继续回复。
+        if store.settings.isVisionEnabled {
+            await prepareVisionDescriptions(conversation: conversation, incoming: message)
+        }
+        // 引用图片：按 svrid 找回被引用原图，把它的识图描述附加到本轮消息，
+        // 让回复模型知道用户引用的是哪一张图（旧图也可以现场识别一次）。
+        let quotedImageNote = await prepareQuotedImageNote(conversation: conversation, incoming: message)
+        // 描述写回 store.messages 后，用最新副本作为 incoming（避免提示词读到旧值）。
+        let replyMessage = store.messages[conversation.id]?.first(where: { $0.id == message.id }) ?? message
+        var promptMessage = replyMessage
+        if let quotedImageNote, !quotedImageNote.isEmpty {
+            let base = promptMessage.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            promptMessage.text = base.isEmpty ? quotedImageNote : base + "\n" + quotedImageNote
+        }
+
         // ChatEngine only reads the last `shortTermMemoryLimit` messages; pass that window
         // instead of copying the whole (up to 300 message) history on the main actor.
-        let history = Array((store.messages[conversation.id] ?? []).suffix(ChatEngine.shortTermMemoryLimit))
+        var history = Array((store.messages[conversation.id] ?? []).suffix(ChatEngine.shortTermMemoryLimit))
+        if let index = history.firstIndex(where: { $0.id == promptMessage.id }) {
+            history[index] = promptMessage
+        }
         do {
             let plan = try await chatEngine.generateReply(
                 conversation: conversation,
-                incoming: message,
+                incoming: promptMessage,
                 settings: store.settings,
                 persona: persona,
                 provider: provider,
@@ -2058,6 +2439,7 @@ final class RuntimeCoordinator {
         oneBotClient?.stop()
         oneBotClient = nil
         clearReplyProgresses()
+        store.imageFetcher.cancelAll()
         hookManager.shutdown()
         LogPipeline.shared.flushForTermination()
         let statsSnapshot = store.stats
@@ -2137,6 +2519,12 @@ extension AppStore {
         settings.bot.enabled = false
         persist()
         appendLog(.info, "Bot", "机器人已停止")
+    }
+
+    /// 设置里关闭「获取图片」时调用：取消所有未完成的图片请求；
+    /// 已在途的请求返回后也不再更新消息（不会写入任何 App 侧文件）。
+    func cancelPendingImageFetches() {
+        imageFetcher.cancelAll()
     }
 
     func refreshStatus() async {

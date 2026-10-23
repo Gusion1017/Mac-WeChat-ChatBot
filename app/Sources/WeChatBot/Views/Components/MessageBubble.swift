@@ -84,6 +84,12 @@ struct MessageBubble: View, Equatable {
                         NSPasteboard.general.setString(message.text, forType: .string)
                     }
                 }
+                if message.kind == .image, let description = imageDescription {
+                    Button(L("复制识图描述")) {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(description, forType: .string)
+                    }
+                }
                 Button(L("复制消息 ID")) {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(message.id, forType: .string)
@@ -164,8 +170,31 @@ struct MessageBubble: View, Equatable {
     }
 
     private var imageContent: some View {
-        imageContentBody
-            .task(id: message.mediaPath) { await loadLocalImageIfNeeded() }
+        VStack(alignment: .leading, spacing: 5) {
+            imageContentBody
+            if let description = imageDescription {
+                HStack(alignment: .top, spacing: 4) {
+                    Image(systemName: "eye")
+                        .font(.system(size: 9, weight: .medium))
+                    Text(description)
+                        .font(.caption2)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 240, alignment: .leading)
+            }
+        }
+        .task(id: message.mediaPath) { await loadLocalImageIfNeeded() }
+    }
+
+    /// 非空的识图描述；空白字符串按「未识别」处理，避免撑出空行。
+    private var imageDescription: String? {
+        guard let value = message.imageDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty
+        else { return nil }
+        return value
     }
 
     @ViewBuilder
@@ -332,7 +361,11 @@ struct MessageBubble: View, Equatable {
         parts.append(message.isOutgoing ? "我发送" : "\(message.displaySender) 发送")
         switch message.kind {
         case .text: parts.append(message.text)
-        case .image: parts.append("图片")
+        case .image:
+            parts.append("图片")
+            if let description = imageDescription {
+                parts.append("识图描述 \(description)")
+            }
         case .voice: parts.append("语音消息")
         case .emoji: parts.append("表情 \(message.text)")
         case .file: parts.append("文件 \(fileName)")

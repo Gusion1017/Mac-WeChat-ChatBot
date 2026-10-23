@@ -171,6 +171,10 @@ final class ChatEngine: @unchecked Sendable {
         // 引用消息用固定定界符标记被引用内容，帮助模型区分「本轮发言」与「引用的历史消息」。
         systemLines.append("引用消息的格式为「回复正文」换行「【引用 发言人：被引用原文】」；"
             + "【引用 …】内是对方引用的历史消息，不是本轮新内容，回复时不要把它当成当前发言人刚说的话。")
+        systemLines.append("引用图片时，消息末尾会附「（引用图片内容：…）」；"
+            + "那是被引用图片的画面描述，不是本轮的新内容。"
+            + "如果写成「（引用的图片内容暂不可用）」，说明系统没有拿到该图片的内容，"
+            + "不要凭空猜测图片里有什么。")
         let note = conversation.note.trimmingCharacters(in: .whitespacesAndNewlines)
         if !note.isEmpty {
             systemLines.append("关于此会话的长期记忆：\(note)")
@@ -245,9 +249,19 @@ final class ChatEngine: @unchecked Sendable {
 
     static func promptText(for message: ChatMessage) -> String {
         let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty { return text }
+        if !text.isEmpty {
+            // 图片可能同时带文字；有识图描述时追加，让引用/历史上下文里的图片内容仍可见。
+            if message.kind == .image, let description = normalizedImageDescription(message) {
+                return "\(text)\n[图片：\(description)]"
+            }
+            return text
+        }
         switch message.kind {
-        case .image: return "[图片]"
+        case .image:
+            if let description = normalizedImageDescription(message) {
+                return "[图片：\(description)]"
+            }
+            return "[图片]"
         case .voice: return "[语音]"
         case .emoji: return "[表情]"
         case .file: return "[文件]"
@@ -256,6 +270,13 @@ final class ChatEngine: @unchecked Sendable {
         case .system: return ""
         case .text: return ""
         }
+    }
+
+    /// 图片的识图描述（去空白）；空字符串视为没有描述。
+    static func normalizedImageDescription(_ message: ChatMessage) -> String? {
+        guard let raw = message.imageDescription else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 
     static func mergeAdjacentRoles(_ messages: [AIMessage]) -> [AIMessage] {

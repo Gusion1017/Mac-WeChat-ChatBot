@@ -37,6 +37,12 @@
 - 日志环形缓冲（App 内 2000 条），DB 保留最近 5000 条；按天文件切割尚未实现，避免无界增长。
 - 防睡眠默认关闭；仅在用户选择「接入电源时 / 始终」后持有 IOKit 空闲睡眠断言，
   不轮询、不阻止合盖睡眠。
+- bridge 事件推送立即写出，不受 `-send_interval` 延迟；该参数只节流真正发往微信的消息。
+  事件级日志默认在 Debug 级，只输出字节长度 + 截断预览（默认 Info 级零额外分配）。
+- hook 的 R3 闭包捕获按需调度：未拿到发送句柄时按 10ms→50ms→250ms 退避扫描，拿到后
+  停止周期任务；入站去重表为 4096 条固定窗口（历史回放 / 长时间运行不增长内存）。
+- 启动历史修复信任 bridge `get_login_info` 的权威 selfID（`onebot.self_id_source=login`），
+  跳过历史事件反推；两个全表 appmsg / 引用文本迁移由 `data.repairs_version` 门禁只执行一次。
 
 ## 2. 目录与写入边界
 
@@ -72,7 +78,8 @@ bridge/onebot \
   -conn_type=websocket \
   -self_id=<当前登录 wxid> \
   -log_file=$HOME/Library/Logs/WeChatAI/bridge/macos.log \
-  -image_path=/Users/<user>/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/temp/<...>/Img/
+  -image_path=/Users/<user>/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/temp/<...>/Img/ \
+  -media_dir="/Users/<user>/Library/Application Support/WeChatAI/media"
 ```
 
 - `onebot` 从**当前工作目录**读取 `script.js`，因此 App 启动进程时 `currentDirectoryURL` 必须指向 bridge 资源目录。
@@ -86,11 +93,17 @@ bridge/onebot \
   `~/Library/Application Support/WeChatAI/runtime/hook-<version>-<build>.json` 再传给 bridge；
   仓库 JSON 始终保持默认 `off`，产品行为只由设置决定。
 - `image_path` 用于图片/视频临时目录；不存在时上游会报错，App 负责创建/探测。
-- 鉴权：HTTP 发送接口要求 `Authorization: Bearer <token>`；WS 无鉴权，仅监听 127.0.0.1。
+- `-media_dir` 是**入站图片获取**的落盘目录（App 传 `~/Library/Application Support/WeChatAI/media`）；
+  留空时 bridge 回退到同一路径。图片只会写入该目录，不写 app bundle（避免破坏 ad-hoc 签名）。
+- 鉴权：HTTP 发送接口与 `/fetch_image` 要求 `Authorization: Bearer <token>`；WS 无鉴权，仅监听 127.0.0.1。
 
 ### 3.2 WebSocket 事件（bridge → App）
 
-连接 `ws://127.0.0.1:58080/ws`。bridge 推送的 JSON（`WechatMessage`，字段可能缺省）：
+连接 `ws://127.0.0.1:58080/ws`。事件在 bridge 完成归一化（含入站图片登记）后**立即**写出，
+不受 `-send_interval` 延迟；该参数只节流真正发往微信的消息。事件级日志默认在 Debug 级，
+只记录字节长度 + 最多 256 字符截断预览。
+
+bridge 推送的 JSON（`WechatMessage`，字段可能缺省）：
 
 ```json
 {
@@ -145,6 +158,10 @@ bridge/onebot \
     （`wxid_self` 占位会话、kind=group 但 ID 非群 ID 的伪群会话、非法群 ID 等）。
     两者都只搬能由 `raw_json` 明确推导目标的消息，幂等，失败/不确定时保持原样。
     历史事件反推 selfID 时会忽略 `wxid_self` / `self` 这类占位值。
+    `self_id_source=login`（bridge `get_login_info` 写入）时两处修复直接信任权威 selfID、
+    不再反推（2026-10-23）；反推只采样最近 5000 条 `raw_json`，且
+    `repairMisroutedConversations` 先用 `conversations` 表筛出嫌疑会话——健康库启动不再
+    全表读取并逐行解析历史消息。
 - App 连接后主动发 `get_login_info`，把返回的 `data.user_id` 作为 selfID 的
   权威来源；事件启发式仅作为旧 bridge 的兜底。
 - 拍一拍触发（2026-10-21 修复）：`pat_target_wxid == self_id` 才算「拍的是机器人」；
@@ -201,6 +218,32 @@ bridge/onebot \
   触发判定只取引用回复的正文（`RuleEngine.triggerText`）：被引用原文仅作为 AI 上下文，
   不会因为「引用了一条 @ 过机器人 / 含关键词的旧消息」而重复唤醒。
 - 媒体字段：`data.url` 为 `file://` 本地路径时复制到 App 媒体目录；`data.file` 可能为 base64。
+- **入站图片获取（2026-10-23 新增，按需）**：微信 4.1.15 / 4.2.0.5 的图片消息在 hook 里
+  只有文本占位 `[图片]`，图片 XML（`<img aeskey=… cdnmidimgurl=… cdnthumburl=… md5=…
+  length=… />`）在 `raw_message` 里。bridge 在推送事件前解析该 XML，按 `message_id`
+  登记 mid → thumb 两个下载候选，并把 `[图片]` 文本段替换成**无 data 的**
+  `{"type":"image","data":{}}` 段（App 据此渲染图片气泡；新增的结构化字段与运行日志不携带 aeskey/CDN key；
+  `raw_message` 仍保留 hook 原始图片 XML，与历史行为一致，App 的 `rawJSON` 会照旧入库）。
+  XML 里的 `cdnmidimgurl`/`cdnthumburl` 是十六进制 CDN file key（不是 HTTP URL），
+  未查看的图片也不会在本地落盘，因此 bridge 只在 App 调用 `POST /fetch_image` 时
+  用 Frida 导出 `triggerDownload` 触发微信自己的 CDN 下载，收到分片后用 `aeskey`
+  AES-ECB 解密并写入 `-media_dir/<yyyy-MM-dd>/`，返回 `file://` 路径。
+  「是否获取」按**会话**控制：`Conversation.imageFetchEnabled`（nil 跟随旧全局默认，默认开启），
+  入口是会话详情 → 菜单 →「媒体」→「获取图片」（2026-10-23 从全局设置移入各会话）；
+  关闭时**完全不请求**，只显示「图片」占位。该链路已于 2026-10-23 在 4.2.0.5 真机验证
+  （优先使用微信自然下载分片，必要时主动触发 → AES-ECB 解密；mid 为 HEVC 时用 JPEG 缩略图）。
+  本次只做获取（识图见下条）。只处理实时入站图片，历史消息不回填。
+- **识图（视觉模型，2026-10-23 新增，按需）**：自动回复触发且「AI 模型 → 识图模型」启用时，
+  App 在生成回复前对上下文内最近 10 分钟、最多 2 张尚未识别的入站图片生成文字描述：
+  图片文件未落盘时先等 `POST /fetch_image` 完成（最多 8 秒），再用 ImageIO 缩放/JPEG 编码，
+  以 OpenAI 兼容的多模态 `image_url` 内容调用识图通道（DeepSeek 系通道关闭默认 thinking，
+  避免推理占用输出额度）。描述写入
+  `ChatMessage.imageDescription`（DB 列 `messages.image_description`），之后提示词以
+  `[图片：<描述>]` 参与文本上下文；图片本体不进入回复提示词。失败只写 debug 日志，
+  未开启识图或图片无法获取时行为与旧版一致。该链路尚未真机验证（需支持图片输入的视觉模型）。
+  引用本轮消息所引用的图片时，App 解析 `refermsg` 的 `svrid`（与 `ChatMessage.id` 的
+  `ob-<svrid>` 精确对应）找回原图：复用/现场生成识图描述，并以
+  「（引用图片内容：…）」附加到本轮提示词，详见 core-services.md §3.3。
 
 ### 3.3 WebSocket 动作（App → bridge）
 
@@ -220,6 +263,13 @@ bridge/onebot \
   返回 `{"status":"ok"}` 或 5xx/`{"status":"failed","error":...}`。
 - 图片/语音/视频/文件：`message` 数组元素 `{"type":"image","data":{"file":"base64://..."}}`。
   单条消息过长时 App 应自行分段。
+- **入站图片获取**：`POST http://127.0.0.1:58080/fetch_image`，Header `Authorization: Bearer <token>`，
+  body `{"message_id":"<OneBot message_id>"}`。bridge 按需触发微信 CDN 下载（单次总预算约 12 秒），
+  成功返回 `{"status":"ok","data":{"file":"file:///.../media/<date>/<name>.jpg","message_id":"..."}}`，
+  失败返回 `{"status":"failed","error":"中文原因"}`；消息未登记/已过期 400，下载失败 502。
+  App 只在该会话生效的「获取图片」开启、消息是图片、`mediaPath`/`mediaURL` 为空时请求
+  （会话覆盖 → 旧全局默认 → true）；返回路径写入 `ChatMessage.mediaPath` 并落库。
+  错误由 App 写 debug 日志，不进入回复提示词。
 - 群聊 @：`{"type":"at","data":{"qq":"wxid_x"}}` 放在文本段之前；bridge 用群成员缓存
   （回退通讯录目录）解析昵称，拼接 `@群昵称\u2005` 并把目标写入 `<atuserlist>`。
   「拍一拍回复 @ 拍的人」复用同一路径（仅群聊，附在回复的第一条消息前）。
@@ -234,6 +284,16 @@ bridge/onebot \
   `general.sleepPrevention` 的运行时执行者，持有/释放 IOKit `PreventUserIdleSystemSleep` 断言，
   监听电源适配器变化；纯决策函数 `shouldPreventSleep(mode:onExternalPower:)` 可单测。
 - `AppSettings`/`Conversation`/`ChatMessage`/`AIProvider`/`Persona`/`ScheduledTask`/`HookStatus`/`BotStats`（`Models/Models.swift`，Lead 所有）。
+- `ImageFetcher`（`Services/ImageFetcher.swift`，`@MainActor`）：入站图片获取的**串行队列**。
+  只按消息入队，不持有 `OneBotClient`/`AppStore`（`fetch` / `onFetched` / `onFailed` 闭包注入）；
+  同一 `chatMessageID` 只尝试一次，失败不自动重试；`cancelAll()` 用于停止机器人或关闭设置。
+  决策规则集中在纯函数 `ImageFetchPolicy.shouldFetch(...)`，便于单测。
+  是否入队由 `Conversation.effectiveImageFetchEnabled(global: settings.bot.fetchImagesEnabled)`
+  决定（会话列 `image_fetch_enabled`：NULL 跟随、0 关、1 开）。
+- `VisionSupport`（`Services/VisionEngine.swift`，纯静态函数）：识图候选筛选（入站图片、
+  无描述、10 分钟内、最多 2 张）、ImageIO 缩放与 JPEG/base64 data URL、多模态请求消息、
+  描述清洗。运行时在 `evaluateAndReply` 生成回复前调用；描述写入
+  `ChatMessage.imageDescription` 并落库，提示词以 `[图片：<描述>]` 参与文本上下文。
 - 服务协议建议：
   ```swift
   protocol OneBotTransport: AnyObject { func start() async throws; func stop(); func send(...) async throws }
@@ -261,7 +321,7 @@ bridge/onebot \
 - 2026-10-22 在 4.2.0.5 (270341) 完成真机验证：Gadget 注入 + ad-hoc 重签（保留 sandbox
   entitlements）后微信正常启动、gadget 27042 监听；私聊/自消息入站、通讯录解密读取、
   R3 文本发送（含 bridge 重启后从本地缓存恢复发送句柄）均通过；版本文件已按真机验证结果
-  修正并生效。群聊 @ / 拍一拍沿用既有逻辑，本轮未单独复测；媒体下载维持已知缺失。
+  修正并生效。群聊 @ / 拍一拍沿用既有逻辑，本轮未单独复测；图片获取链路已实现（CDN 触发下载待复测）。
 - 4.1.15.55 / 4.2.0.5 发送附加配置（R3，仓库默认 `enableSend=false` / `req2bufSendMode=off`）：
   由 App 读取版本 JSON 后按设置合并生成运行期配置；具体键名、运行期参数与地址表只维护在
   `hook/versions/*.json` 与 `hook/script.js`，文档不展开。

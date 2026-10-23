@@ -24,6 +24,25 @@ struct WeChatAppmsg: Equatable, Sendable {
         var snippet: String
         /// refermsg `<type>`（1 文字 / 3 图片 / 34 语音 / 43 视频 / 47 表情 / 49 appmsg）。
         var messageType: Int?
+        /// refermsg `<svrid>`：被引用消息在微信侧的服务端消息 ID。
+        ///
+        /// App 的 `ChatMessage.id` 是 `ob-<message_id>`，而 `<svrid>` 与 bridge 的
+        /// `message_id` 相同（2026-10-23 用真实引用图片核对）。因此可以精确关联到
+        /// 原图消息，读取它的 `imageDescription`，让 AI 知道引用的是哪张图。
+        /// 空字符串表示 refermsg 缺失/旧客户端没有该字段。
+        var svrid: String = ""
+
+        /// 被引用的是否为图片（`<type>` 优先；缺 type 时按摘要兜底）。
+        var isImage: Bool {
+            if let messageType { return messageType == 3 }
+            return snippet.trimmingCharacters(in: .whitespacesAndNewlines) == "[图片]"
+        }
+
+        /// App 内原图消息的 ID（`ob-<svrid>`）；`svrid` 缺失时返回 nil。
+        var imageMessageID: String? {
+            let value = svrid.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : "ob-\(value)"
+        }
     }
 
     /// appmsg `<type>`；缺失时 -1。
@@ -78,7 +97,8 @@ struct WeChatAppmsg: Equatable, Sendable {
                     fromUser: WeChatXML.field("fromusr", in: refer) ?? ""
                 ),
                 snippet: snippet(from: content, messageType: messageType),
-                messageType: messageType
+                messageType: messageType,
+                svrid: WeChatXML.field("svrid", in: refer)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             )
         }
 

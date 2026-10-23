@@ -44,6 +44,8 @@ func SendWechatMsg(m *SendMsg) {
 		}
 	}()
 
+	// send_interval 只节流真正发往微信的消息；入站事件推送
+	// （SendWebSocketMsg / SendHttpReq）不经过这里，需立即发出。
 	time.Sleep(time.Duration(config.SendInterval) * time.Millisecond)
 	currTaskId := atomic.AddInt64(&taskId, 1)
 	Info("📩 收到任务", "task_id", currTaskId, "type", m.Type)
@@ -366,6 +368,12 @@ func HandleMsg(jsonData []byte) ([]byte, error) {
 			msg.Data.URL = "file://" + path
 			msg.Data.Media = nil
 		case "image":
+			// 2026-10-23：入站图片在 incoming.go 里被归一化为「无 data 的 image 段」
+			// （真实下载由 App 按会话设置调用 /fetch_image 按需触发）。这里不能再用
+			// legacy 的 XML 文本解析，否则空文本会返回 EOF 并让整条事件被丢弃。
+			if msg.Data == nil || strings.TrimSpace(msg.Data.Text) == "" {
+				continue
+			}
 			var fileMsg FileMsg
 			err = xml.Unmarshal([]byte(msg.Data.Text), &fileMsg)
 			if err != nil {

@@ -129,6 +129,10 @@ struct Conversation: Identifiable, Codable, Hashable {
     /// nil 表示跟随全局工作时间；非 nil 表示此会话独立的工作时段。
     var workingHours: WorkingHours?
 
+    /// 此会话是否获取图片：nil 表示跟随旧全局设置/默认开启。
+    /// 用户在该会话菜单里切换后写入 true/false；照片下载成功后据此决定是否自动显示。
+    var imageFetchEnabled: Bool?
+
     /// 用户重命名或微信下发的真实昵称；nil 表示当前只有自动兜底名称。
     var customTitle: String? {
         ConversationName.customTitle(title, conversationID: id, kind: kind)
@@ -145,6 +149,11 @@ struct Conversation: Identifiable, Codable, Hashable {
     /// 会话自定义时段优先，否则继承全局设置。
     func effectiveWorkingHours(global: WorkingHours) -> WorkingHours {
         workingHours ?? global
+    }
+
+    /// 生效值：会话覆盖 →（旧）全局默认 → true。
+    func effectiveImageFetchEnabled(global: Bool) -> Bool {
+        imageFetchEnabled ?? global
     }
 }
 
@@ -434,6 +443,9 @@ struct ChatMessage: Identifiable, Codable, Hashable {
     var text: String = ""
     var mediaPath: String?
     var mediaURL: String?
+    /// 识图结果：视觉模型对这张图片内容的文字描述（2026-10-23）。
+    /// nil 表示未开启识图、识别失败或尚未识别；图片本身不会直接进入回复提示词。
+    var imageDescription: String?
     var timestamp: Date
     var status: DeliveryStatus = .received
     var replyToID: String?
@@ -978,6 +990,11 @@ struct BotSettings: Codable, Hashable {
     /// 群聊唤醒后的免唤醒窗口（2026-10-23）。可选以兼容旧配置；nil 表示默认关闭。
     var wakeWindow: WakeWindowSettings?
 
+    /// 收到图片时是否向 bridge 请求图片内容（默认开启）。
+    /// 旧配置缺少该键时保持开启；关闭后只显示「图片」占位，不下载、不落盘。
+    /// 必须保持 `Bool?`：非可选 Bool 会让缺少该键的旧 config.json 解码失败。
+    var imageFetchEnabled: Bool?
+
     var patReplyEnabled: Bool {
         get { pat?.enabled ?? false }
         set {
@@ -1058,6 +1075,12 @@ struct BotSettings: Codable, Hashable {
     /// 生效的免唤醒窗口秒数；关闭时为 0。
     var effectiveWakeWindowSeconds: Double {
         wakeWindow?.effectiveSeconds ?? 0
+    }
+
+    /// 生效的「获取图片」开关：nil 视为开启（旧配置兼容）。
+    var fetchImagesEnabled: Bool {
+        get { imageFetchEnabled ?? true }
+        set { imageFetchEnabled = newValue }
     }
 
     /// 从结构化 @ 事件学到的「群昵称」映射（群 ID -> 机器人在该群的展示昵称）。

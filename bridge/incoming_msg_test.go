@@ -117,3 +117,38 @@ func TestHandleMsgPreservesPatFields(t *testing.T) {
 		t.Fatalf("pat_template 丢失: %#v", got)
 	}
 }
+
+// 2026-10-23：入站图片事件被 bridge 归一化为「无 data 的 image 段」，随后经
+// SendWebSocketMsg → HandleMsg 转发。legacy image 分支若把空 data.text 当 XML
+// 解析会返回 EOF 并丢弃整条事件；这里回归验证它能原样转发且不阻塞。
+func TestHandleMsgToleratesInboundImageSegmentWithoutText(t *testing.T) {
+	payload := []byte(`{
+		"group_id":"123@chatroom",
+		"self_id":"wxid_bot",
+		"user_id":"wxid_user",
+		"sender":{"user_id":"wxid_user","nickname":"用户"},
+		"time":1760000000000,
+		"post_type":"message",
+		"message_id":"2313155729072926134",
+		"message":[{"type":"image","data":{}}],
+		"raw_message":"<msg><img aeskey=\"00112233445566778899aabbccddeeff\" cdnmidimgurl=\"0102\" length=\"32\" md5=\"00112233445566778899aabbccddeeff\"/></msg>",
+		"show_content":"[图片]",
+		"message_type":"group",
+		"msg_type":3
+	}`)
+
+	out, err := HandleMsg(payload)
+	if err != nil {
+		t.Fatalf("空 image 段不应导致 HandleMsg 失败: %v", err)
+	}
+	var got WechatMessage
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("回包反序列化失败: %v", err)
+	}
+	if len(got.Message) != 1 || got.Message[0].Type != "image" {
+		t.Fatalf("image 段应原样保留: %#v", got.Message)
+	}
+	if got.RawMessage == "" {
+		t.Fatal("raw_message 不应被清空")
+	}
+}

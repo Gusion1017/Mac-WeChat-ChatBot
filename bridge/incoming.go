@@ -39,13 +39,16 @@ func HandleIncomingMessage(payload map[string]interface{}) {
 	normalizeIncomingIdentity(payload, myWechatId)
 	// hook 事件只有 wxid；用已缓存的通讯录目录补全好友昵称/群名（未命中保持原样）。
 	enrichIncomingSender(payload)
+	// 入站图片：在推送事件前登记下载元数据，并把 [图片] 文本占位替换成
+	// image 段（事件里不新增 aeskey / CDN file key 字段）。
+	registerIncomingImage(payload)
 
 	data, err := json.Marshal(payload)
 	if err != nil {
 		Error("入站消息序列化失败", "err", err)
 		return
 	}
-	Info("收到入站消息事件", "data_len", len(data))
+	logEventDebug("收到入站消息事件", data)
 	if config.ConnType == "http" {
 		SendHttpReq(data)
 	} else {

@@ -20,6 +20,9 @@ final class AppStore {
     var messages: [String: [ChatMessage]] = [:]
     var longTermMemories: [LongTermMemory] = []
     var logs: [LogEntry] = []
+    /// 日志缓冲的修改代数：`logs` 每次整体变化都会 +1。日志页/仪表盘用低频采样
+    /// （500ms / 750ms）对比这个值，未变化时跳过 O(n) 的重算与复制，空闲时不空转。
+    private(set) var logRevision: UInt64 = 0
 
     var sidebarSelection: SidebarItem? = .dashboard
     var selectedConversationID: String?
@@ -32,6 +35,10 @@ final class AppStore {
     /// 自动回复流水线的实时阶段快照，按会话 ID 索引（不持久化）。
     /// 由 `RuntimeCoordinator` 在收到消息后写入，供会话页头、输入区状态条与会话列表实时展示。
     var replyProgress: [String: ReplyProgress] = [:]
+
+    /// 入站图片获取队列（设置开关 + 串行请求）。生命周期跟随 AppStore，
+    /// 由 Runtime 注入请求/回调闭包；`@Observable` 不追踪（UI 无需刷新）。
+    let imageFetcher = ImageFetcher()
 
     init(settings: AppSettings = SettingsStore.load()) {
         self.settings = settings
@@ -115,11 +122,24 @@ final class AppStore {
             updated.removeFirst(updated.count - Self.logBufferLimit)
         }
         logs = updated
+        logRevision &+= 1
+    }
+
+    /// 用启动时从数据库合并出的历史日志整体替换内存缓冲（由 `RuntimeCoordinator` 调用）。
+    /// 统一裁剪到上限并 bump `logRevision`，UI 的低频采样据此感知内容变化。
+    func replaceLogs(_ newLogs: [LogEntry]) {
+        var updated = newLogs
+        if updated.count > Self.logBufferLimit {
+            updated.removeFirst(updated.count - Self.logBufferLimit)
+        }
+        logs = updated
+        logRevision &+= 1
     }
 
     func clearLogs() {
         LogPipeline.shared.clearPending()
         logs.removeAll()
+        logRevision &+= 1
     }
 
     // MARK: Helpers

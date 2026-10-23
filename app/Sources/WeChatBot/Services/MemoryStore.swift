@@ -154,7 +154,8 @@ actor MemoryStore {
             is_pinned INTEGER NOT NULL DEFAULT 0,
             is_muted INTEGER NOT NULL DEFAULT 0,
             note TEXT NOT NULL DEFAULT '',
-            working_hours TEXT
+            working_hours TEXT,
+            image_fetch_enabled INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_conversations_last_message
             ON conversations (is_pinned DESC, last_message_at DESC);
@@ -172,7 +173,8 @@ actor MemoryStore {
             timestamp REAL NOT NULL,
             status TEXT NOT NULL DEFAULT 'received',
             reply_to_id TEXT,
-            raw_json TEXT
+            raw_json TEXT,
+            image_description TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_time
             ON messages (conversation_id, timestamp DESC);
@@ -249,6 +251,17 @@ actor MemoryStore {
             try execute("ALTER TABLE conversations ADD COLUMN working_hours TEXT;")
         }
 
+        // v5: per-conversation image fetch toggle (NULL means “follow the legacy
+        // global default”, which is on; 0 = off, 1 = on).
+        if try !columnExists(in: "conversations", column: "image_fetch_enabled") {
+            try execute("ALTER TABLE conversations ADD COLUMN image_fetch_enabled INTEGER;")
+        }
+
+        // v6: vision-model description for an image message (NULL = not recognized yet).
+        if try !columnExists(in: "messages", column: "image_description") {
+            try execute("ALTER TABLE messages ADD COLUMN image_description TEXT;")
+        }
+
         let version = try userVersion()
         if version < 2 {
             // 已有历史消息不批量补总结（避免升级时产生大量 AI 调用）；
@@ -291,7 +304,8 @@ actor MemoryStore {
         try ensureOpen()
         let sql = """
         SELECT id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
-               ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours
+               ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours,
+               image_fetch_enabled
         FROM conversations
         ORDER BY is_pinned DESC, COALESCE(last_message_at, 0) DESC
         LIMIT ? OFFSET ?;
@@ -311,7 +325,8 @@ actor MemoryStore {
         try ensureOpen()
         let statement = try prepare("""
         SELECT id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
-               ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours
+               ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours,
+               image_fetch_enabled
         FROM conversations WHERE id = ? LIMIT 1;
         """)
         defer { sqlite3_finalize(statement) }
@@ -360,11 +375,17 @@ actor MemoryStore {
     /// `self_id` 反推账号（账号会作为 self_id 出现在**多个不同发送者**的消息里，
     /// 好友只会出现在自己发出的消息里，distinct 发送者通常只有 1 个）；
     /// 推不出来时退回传入的 selfID。
-    func repairSelfRoutedMessages(selfID: String) throws -> SelfRoutingRepairResult {
+    ///
+    /// - Parameter trusted: `true` 表示 `selfID` 来自 bridge `get_login_info`（权威），
+    ///   此时完全跳过历史事件反推，避免大库启动时全表读取并逐行解析 `raw_json`。
+    func repairSelfRoutedMessages(
+        selfID: String,
+        trusted: Bool = false
+    ) throws -> SelfRoutingRepairResult {
         let storedSelfID = selfID.trimmingCharacters(in: .whitespacesAndNewlines)
         try ensureOpen()
 
-        let inferredSelfID = try inferAccountIDFromRawEvents()
+        let inferredSelfID = trusted ? nil : try inferAccountIDFromRawEvents()
         let effectiveSelfID = inferredSelfID ?? storedSelfID
         guard !effectiveSelfID.isEmpty else { return SelfRoutingRepairResult() }
 
@@ -493,22 +514,36 @@ actor MemoryStore {
     ///   目标等于当前会话/自己、或推导不出来的消息原样保留；
     /// - 搬完重算预览、删除搬空的会话（含 memories/memory_state），并把剩余嫌疑会话的
     ///   kind 归一化（伪群 → 私聊，`@chatroom` → 群聊）；幂等。
-    func repairMisroutedConversations(selfID: String) throws -> MisroutedConversationRepairResult {
+    ///
+    /// - Parameter trusted: `true` 表示 `selfID` 来自 bridge `get_login_info`（权威），
+    ///   此时完全跳过历史事件反推，避免大库启动时全表读取并逐行解析 `raw_json`。
+    func repairMisroutedConversations(
+        selfID: String,
+        trusted: Bool = false
+    ) throws -> MisroutedConversationRepairResult {
         let storedSelfID = selfID.trimmingCharacters(in: .whitespacesAndNewlines)
         try ensureOpen()
 
-        let inferredSelfID = try inferAccountIDFromRawEvents()
-        let effectiveSelfID = (inferredSelfID ?? storedSelfID)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // 先只扫 conversations 表做一次廉价的嫌疑会话筛选：健康库通常一个都没有，
+        // 直接返回即可跳过后面昂贵的全表 raw_json 反推（旧实现每次都先反推）。
+        var suspicious = try suspiciousMisroutedConversations(effectiveSelfID: storedSelfID)
+        guard !suspicious.isEmpty else { return MisroutedConversationRepairResult() }
+
+        let inferredSelfID = trusted ? nil : try inferAccountIDFromRawEvents()
+        var effectiveSelfID = storedSelfID
+        if let inferredSelfID, inferredSelfID != storedSelfID {
+            // 历史事件反推出的账号更权威（selfID 可能被旧 hook 污染）：换成它之后
+            // 「自己 wxid 会话」的判定范围也会变，必须重新筛一遍嫌疑会话。
+            effectiveSelfID = inferredSelfID.trimmingCharacters(in: .whitespacesAndNewlines)
+            suspicious = try suspiciousMisroutedConversations(effectiveSelfID: effectiveSelfID)
+            guard !suspicious.isEmpty else { return MisroutedConversationRepairResult() }
+        }
         guard !effectiveSelfID.isEmpty else { return MisroutedConversationRepairResult() }
         // 传入账号本身是占位值时无法可靠判定消息方向（区分不了「自己发出」与
         // 「对方发来」），先不动数据；等 `get_login_info` 的权威账号到达后再修。
         if inferredSelfID == nil, ConversationIdentity.isPlaceholderSelfID(effectiveSelfID) {
             return MisroutedConversationRepairResult()
         }
-
-        let suspicious = try suspiciousMisroutedConversations(effectiveSelfID: effectiveSelfID)
-        guard !suspicious.isEmpty else { return MisroutedConversationRepairResult() }
 
         var moves: [MisroutedMove] = []
         for conversation in suspicious {
@@ -816,8 +851,16 @@ actor MemoryStore {
     /// 因此「作为 self_id 出现在多个不同发送者消息里」的候选就是账号；
     /// 好友只会作为 self_id 出现在自己发出的那几条上（发送者单一）。
     /// 置信不足时返回 nil，调用方回退到传入的 selfID、不冒险搬数据。
+    ///
+    /// 只采样最近 5000 条（`ORDER BY timestamp DESC` 走 `idx_messages_time`）：
+    /// 账号特征在近期消息里足够明显，没必要在大库启动时读取并解析全部历史 `raw_json`。
     private func inferAccountIDFromRawEvents() throws -> String? {
-        let statement = try prepare("SELECT raw_json FROM messages WHERE raw_json IS NOT NULL;")
+        let statement = try prepare("""
+        SELECT raw_json FROM messages
+        WHERE raw_json IS NOT NULL
+        ORDER BY timestamp DESC
+        LIMIT 5000;
+        """)
         defer { sqlite3_finalize(statement) }
         var counts: [String: Int] = [:]
         var senders: [String: Set<String>] = [:]
@@ -1092,8 +1135,9 @@ actor MemoryStore {
         let sql = """
         INSERT INTO conversations (
             id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
-            ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours,
+            image_fetch_enabled
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             kind = excluded.kind,
             title = excluded.title,
@@ -1108,7 +1152,8 @@ actor MemoryStore {
             is_pinned = excluded.is_pinned,
             is_muted = excluded.is_muted,
             note = excluded.note,
-            working_hours = excluded.working_hours;
+            working_hours = excluded.working_hours,
+            image_fetch_enabled = excluded.image_fetch_enabled;
         """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -1130,6 +1175,7 @@ actor MemoryStore {
             try bind(statement, 13, Int32(conversation.isMuted ? 1 : 0))
             try bind(statement, 14, conversation.note)
             try bind(statement, 15, encodeWorkingHours(conversation.workingHours))
+            try bind(statement, 16, conversation.imageFetchEnabled.map { Int32($0 ? 1 : 0) })
             try stepDone(statement)
         }
     }
@@ -1150,7 +1196,8 @@ actor MemoryStore {
             isPinned: int(statement, 11) != 0,
             isMuted: int(statement, 12) != 0,
             note: try text(statement, 13),
-            workingHours: decodeWorkingHours(optionalText(statement, 14))
+            workingHours: decodeWorkingHours(optionalText(statement, 14)),
+            imageFetchEnabled: optionalInt(statement, 15).map { $0 != 0 }
         )
     }
 
@@ -1191,8 +1238,8 @@ actor MemoryStore {
         let sql = """
         INSERT INTO messages (
             id, conversation_id, sender_id, sender_name, direction, kind, text,
-            media_path, media_url, timestamp, status, reply_to_id, raw_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             conversation_id = excluded.conversation_id,
             sender_id = excluded.sender_id,
@@ -1205,7 +1252,8 @@ actor MemoryStore {
             timestamp = excluded.timestamp,
             status = excluded.status,
             reply_to_id = excluded.reply_to_id,
-            raw_json = excluded.raw_json;
+            raw_json = excluded.raw_json,
+            image_description = excluded.image_description;
         """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -1225,6 +1273,7 @@ actor MemoryStore {
             try bind(statement, 11, message.status.rawValue)
             try bind(statement, 12, message.replyToID)
             try bind(statement, 13, message.rawJSON)
+            try bind(statement, 14, message.imageDescription)
             try stepDone(statement)
         }
     }
@@ -1243,7 +1292,8 @@ actor MemoryStore {
         let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
         let sql = """
         SELECT m.id, m.conversation_id, m.sender_id, m.sender_name, m.direction, m.kind, m.text,
-               m.media_path, m.media_url, m.timestamp, m.status, m.reply_to_id, m.raw_json
+               m.media_path, m.media_url, m.timestamp, m.status, m.reply_to_id, m.raw_json,
+               m.image_description
         FROM messages m
         WHERE m.conversation_id IN (\(placeholders))
           AND m.timestamp >= COALESCE((
@@ -1283,7 +1333,7 @@ actor MemoryStore {
         if before != nil {
             sql = """
             SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
-                   media_path, media_url, timestamp, status, reply_to_id, raw_json
+                   media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description
             FROM messages WHERE conversation_id = ? AND timestamp < ?
             ORDER BY timestamp DESC LIMIT ?;
             """
@@ -1291,7 +1341,7 @@ actor MemoryStore {
         } else {
             sql = """
             SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
-                   media_path, media_url, timestamp, status, reply_to_id, raw_json
+                   media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description
             FROM messages WHERE conversation_id = ?
             ORDER BY timestamp DESC LIMIT ?;
             """
@@ -1316,7 +1366,7 @@ actor MemoryStore {
         try ensureOpen()
         let statement = try prepare("""
         SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
-               media_path, media_url, timestamp, status, reply_to_id, raw_json
+               media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description
         FROM messages WHERE id = ? LIMIT 1;
         """)
         defer { sqlite3_finalize(statement) }
@@ -1337,7 +1387,7 @@ actor MemoryStore {
         let statement = try prepare("""
         SELECT m.id, m.conversation_id, m.sender_id, m.sender_name, m.direction, m.kind, m.text,
                m.media_path, m.media_url, m.timestamp, m.status, m.reply_to_id, m.raw_json,
-               COALESCE(c.title, '')
+               m.image_description, COALESCE(c.title, '')
         FROM messages m
         LEFT JOIN conversations c ON c.id = m.conversation_id
         WHERE m.text LIKE ? ESCAPE '\\'
@@ -1350,7 +1400,7 @@ actor MemoryStore {
         var hits: [MemorySearchHit] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             let message = try decodeMessage(statement)
-            let title = optionalText(statement, 13) ?? ""
+            let title = optionalText(statement, 14) ?? ""
             hits.append(MemorySearchHit(message: message, conversationTitle: title))
         }
         return hits
@@ -1379,6 +1429,7 @@ actor MemoryStore {
             text: try text(statement, 6),
             mediaPath: optionalText(statement, 7),
             mediaURL: optionalText(statement, 8),
+            imageDescription: optionalText(statement, 13),
             timestamp: date(statement, 9),
             status: DeliveryStatus(rawValue: try text(statement, 10)) ?? .received,
             replyToID: optionalText(statement, 11),
@@ -1707,7 +1758,7 @@ actor MemoryStore {
 
         let statement = try prepare("""
         SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
-               media_path, media_url, timestamp, status, reply_to_id, raw_json, rowid
+               media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description, rowid
         FROM messages
         WHERE conversation_id = ? AND rowid > ? AND rowid < ?
         ORDER BY rowid ASC LIMIT ?;
@@ -1722,7 +1773,7 @@ actor MemoryStore {
         var lastRowID: Int64 = cursor
         while sqlite3_step(statement) == SQLITE_ROW {
             messages.append(try decodeMessage(statement))
-            lastRowID = sqlite3_column_int64(statement, 13)
+            lastRowID = sqlite3_column_int64(statement, 14)
         }
         guard !messages.isEmpty else { return nil }
         return MemoryOverflow(messages: messages, lastRowID: lastRowID)
@@ -2088,6 +2139,13 @@ actor MemoryStore {
         try checkBind(sqlite3_bind_int(statement, index, value))
     }
 
+    /// Optional integer binding: `nil` stores SQL NULL (used by nullable
+    /// per-conversation flags such as `image_fetch_enabled`).
+    private func bind(_ statement: OpaquePointer?, _ index: Int32, _ value: Int32?) throws {
+        let status = value.map { sqlite3_bind_int(statement, index, $0) } ?? sqlite3_bind_null(statement, index)
+        try checkBind(status)
+    }
+
     private func bind(_ statement: OpaquePointer?, _ index: Int32, _ value: Int64) throws {
         try checkBind(sqlite3_bind_int64(statement, index, value))
     }
@@ -2121,6 +2179,12 @@ actor MemoryStore {
 
     private func int(_ statement: OpaquePointer?, _ column: Int32) -> Int32 {
         sqlite3_column_int(statement, column)
+    }
+
+    /// NULL-aware integer read: unlike `int()`, SQL NULL returns `nil` instead of 0.
+    private func optionalInt(_ statement: OpaquePointer?, _ column: Int32) -> Int32? {
+        guard sqlite3_column_type(statement, column) != SQLITE_NULL else { return nil }
+        return sqlite3_column_int(statement, column)
     }
 
     private func date(_ statement: OpaquePointer?, _ column: Int32) -> Date {

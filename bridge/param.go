@@ -167,6 +167,10 @@ type Config struct {
 	SendInterval    int    `json:"send_interval"`
 	WechatPid       int    `json:"wechat_pid"`
 
+	// MediaDir 是入站图片落盘目录（-media_dir，App 传入）。为空时使用
+	// ~/Library/Application Support/WeChatAI/media，见 media.go resolvedMediaDir。
+	MediaDir string `json:"media_dir"`
+
 	WechatConf string `json:"wechat_conf"`
 }
 

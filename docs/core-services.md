@@ -15,7 +15,9 @@
 | `Services/MemoryStore.swift` | SQLite（WAL）持久化：会话/消息/日志/定时任务/长期记忆/KV |
 | `Services/SleepPreventionService.swift` | 通用防睡眠：IOKit 空闲睡眠断言 + 电源适配器监听（事件驱动，不轮询） |
 | `Services/ActivationPolicyController.swift` | Dock 图标与 `NSApplication.ActivationPolicy` 同步（用户设置优先，台前调度不覆盖；bundle 以 `LSUIElement` 启动，仅在设置页用于提示文案） |
-| `Services/OneBotClient.swift` | WS 收事件、HTTP 发送、媒体落地、事件解析、去重、重连 |
+| `Services/OneBotClient.swift` | WS 收事件、HTTP 发送/图片获取、媒体落地、事件解析、去重、重连 |
+| `Services/ImageFetcher.swift` | 入站图片获取串行队列 + `ImageFetchPolicy`（设置开关 / 去重 / 取消） |
+| `Services/VisionEngine.swift` | 识图支持：候选图片筛选、ImageIO 缩放/JPEG data URL、多模态请求消息、描述清洗 |
 | `Services/AIClient.swift` | OpenAI 兼容 `/chat/completions`，SSE 流式 / 非流式 / 超时 / 错误映射 |
 | `Services/RuleEngine.swift` | 白黑名单、私聊/群触发、唤醒窗口、冷却、频率、工作时段 |
 | `Services/ChatEngine.swift` | 人设/记忆/近期上下文拼装、AI 调用重试、拟人化分段计划 |
@@ -111,6 +113,76 @@ RuntimeCoordinator.handle(event)
   同一会话开始新一轮回复会刷新进度令牌，旧状态条的自动清理任务不会误删新进度；
   bot 停止、运行时关闭、会话删除都会清空对应快照。
 
+### 3.1 入站图片获取（2026-10-23）
+
+```
+bridge 事件 image（message_id, 无 url）
+  → RuntimeCoordinator.handle(event) 入库后
+  → ImageFetchPolicy.shouldFetch(...)（该会话生效开关 / 非自消息 / kind=image / 无 mediaPath,mediaURL / message_id 非空）
+  → ImageFetcher.enqueue（串行、同一 chatMessageID 只尝试一次）
+  → OneBotClient.fetchImage(messageID)  → POST /fetch_image（Bearer，30s 超时）
+  → 成功：更新 store.messages 中该消息的 mediaPath → memory.upsertMessages → MessageBubble 显示图片
+  → 失败：debug 日志（不弹窗、不重试、不影响 AI 回复）
+```
+
+- 开关按**会话**保存：`Conversation.imageFetchEnabled`（DB 列 `image_fetch_enabled`，
+  NULL=跟随旧全局默认、0=关、1=开）；生效值 = 会话覆盖 → `bot.imageFetchEnabled`（默认 true）。
+  入口是会话详情 → 菜单 →「媒体」；关闭时 `ImageFetchPolicy` 直接返回 false，
+  **不会发出任何请求**，因此 bridge 也不会下载。
+- `ImageFetcher` 是 `@MainActor` 串行队列，闭包注入 `fetch`/`onFetched`/`onFailed`；
+  `stopRuntime()` 与设置关闭都会调用 `cancelAll()`，取消后不再回调。
+- 只用原始 `OneBotEvent.messageID` 请求 bridge（`ChatMessage.id` 带 `ob-` 前缀，不可混用）。
+- 2026-10-23 已在微信 4.2.0.5 真机验证：入站图片 → 优先使用微信自然下载分片
+  （必要时触发）→ 分片完整（JPEG EOI / PNG IEND 校验）→ AES-ECB 解密并保存；
+  mid 为 HEVC 时回退 JPEG 缩略图（实测完整 JPEG 图片）。不按 XML
+  `length` 截断，避免切掉图片尾部。
+- 本节只做「获取」；图片内容识别、描述注入与视觉模型路由见 §3.2。
+
+### 3.2 识图（视觉模型，2026-10-23）
+
+```
+自动回复触发（evaluateAndReply）且 settings.ai.vision.enabled == true
+  → VisionSupport.candidates：最近 10 条上下文中「入站图片 + 无 imageDescription +
+    10 分钟内」，按消息时间最新优先，最多 2 张
+  → 图片尚未落盘时等待 ImageFetcher 完成（最多 8 秒）
+  → ImageIO 缩放到最长边 1280 → JPEG(0.8) → base64 data URL
+  → 用「识图通道/模型」发一次非流式 /chat/completions
+    （content 为 text + image_url 多段；图片本身不进入回复提示词）
+  → 描述清洗（空白折叠、400 字上限）→ 消息 imageDescription 落库 + 内存更新
+  → ChatEngine 提示词：kind=image 且有描述时输出 [图片：<描述>]
+```
+
+- 设置：`AISettings.vision`（`VisionSettings?`，旧 config 缺键 = nil = 关闭）：
+  `enabled` / `providerID`（nil 跟随「默认通道」）/ `model`（空跟随通道模型）/
+  `prompt`（空使用 `VisionSettings.defaultPrompt`）。
+  请求使用通道副本：非流式、超时 ≤30 秒、`max_tokens` ≤800，避免识图把整轮回复拖慢。
+- DeepSeek 系通道（`kind == .deepSeek` 或 baseURL 含 `deepseek`）的识图请求显式发送
+  `{"thinking":{"type":"disabled"}}`：`deepseek-flash` 默认开启思考模式，推理 token
+  会占用输出额度，短描述场景容易出现 `content` 为空（2026-10-23 真机日志已复现）。
+  其它通道不发送该扩展字段，避免严格 OpenAI 端点报未知参数。
+- **按需识别**：只有「本轮需要生成回复」才识别上下文里的近期图片，单纯收到图片不产生费用。
+  同一消息在本次运行内最多尝试一次；失败只写 debug 日志，不阻断回复；10 分钟前的图片不再识别。
+- 图片不直接进入回复提示词：主回复始终是文本请求，避免把默认文本通道变成多模态请求；
+  `[图片]` 占位在未开启识图/识别失败时保持不变。
+- 数据：`ChatMessage.imageDescription`，DB 列 `messages.image_description TEXT`
+  （旧库幂等补列；所有消息 SELECT 列表与 upsert 同步）。
+- UI：AI 模型 →「识图模型」可启用/选通道/覆盖模型；图片气泡在图片下方展示识图描述。
+- 状态：2026-10-23 实现，单元测试覆盖请求体/候选/编码/落库；**尚未真机验证**
+  （需先配置支持 OpenAI 兼容 `image_url` 输入的视觉模型）。
+
+### 3.3 引用图片（2026-10-23）
+
+- 微信引用消息的 `refermsg` 带 `<svrid>`（服务端消息 ID）与 `[图片]` 摘要。`svrid` 与 bridge
+  的 `message_id` 相同，对应 App 的 `ChatMessage.id = ob-<svrid>`（2026-10-23 用真实引用图片核对）；
+  `WeChatAppmsg.Quote` 解析 `svrid` / `isImage` / `imageMessageID`。
+- 生成回复前，`prepareQuotedImageNote` 只处理**本轮消息**引用的图片：按 `svrid` 从内存/数据库
+  找回原图；已有 `imageDescription` 直接复用；未描述但有 `mediaPath` 时现场识别（只识别这一张，
+  **不受最近 10 分钟限制**，因为用户明确引用了它）；随后在本轮用户消息文本末尾追加
+  「（引用图片内容：…）」，原图找不到/无法识别时追加「（引用的图片内容暂不可用）」。
+  该说明只进入提示词，不写数据库，会话气泡保持原样。
+- 未开启识图且原图没有旧描述时不追加说明，旧行为不变。
+- `ChatEngine` system prompt 会说明该标记是图片画面描述、不是本轮新发言，避免模型猜图。
+
 ## 4. 并发与线程模型
 
 | 组件 | 隔离方式 | 说明 |
@@ -121,6 +193,8 @@ RuntimeCoordinator.handle(event)
 | `SettingsPersistence` | `actor` | 编码、原子替换、合并写 |
 | `SchedulerService` | `actor` | 单循环 + `CheckedContinuation` 唤醒，无轮询 |
 | `OneBotClient` | 私有串行 `DispatchQueue` + `URLSessionWebSocketTask` 接收 `Task` | 网络/解析不在主线程；回调由运行时 hop 回 MainActor |
+| `ImageFetcher` | `@MainActor` 串行队列 + 可取消 `Task` | 一次只请求一张图；同一消息只尝试一次；停止/关闭设置即取消 |
+| `VisionSupport` | 纯静态函数（无状态） | 候选筛选/图片编码/请求消息/描述清洗可单测；网络调用复用 `AIClient` |
 | `AIClient` | 无共享可变状态，`URLSession` async | 请求/SSE 解析在后台 |
 | `RuleEngine` | `NSLock` 保护冷却/频率状态 | 纯内存判定，无 IO |
 | `ChatEngine` | 无共享可变状态 | 只依赖 `MemoryStore`/`AIClient` |
@@ -130,6 +204,9 @@ RuntimeCoordinator.handle(event)
 
 禁止事项（已遵守）：MainActor 上无阻塞文件/DB/脚本 IO；无忙轮询；无 `sleep` 轮询循环。
 `SchedulerService` 只在下一个 `nextFireAt` 到来或 `update/stop` 唤醒时继续，属于事件驱动定时器。
+日志页（500ms）与总览「最近活动」（750ms）仍用低频采样把日志追加与 SwiftUI 失效解耦，但采样
+先比较 `AppStore.logRevision`（`appendLogBatch` / `replaceLogs` / `clearLogs` 各自 +1）；
+revision 未变化时直接跳过，空闲时不做 O(n) 复制 / 遍历 2000 条日志。
 
 ## 5. 服务协议要点
 
@@ -146,7 +223,17 @@ RuntimeCoordinator.handle(event)
   `fetchConversations(limit:offset:)` 置顶优先、最近活跃优先。
 - 搜索：`searchMessages(query:)` 对消息文本做 `LIKE`（转义 `% _ \`），关联会话标题；
   本地数据规模下足够，后续可升级 FTS5。
+- 启动历史修复（2026-10-23 性能优化）：
+  `repairSelfRoutedMessages(selfID:trusted:)` / `repairMisroutedConversations(selfID:trusted:)`
+  在 `trusted: true`（`self_id_source=login`，selfID 来自 bridge `get_login_info`）时完全跳过
+  历史事件反推；未 trusted 时反推也只采样最近 5000 条 `raw_json`（走 `idx_messages_time`）。
+  `repairMisroutedConversations` 先用 `conversations` 表廉价筛出嫌疑会话（自己 / 占位 / 伪群），
+  为空即返回；推断出不同账号才重算嫌疑集合。健康库启动不再全表读取并逐行 JSON 解析历史消息。
+- 一次性文本迁移：`repairAppmsgMessageTexts`（`text LIKE '[链接/文件]%'`）与
+  `rerenderLegacyQuoteTexts`（`text LIKE '%[引用 %'`）由设置键 `data.repairs_version` 门禁，
+  两项都成功后写版本，之后启动永久跳过；失败不写版本、下次重试。
 - 日志环形：App 内存最多 2000 条；DB 每累计 100 条 `pruneLogs(keep: 5000)`。
+  UI 采样以 `logRevision` 为门禁（见 §4），未变化不重算。
 - 日期统一存 Unix 秒（`Double`），枚举存 rawValue 字符串。
 - 会话删除级联删除消息；`clearMessages` 同步重置会话预览/unread。
 
@@ -162,12 +249,20 @@ RuntimeCoordinator.handle(event)
 - 连接超时 15s；HTTP 请求超时 20s。
 - 解析容错：`message` 可为字符串或段数组；缺字段用默认值；支持 `sender.user_id` 缺失时回退
   `user_id`；支持事件被 `{"data": {...}}` 包裹；未知帧忽略并打 debug 日志。
+- 入站帧解析（2026-10-23）：`handleInbound` 每帧只 `JSONSerialization` 一次，
+  动作回包（通讯录 / 登录信息）与消息事件共用同一对象；`OneBotEventParser.parse(object:rawText:)`
+  直接复用已解析对象，单事件 `rawJSON` 等于原始帧文本，不再二次解析 / 重新序列化。
+  数组帧按旧行为逐元素解析（`rawText: nil`），`parse(data:)` API 与旧行为保留。
 - 自消息去重：进程内 `message_id` LRU（1024）；HTTP 发送成功后登记
   `(conversationID, text, time)`，20s 内 WS 出现同文本的 self 事件时标记
   `isEchoOfLocal`，运行时把本地 pending 消息更新为 sent 而非重复插入。
 - 媒体：`file://` 复制、`base64://`/裸 base64 解码，落地
   `~/Library/Application Support/WeChatAI/media/<yyyy-MM-dd>/<uuid>.<ext>`；
   单文件上限 40MB；http(s) URL 仅保存 `mediaURL` 不下载。
+- 入站图片获取（2026-10-23）：`fetchImage(messageID:)` → `POST /fetch_image`
+  （Bearer、`{"message_id":…}`、超时 30s）；2xx + `status=="ok"` + `data.file`
+  才返回本地路径（`file://` 反向百分号解码），失败/404/缺字段抛 `OneBotError.badResponse`，
+  404 额外提示 bridge 需更新。请求与响应解析拆成两个静态纯函数供单测。
 - 事件模型：`OneBotEvent`（纯值类型）→ 运行时转 `Conversation`/`ChatMessage`；
   `at` 段与 `mentions` 收集 @ 目标，RuleEngine 优先精确匹配机器人 wxid；
   结构化 at 缺失时可用从历史事件学到的「群昵称」做文本 @ 兜底。
@@ -396,13 +491,14 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 `SleepPreventionTests.swift`（9）、`MessageRoutingTests.swift`（12）、
 `NativeSendConfigTests.swift`（5）、`ConversationNameTests.swift`（8）、`WorkingHoursStatusTests.swift`（5）、
 `ContactDirectoryTests.swift`（15）、`PatMessageTests.swift`（20）、`PatReplySettingsTests.swift`（7）、
-`HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（25）、`AppmsgRoutingTests.swift`（20）、
-`WakeWindowTests.swift`（6），共 184 项）：
+`HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（26）、`AppmsgRoutingTests.swift`（20）、
+`WakeWindowTests.swift`（6）、`ImageFetchTests.swift`（16）、`OneBotEventParserTests.swift`（5）、
+`DataRepairTrustTests.swift`（2）、`VisionTests.swift`（12），共 220 项）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 184 tests, with 0 failures（2026-10-23）
+# Executed 220 tests, with 0 failures（2026-10-23）
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
@@ -413,12 +509,18 @@ swift test --scratch-path .build-verify
 `accessCount` 权重强化与 `sourceCount` 对数增长、`baseWeight` 可调（范围收敛/持久化/
 核心记忆按权重排序与超额时的注入优先级）、旧库 v2→v4 迁移；
 防睡眠旧配置兼容/三档标签/决策表；OneBot 事件解析（群/@/私聊/非法帧）、
+入站帧单次解析（`parse(object:rawText:)` 复用对象与原始帧文本、数组/包装帧兼容）、
+历史修复 `trusted:` 语义（权威 selfID 跳过反推、默认参数仍反推并归位）、
 appmsg 分类（引用 57 / 链接 5 / 文件 6 / 表情 8 / 聊天记录 19 / 转账 2000 / 视频号 51、
 嵌套引用与摘要截断）与实时/历史归一化（占位替换、拍一拍不回归、修复幂等、预览刷新）、
 RuleEngine 默认触发+黑名单+关键词冷却+唤醒窗口（同一发送者、滑动续期、旧配置兼容）、
 Scheduler daily/once nextFireAt、
 ChatEngine 分段/角色合并/中英分词/流式总开关、SettingsPersistence 原子写/幂等/无明文密钥、
 AIClient endpoint/请求体/无 Key 字段、ProcessRunner 输出收集，
+入站图片获取（会话生效值优先级、旧库补列迁移、DB 往返、`ImageFetchPolicy` 8 个门槛、
+`/fetch_image` 请求与响应解析、`ImageFetcher` 串行顺序/去重/失败不重试/取消后不回调），识图（旧配置缺键关闭、通道/模型回退、
+多模态请求体 `image_url`、候选图片筛选与 2 张/10 分钟上限、描述清洗、
+`image_description` DB 往返与提示词 `[图片：…]`），
 以及**取消回归**：启动 `/bin/sleep 5` 后立即取消流，进程被终止且不崩溃、事件流及时结束；
 另有「`.terminated` 事件只在进程退出后发出」的不变量测试（避免再次出现
 `terminationStatus: task still running`）。
@@ -443,7 +545,7 @@ RuleEngine 白黑名单/@/关键词/冷却、Scheduler 各 repeat 的 nextFireAt
 ChatEngine 分段/角色合并/关键词分词。输出 `[selftest] PASS/FAIL/WARN` 与汇总退出码。
 
 历史 CLI 驱动实测：**63 passed / 0 failed / 0 warnings**；当前 `swift test` 为
-**184/184 通过**（见 8.1；2026-10-23 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
+**200/200 通过**（见 8.1；2026-10-23 实测）。另外用 CLI runtime harness 验证了 `AppStore` 初始化 → SQLite →
 Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Keychain 保存/删除、
 `config.json` 无明文 Key。
 

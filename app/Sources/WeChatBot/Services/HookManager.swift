@@ -489,6 +489,8 @@ final class HookManager {
             "-token=\(token)",
             "-conn_type=websocket",
             "-image_path=\(imagePath.path)",
+            // 入站图片解密后的落盘目录（App 传入，bridge 保证写入不越界）。
+            "-media_dir=\(AppPaths.mediaDirectory.path)",
             "-log_file=\(AppPaths.bridgeLogFile.path)",
             // 上游默认 1000ms：既延迟入站事件转发，也延迟发送任务。
             // 本项目已有冷却/每分钟限流，这里收紧到 100ms 以降低端到端延迟。

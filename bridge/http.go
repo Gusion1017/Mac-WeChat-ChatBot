@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -184,6 +185,83 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// fetchImageRequest 是 POST /fetch_image 的请求体。
+type fetchImageRequest struct {
+	MessageID string `json:"message_id"`
+}
+
+// fetchImageHandler 处理 App 的入站图片获取请求（docs/bridge.md §3.4）：
+// 鉴权与 sendHandler 一致；参数缺失/未登记 400、下载失败 502、成功 200。
+// 响应与日志都不包含 aeskey / CDN file key / 完整 XML。
+func fetchImageHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeFetchImageResponse(w, http.StatusMethodNotAllowed, map[string]any{
+			"status": "failed",
+			"error":  "仅支持 POST",
+		})
+		Error("图片获取仅支持 POST")
+		return
+	}
+
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if config.OnebotToken == "" || token == "" || !hmac.Equal([]byte(token), []byte(config.OnebotToken)) {
+		writeFetchImageResponse(w, http.StatusUnauthorized, map[string]any{
+			"status": "failed",
+			"error":  "未授权",
+		})
+		Error("图片获取未授权")
+		return
+	}
+
+	var req fetchImageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeFetchImageResponse(w, http.StatusBadRequest, map[string]any{
+			"status": "failed",
+			"error":  "无效的 JSON",
+		})
+		Error("图片获取请求 JSON 无效")
+		return
+	}
+	req.MessageID = strings.TrimSpace(req.MessageID)
+	if req.MessageID == "" {
+		writeFetchImageResponse(w, http.StatusBadRequest, map[string]any{
+			"status": "failed",
+			"error":  "参数缺失",
+		})
+		Error("图片获取请求参数缺失")
+		return
+	}
+
+	path, err := fetchIncomingImage(req.MessageID)
+	if err != nil {
+		status := http.StatusBadGateway
+		if errors.Is(err, errImageJobNotFound) {
+			status = http.StatusBadRequest
+		}
+		writeFetchImageResponse(w, status, map[string]any{
+			"status": "failed",
+			"error":  err.Error(),
+		})
+		return
+	}
+
+	fileURL := (&url.URL{Scheme: "file", Path: path}).String()
+	writeFetchImageResponse(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"data": map[string]any{
+			"file":       fileURL,
+			"message_id": req.MessageID,
+		},
+	})
+}
+
+// writeFetchImageResponse 输出 JSON 响应。
+func writeFetchImageResponse(w http.ResponseWriter, status int, payload map[string]any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
 func SendHttpReq(jsonData []byte) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -191,7 +269,8 @@ func SendHttpReq(jsonData []byte) {
 		}
 	}()
 
-	time.Sleep(time.Duration(config.SendInterval) * time.Millisecond)
+	// 事件推送不节流：入站事件需要立即 POST，send_interval 只约束真正
+	// 发往微信的消息（worker.go SendWechatMsg）。
 	jsonReq, err := HandleMsg(jsonData)
 	if err != nil {
 		Error("JSON 序列化失败", "err", err)
@@ -201,7 +280,7 @@ func SendHttpReq(jsonData []byte) {
 		return
 	}
 
-	Info("发送数据", "msg", string(jsonReq))
+	logEventDebug("发送数据", jsonReq)
 	req, err := http.NewRequest("POST", config.SendURL, bytes.NewBuffer(jsonReq))
 	if err != nil {
 		Error("创建请求失败", "err", err)

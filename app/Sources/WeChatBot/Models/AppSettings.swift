@@ -189,6 +189,39 @@ struct OneBotSettings: Codable, Hashable {
     var imagePath: String = ""
 }
 
+/// 识图（视觉）模型设置（2026-10-23 新增）。
+///
+/// 图片本身不直接进入回复模型上下文：收到图片后先用这里的通道/模型生成一段
+/// 文字描述，描述随 `ChatMessage.imageDescription` 落库，再作为普通文本参与
+/// 提示词组装。旧 `config.json` 没有 `vision` 键时按「未配置」处理，默认关闭，
+/// 不改变既有回复行为。
+struct VisionSettings: Codable, Hashable {
+    /// 识图提示词默认值；模型只需要输出画面内容，不参与聊天人格。
+    static let defaultPrompt = "请用简洁的中文描述这张图片：画面主体、人物与动作、图片里的文字，"
+        + "以及可能影响聊天回复的关键信息。只输出描述本身，不要客套或解释，不超过 120 字。"
+
+    /// 是否启用识图。
+    var enabled: Bool = false
+    /// 识图通道 ID；nil 表示跟随「默认通道」。
+    var providerID: String?
+    /// 识图模型名；空字符串表示跟随所选通道自己的模型。
+    var model: String = ""
+    /// 识图提示词；空字符串使用 `defaultPrompt`。
+    var prompt: String = VisionSettings.defaultPrompt
+
+    /// 有效模型覆盖；空字符串/空白视为「跟随通道」。
+    var modelOverride: String? {
+        let value = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    /// 有效提示词；空白回退到默认提示词。
+    var promptText: String {
+        let value = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? Self.defaultPrompt : value
+    }
+}
+
 struct AISettings: Codable, Hashable {
     var defaultProviderID: String?
     var streamReplies: Bool = true
@@ -198,6 +231,8 @@ struct AISettings: Codable, Hashable {
     /// `nil` 表示尚未迁移；字典中缺失某个模型时，请求不发送 temperature，
     /// 由模型自身使用默认温度。
     var modelTemperatures: [String: Double]?
+    /// 识图模型设置；nil 表示未配置（旧配置/默认关闭）。
+    var vision: VisionSettings?
 
     /// 当前模型生效的自定义温度；未配置返回 `nil`（模型默认）。
     func temperature(forModel model: String) -> Double? {
@@ -265,6 +300,40 @@ struct AppSettings: Codable, Hashable {
         guard let id else { return defaultProvider }
         return providers.first(where: { $0.id == id }) ?? defaultProvider
     }
+
+    /// 识图总开关：未配置 `vision` 视为关闭（旧配置行为不变）。
+    var isVisionEnabled: Bool { ai.vision?.enabled == true }
+
+    /// 识图通道：显式选择的通道存在时用它，否则回退到默认通道。
+    var visionProvider: AIProvider? {
+        if let id = ai.vision?.providerID,
+           let provider = providers.first(where: { $0.id == id }) {
+            return provider
+        }
+        return defaultProvider
+    }
+
+    /// 识图实际使用的模型名：设置里的覆盖值优先，否则跟随通道模型。
+    func visionModel(for provider: AIProvider) -> String {
+        ai.vision?.modelOverride ?? AIClient.effectiveModel(for: provider)
+    }
+
+    /// 识图请求使用的通道副本：模型换成识图模型，并用更短的超时/更小的输出上限，
+    /// 避免识图失败把一次自动回复拖到 60 秒。非流式（只需要最终描述）。
+    func visionRequestProvider(from provider: AIProvider) -> AIProvider {
+        var copy = provider
+        copy.model = visionModel(for: provider)
+        copy.timeoutSeconds = min(max(provider.timeoutSeconds, 5), Self.visionTimeoutSeconds)
+        copy.maxTokens = min(max(provider.maxTokens, 64), Self.visionMaxTokens)
+        copy.stream = false
+        return copy
+    }
+
+    /// 识图请求的最短/最长等待时间（秒）与输出上限。
+    /// DeepSeek `deepseek-flash` 默认开启思考模式；识图请求会显式关闭（见
+    /// `VisionSupport.thinkingMode`），因此 800 tokens 足够输出短描述。
+    static let visionTimeoutSeconds: Double = 30
+    static let visionMaxTokens: Int = 800
 
     func persona(id: String?) -> Persona? {
         if let id, let p = personas.first(where: { $0.id == id }) { return p }

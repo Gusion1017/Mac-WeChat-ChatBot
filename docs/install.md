@@ -16,7 +16,7 @@
 > 微信版本不在支持列表时，首次向导会提示不匹配；不要强行安装 Hook。
 > 当前安装脚本默认以 4.2.0.5 (270341) 为目标；4.1.15.55 / 4.1.12.53 仍在已知支持列表，可直接安装，
 > `hook/versions/` 保留其历史版本文件。4.2.0.5 已于 2026-10-22 完成真机验证：私聊/自消息入站、通讯录、R3 文本发送
-> （含 bridge 重启后句柄恢复）；群聊 @ / 拍一拍沿用既有逻辑，本轮未单独复测；媒体下载维持已知缺失。
+> （含 bridge 重启后句柄恢复）；群聊 @ / 拍一拍沿用既有逻辑，本轮未单独复测；图片获取（入站图片自动下载/解密）已接通并真机验证。
 > 修改微信仍有风险，安装前请保留官方备份。
 
 ## 2. 方式 A：Releases 里的 App 压缩包（推荐给普通用户）
@@ -87,8 +87,8 @@ bash scripts/package_release.sh
 
 ```bash
 bash scripts/build_app.sh
-ditto -c -k --norsrc --keepParent "dist/WeChat AI.app" "dist/WeChat-AI-1.2.4.zip"
-shasum -a 256 "dist/WeChat-AI-1.2.4.zip"
+ditto -c -k --norsrc --keepParent "dist/WeChat AI.app" "dist/WeChat-AI-1.2.5.zip"
+shasum -a 256 "dist/WeChat-AI-1.2.5.zip"
 ```
 
 把 zip 与 `.sha256` 上传到 GitHub **Releases**，在说明里写清：

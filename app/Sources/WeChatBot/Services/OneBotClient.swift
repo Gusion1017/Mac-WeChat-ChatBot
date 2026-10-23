@@ -451,10 +451,19 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
         }
         guard let data, !data.isEmpty else { return }
         // 一帧只解析一次 JSON：动作回包（通讯录 / 登录信息）与消息事件共用同一对象。
-        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        // 旧实现的解析链路会再解析一次整帧、并为每条事件重新序列化字典生成 rawJSON，
+        // 历史回放时 JSON 开销成倍放大；这里把原始帧文本直接交给事件解析器复用。
+        let frameText = String(data: data, encoding: .utf8)
+        guard let object = try? JSONSerialization.jsonObject(with: data) else {
+            if let frameText {
+                notifyLog(.debug, "忽略无法识别的 OneBot 帧：\(frameText.prefix(180))")
+            }
+            return
+        }
+        let dictionary = object as? [String: Any]
         // 通讯录目录回包（echo = contact-directory）不是消息事件。失败也回调，
         // 让运行时能解释「为什么昵称仍是兜底名」，且绝不进入事件解析链路。
-        if let object, let snapshot = OneBotContactDirectory.parseReply(object: object) {
+        if let dictionary, let snapshot = OneBotContactDirectory.parseReply(object: dictionary) {
             stateQueue.async { [weak self] in
                 self?.handleContactDirectoryReplyLocked(snapshot)
             }
@@ -463,9 +472,9 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
         }
         // get_login_info 的动作回包（{"status":"ok","data":{"user_id":...}}）不是消息事件，
         // 单独解析；否则会被当成「无法识别的帧」丢弃，self_id 只能靠启发式。
-        if let object,
-           let status = object["status"] as? String, status == "ok",
-           let payload = object["data"] as? [String: Any],
+        if let dictionary,
+           let status = dictionary["status"] as? String, status == "ok",
+           let payload = dictionary["data"] as? [String: Any],
            let userID = payload["user_id"] as? String, !userID.isEmpty {
             notifyLoginInfo(userID)
             // 登录信息成功说明 bridge 已就绪：此时才开始要通讯录目录。
@@ -474,10 +483,10 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
             }
             return
         }
-        let events = OneBotEventParser.parse(data: data)
+        let events = OneBotEventParser.parse(object: object, rawText: frameText)
         if events.isEmpty {
-            if let text = String(data: data, encoding: .utf8) {
-                notifyLog(.debug, "忽略无法识别的 OneBot 帧：\(text.prefix(180))")
+            if let frameText {
+                notifyLog(.debug, "忽略无法识别的 OneBot 帧：\(frameText.prefix(180))")
             }
             return
         }
@@ -587,6 +596,84 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
             noteOutgoing(conversationID: conversationID, text: echoText)
         }
         return body
+    }
+
+    /// 请求 bridge 从微信下载一条入站图片，返回本机文件路径（不含 `file://`）。
+    ///
+    /// 只负责 `POST /fetch_image` 的一次请求与响应解析；队列/去重/失败重试策略由
+    /// `ImageFetcher` 负责。`messageID` 必须是 bridge 事件里的原始 OneBot
+    /// `message_id`，不能用 App 内的 `ChatMessage.id`（`ob-<message_id>`）。
+    func fetchImage(messageID: String) async throws -> String {
+        let trimmed = messageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw OneBotError.sendFailed("消息 ID 为空") }
+        let config = activeConfiguration
+        guard let base = config.httpBaseURL else {
+            throw OneBotError.invalidURL("http://\(config.host):\(config.port)")
+        }
+        var request = try Self.fetchImageRequest(baseURL: base, token: config.token, messageID: trimmed)
+        // bridge 侧下载预算是 12 秒；给 HTTP 留出足够的余量，且不短于 30 秒。
+        request.timeoutInterval = max(config.requestTimeout, 30)
+
+        let (data, response) = try await httpSession.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw OneBotError.badResponse("非 HTTP 响应")
+        }
+        return try Self.parseImageFetchResponse(data: data, statusCode: httpResponse.statusCode)
+    }
+
+    /// Builds the `POST /fetch_image` request. Pure function so it can be unit-tested.
+    static func fetchImageRequest(baseURL: URL, token: String, messageID: String) throws -> URLRequest {
+        guard let url = URL(string: "/fetch_image", relativeTo: baseURL) else {
+            throw OneBotError.invalidURL(baseURL.absoluteString)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["message_id": messageID], options: [])
+        return request
+    }
+
+    /// Parses the bridge `POST /fetch_image` response and converts `file://…` into a
+    /// plain local file path. Pure function so it can be unit-tested.
+    static func parseImageFetchResponse(data: Data, statusCode: Int) throws -> String {
+        let body = String(data: data, encoding: .utf8) ?? ""
+        guard (200..<300).contains(statusCode) else {
+            if statusCode == 404 {
+                throw OneBotError.badResponse("当前 bridge 不支持图片获取（HTTP 404），请更新 bridge")
+            }
+            throw OneBotError.badResponse("HTTP \(statusCode) \(body.prefix(300))")
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw OneBotError.badResponse("图片获取响应无法解析")
+        }
+        guard object["status"] as? String == "ok" else {
+            let reason = (object["error"] as? String)
+                ?? (object["message"] as? String)
+                ?? body
+            throw OneBotError.badResponse(reason.isEmpty ? "图片获取失败" : reason)
+        }
+        guard let payload = object["data"] as? [String: Any],
+              let file = payload["file"] as? String,
+              !file.isEmpty else {
+            throw OneBotError.badResponse("图片获取响应缺少文件路径")
+        }
+        return localFilePath(from: file)
+    }
+
+    /// `file://` URL → 本地路径（百分号解码）；普通路径原样返回。
+    static func localFilePath(from file: String) -> String {
+        guard file.hasPrefix("file://") else { return file }
+        if let path = URL(string: file)?.path, !path.isEmpty {
+            return path
+        }
+        var path = String(file.dropFirst("file://".count))
+        if let decoded = path.removingPercentEncoding {
+            path = decoded
+        }
+        return path
     }
 
     /// Encodes segments into the OneBot message array. Base64 files pass through.
@@ -728,14 +815,24 @@ enum OneBotEventParser {
     /// Parses one or more bridge events from a WS frame. Returns `[]` for unknown frames.
     static func parse(data: Data) -> [OneBotEvent] {
         guard let object = try? JSONSerialization.jsonObject(with: data) else { return [] }
+        // 旧 API 保持行为不变：没有原始帧文本，`rawJSON` 由事件字典重新序列化。
+        return parse(object: object, rawText: nil)
+    }
+
+    /// 用已经反序列化好的帧对象解析事件，避免调用方（`OneBotClient.handleInbound`）
+    /// 为了判断动作回包而解析一次、事件链路又解析一次。
+    ///
+    /// - Parameter rawText: 原始帧文本。单事件帧直接用它作为 `rawJSON`，不再重新序列化。
+    ///   数组帧按旧行为逐元素解析（`rawText: nil`）；嵌套包装帧同样保留原始帧文本。
+    static func parse(object: Any, rawText: String?) -> [OneBotEvent] {
         if let array = object as? [[String: Any]] {
             return array.compactMap { parseEvent($0, rawText: nil) }
         }
         if let dictionary = object as? [String: Any] {
-            if let event = parseEvent(dictionary, rawText: nil) { return [event] }
+            if let event = parseEvent(dictionary, rawText: rawText) { return [event] }
             // Some bridge versions wrap the event: {"post_type":"message","data":{...}}
             if let nested = dictionary["data"] as? [String: Any],
-               let event = parseEvent(nested, rawText: nil) {
+               let event = parseEvent(nested, rawText: rawText) {
                 return [event]
             }
         }

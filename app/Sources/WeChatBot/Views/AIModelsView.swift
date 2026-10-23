@@ -52,6 +52,89 @@ struct AIModelsView: View {
             }
 
             SectionCard(
+                title: "识图模型",
+                subtitle: "收到图片时先用视觉模型生成描述，再交给回复模型参考",
+                symbol: "eye.fill",
+                tint: Theme.info
+            ) {
+                VStack(spacing: 0) {
+                    if store.providers.isEmpty {
+                        Text(L("先添加通道并填写模型名称。"))
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(14)
+                    } else {
+                        SettingsRow(
+                            title: "启用识图",
+                            subtitle: "关闭时只显示图片占位，不发起视觉请求",
+                            symbol: "eye.fill",
+                            tint: Theme.info
+                        ) {
+                            Toggle(L("启用识图"), isOn: visionEnabledBinding)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .controlSize(.small)
+                        }
+                        SettingsDivider()
+                        SettingsRow(
+                            title: "识图通道",
+                            subtitle: "默认跟随「默认通道」；可为识图单独指定通道",
+                            symbol: "point.3.connected.trianglepath.dotted",
+                            tint: Theme.info
+                        ) {
+                            Picker(L("识图通道"), selection: visionProviderBinding) {
+                                Text(L("跟随默认通道")).tag(String?.none)
+                                ForEach(store.providers) { provider in
+                                    Text(provider.name).tag(Optional(provider.id))
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .frame(width: 180)
+                            .disabled(!store.settings.isVisionEnabled)
+                        }
+                        SettingsDivider()
+                        SettingsRow(
+                            title: "识图模型",
+                            subtitle: "留空时跟随所选通道的模型；需支持 OpenAI 兼容的 image_url 图片输入",
+                            symbol: "cpu",
+                            tint: Theme.info
+                        ) {
+                            HStack(spacing: 7) {
+                                TextField(visionModelPlaceholder, text: visionModelBinding)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .frame(width: 170)
+                                    .disabled(!store.settings.isVisionEnabled)
+                                if visionModelOverride != nil {
+                                    Button {
+                                        clearVisionModelOverride()
+                                    } label: {
+                                        Image(systemName: "arrow.uturn.backward")
+                                    }
+                                    .buttonStyle(.glass)
+                                    .controlSize(.small)
+                                    .help(L("跟随通道模型"))
+                                    .accessibilityLabel(L("跟随通道模型"))
+                                }
+                            }
+                        }
+                        Label(
+                            L("识图结果保存在本机，并随消息作为后续回复的上下文；建议选择支持图片输入的模型（如 gpt-4o-mini、qwen-vl-max）。"),
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.vertical, -4)
+            }
+
+            SectionCard(
                 title: "模型温度",
                 subtitle: "按模型单独配置；未配置时使用模型自身默认温度",
                 symbol: "thermometer.medium",
@@ -297,6 +380,32 @@ struct AIModelsView: View {
         store.persist()
     }
 
+    // MARK: Vision
+
+    /// 当前识图模型覆盖值；空字符串/空白视为「跟随通道」。
+    private var visionModelOverride: String? {
+        store.settings.ai.vision?.modelOverride
+    }
+
+    /// 未填写覆盖值时 TextField 的水位文案：显示识图通道实际生效的模型名。
+    private var visionModelPlaceholder: String {
+        guard let provider = store.settings.visionProvider else { return L("跟随通道模型") }
+        let model = store.settings.visionModel(for: provider)
+        return model.isEmpty ? L("跟随通道模型") : model
+    }
+
+    /// 修改 `vision` 时按需创建默认配置，然后持久化；关闭状态也保留其它字段。
+    private func updateVision(_ mutate: (inout VisionSettings) -> Void) {
+        var vision = store.settings.ai.vision ?? VisionSettings()
+        mutate(&vision)
+        store.settings.ai.vision = vision
+        store.persist()
+    }
+
+    private func clearVisionModelOverride() {
+        updateVision { $0.model = "" }
+    }
+
     // MARK: Bindings
 
     private var defaultProviderBinding: Binding<String?> {
@@ -331,6 +440,34 @@ struct AIModelsView: View {
         Binding(
             get: { store.settings.ai.retryCount },
             set: { store.settings.ai.retryCount = $0; store.persist() }
+        )
+    }
+
+    /// 首次打开开关时创建默认 `VisionSettings`（默认关闭，避免旧配置被意外改写）。
+    private var visionEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { store.settings.ai.vision?.enabled ?? false },
+            set: { enabled in
+                updateVision { $0.enabled = enabled }
+            }
+        )
+    }
+
+    private var visionProviderBinding: Binding<String?> {
+        Binding(
+            get: { store.settings.ai.vision?.providerID },
+            set: { providerID in
+                updateVision { $0.providerID = providerID }
+            }
+        )
+    }
+
+    private var visionModelBinding: Binding<String> {
+        Binding(
+            get: { store.settings.ai.vision?.model ?? "" },
+            set: { model in
+                updateVision { $0.model = model }
+            }
         )
     }
 

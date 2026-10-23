@@ -8,6 +8,34 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ### 新增
 
+- **引用图片时让 AI 知道是哪张图（2026-10-23）**：微信引用消息只带 `<svrid>` 与 `[图片]` 摘要，
+  回复模型看不到被引用图片。现在解析 refermsg 的 `svrid`（与 `ChatMessage.id` 的
+  `ob-<svrid>` 精确对应），生成回复前按 ID 找回原图：已有识图描述直接复用；尚未描述但
+  本地有图片时借用识图通道现场识别（引用场景不受「最近 10 分钟」限制）；随后在本轮用户
+  消息末尾附「（引用图片内容：…）」，找不到/无法识别时附「（引用的图片内容暂不可用）」。
+  system prompt 会说明该标记是图片描述而不是新发言，避免模型猜图。旧配置（未开启识图）
+  且原图无描述时行为不变。
+- **图片识图 / 视觉模型（2026-10-23）**：AI 模型页新增「识图模型」：可启用识图、指定识图通道
+  （默认跟随默认通道）与模型覆盖。自动回复触发时按需识别上下文内最近 10 分钟、每次最多 2 张
+  尚未识别的入站图片：先用 ImageIO 缩放/JPEG 编码为 data URL，再以 OpenAI 兼容的
+  `image_url` 多模态请求调用识图通道；描述清洗后写入消息与数据库
+  （`messages.image_description`），后续提示词以 `[图片：描述]` 参与文本上下文与长期记忆摘要。
+  图片本身不进入回复提示词；识图请求非流式、超时 ≤30 秒、输出 ≤800 tokens；同一消息每次
+  运行最多尝试一次，失败只写 debug 日志、不阻断回复；未开启或识别失败时行为与旧版一致。
+  图片气泡在图片下方展示识图描述。该链路 2026-10-23 实现并通过单元测试，**尚未真机验证**
+  （需配置支持 `image_url` 的视觉模型）。
+- **聊天图片获取（2026-10-23，4.2.0.5 真机验证）**：微信 4.1.15.55 / 4.2.0.5 的入站图片
+  此前只有 `[图片]` 占位。现在 bridge 在推送前从 `raw_message` 解析 `<img>` 的
+  `aeskey` / `cdnmidimgurl` / `cdnthumbaeskey` / `cdnthumburl` / `md5` / `length`，
+  按 `message_id` 登记下载候选（mid → thumb），并把文本占位替换成无 data 的
+  `{"type":"image","data":{}}`（新增结构化字段与日志不携带 aeskey / CDN key；
+  `raw_message` 仍保留 hook 原始图片 XML，与历史行为一致）。App 在该会话开关开启时
+  调用新增的 `POST /fetch_image`（Bearer）按需触发微信自身 CDN 下载；bridge 收到分片后
+  用 `aeskey` AES-ECB 解密、校验图片魔数，写入 `-media_dir/<yyyy-MM-dd>/`
+  （默认 `~/Library/Application Support/WeChatAI/media`），返回 `file://` 路径，App 更新
+  `mediaPath` 并落库，会话气泡即显示图片。真机实测：新图片 → 自动触发下载 → 分片解密得到有效 JPEG。App 侧新增 `ImageFetcher` 串行队列（同一消息只尝试一次、失败不重试、
+  停止即取消），失败只写 debug 日志。本次只做**获取**，识图（视觉模型）见上一条；
+  只处理实时入站图片，历史消息不回填。
 - **通讯录真实昵称 / 群名**：hook 在本机**只读**读取通讯录后返回联系人目录，
   bridge 暴露 OneBot `get_contact_directory`，App 用真实昵称/群名替换 wxid 标题，
   并在群成员缓存未命中时回退通讯录昵称（契约见 `docs/architecture.md` §3）。
@@ -45,8 +73,44 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   新增 `scripts/check.sh`、`scripts/check_docs.py`、
   `scripts/sync_hook_script.sh`、根 `Makefile`。
 
+### 性能
+
+- **历史信息获取与空闲等待（2026-10-23）**：围绕「打开/回放历史消息」和「空闲等待入站消息」
+  两条链路做性能、效率与能耗优化，协议与 UI 行为不变：
+  - **hook**：R3 闭包捕获从常驻 `setInterval(10ms)`（100Hz 唤醒 + 每 tick 最多 96 节点堆遍历）
+    改为按需 one-shot 调度：未解析 classA 时 500ms 重试；已解析但未拿到发送句柄时按
+    10ms→50ms→250ms 退避扫描，发送入口缺句柄触发 5s 快扫；拿到句柄后停止一切周期任务。
+    日志 / seed 持久化不再等待轮询，改为 0ms 合并 flush。微信空闲时不再持续读堆。
+  - **hook 内存**：入站去重表 `incomingMessageSeen` 改为 4096 条环形窗口，长时间运行或
+    历史回放（同一条消息被重复 finalize）不再单调增长；窗口外重复由 App `message_id`
+    去重 + SQLite upsert 兜底。
+  - **bridge**：入站事件推送删除固定 `send_interval` sleep（App 运行期传 100ms；旧路径
+    每条事件延迟一次并多一次定时器唤醒），事件完成归一化/图片登记后立即写 WS/HTTP；
+    `-send_interval` 只约束真正发往微信的消息。事件级完整 JSON 日志降为 Debug，只保留
+    字节长度 + ≤256 字符预览；默认 `-log_level=info` 下零额外字符串分配。
+  - **App 启动历史修复**：`get_login_info` 写入的 selfID 标记 `onebot.self_id_source=login`，
+    两处历史修复传 `trusted: true` 完全跳过「全表读取 `raw_json` 并逐行 JSON 解析」的账号反推；
+    未 trusted 时反推只采样最近 5000 条，`repairMisroutedConversations` 先用 `conversations`
+    表廉价筛选嫌疑会话。`repairAppmsgMessageTexts` / `rerenderLegacyQuoteTexts` 两个全表
+    LIKE 迁移改由 `data.repairs_version` 门禁，只成功执行一次，失败下次重试。
+  - **App 空闲刷新**：`AppStore.logRevision` 记录日志缓冲代数，日志页（500ms）与总览
+    「最近活动」（750ms）采样未变化时直接跳过，空闲时不再每 tick 复制/遍历 2000 条日志。
+  - **App 入站解析**：每帧只 `JSONSerialization` 一次；`OneBotEventParser.parse(object:rawText:)`
+    复用已解析对象与原帧文本，单事件 `rawJSON` 不再重新序列化（数组/包装帧兼容）。
+  - **测试**：Swift 200 → 207（新增 `OneBotEventParserTests` 5 项、`DataRepairTrustTests` 2 项），
+    Go 仍为 95 项；`scripts/check.sh` 与 `scripts/build_bridge.sh` 全绿。
+
 ### 变更
 
+- **「获取图片」改为按会话设置（2026-10-23）**：删除设置页的全局开关，改为
+  `Conversation.imageFetchEnabled`（会话详情 → 菜单 →「媒体」）；数据库 `conversations`
+  新增 `image_fetch_enabled INTEGER`（NULL=跟随旧全局默认、0=关、1=开，启动时幂等补列）。
+  旧的 `bot.imageFetchEnabled` 仅作为未设置会话的回退值（默认开启）。
+- **bridge 新增 `-media_dir` 与 `/fetch_image`**：入站图片获取落盘目录由 App 传入
+  （默认 `~/Library/Application Support/WeChatAI/media`，只写该目录，不写 app bundle）；
+  `/fetch_image` 要求与其他 HTTP 接口相同的 Bearer 鉴权，单次预算约 12 秒、并发上限 2，
+  触发 Frida 下载带 10 秒超时，失败返回中文原因。`msg.go` 增加下载代次记录，用于匹配
+  触发后新出现的下载分片。
 - **仓库精简**：下线仅供开发期使用的文档与工具（AI 代理指南、开发手册、Hook 移植/ABI/R3/通讯录方法文档、
   集成状态与验收报告、性能事故记录、Frida 反查探针、指针归属工具、Issue/PR 模板与协作文件），
   相关内容保留在本机 `_local/`（已 gitignore）；公开仓库只保留用户视角文档与运行所需代码。
@@ -76,6 +140,23 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ### 修复
 
+- **识图返回空内容 / 回复说看不到图片（2026-10-23）**：`deepseek-flash` 默认开启思考模式，
+  识图请求的 400 token 输出额度被推理内容耗尽，最终 `content` 为空，App 报「AI 返回了空内容」，
+  图片描述从未写入，回复模型只能看到 `[图片]` 占位。现在 DeepSeek 系识图通道显式发送
+  `{"thinking":{"type":"disabled"}}`，输出上限 400→800 tokens、超时 20→30 秒；其它通道不发送
+  该扩展字段。空内容失败改为 warning 日志，提示检查识图模型是否支持图片输入。
+- **4.2.0.5 图片获取失败（2026-10-23）**：四个叠加问题已修复并在真机验证：
+  ① `downloadImag`/`downloadFile` 的版本地址指向调用指令而非调用前的取参指令，Frida
+  无法拦截；改为可挂载的 Hook 点。② 下载请求里变长字符串只换了指针、没换长度/容量，
+  194 字符的 CDN file key 被旧长度截断；已按实际长度写入并标记长字符串。③ 登录稳定
+  标记改为消息 finalizer 命中即置位，避开 bridge 启动 60 秒内触发下载被拒绝。
+  ④ bridge 在触发前删除了已到达的自然下载分片，且触发被拒后直接放弃；现在优先使用
+  微信自然下载的分片，触发失败也继续等待。⑤ 不再按 XML 的 `length`/`cdnthumblength`
+  截断图片（该字段不总是真实明文长度，会切掉 JPEG 的 EOI 尾部导致半张图）；改为按
+  JPEG EOI / PNG IEND 等结束标记裁掉 AES 补齐字节，不完整时继续等分片增长、不落盘。
+  另：4.2 的 mid 图常为 HEVC（`hevc_mid_size`/`cdnmidheight=0`），没有 HEVC 解码时
+  自动改用 JPEG 缩略图；入站图片事件经 `HandleMsg` 转发时空 image 段不再被 legacy
+  XML 解析丢弃。真机结果：新图片自动落盘为完整 JPEG 并写入会话。
 - **群聊身份被聊天玩梗覆盖（2026-10-22）**：补上消息 wxid 之后仍可能出现
   「群里多人说某人是某某，机器人跟着改口」。现在群聊每轮在 system prompt 末尾追加
   「本轮发言人身份」硬约束：由本会话核心/手写记忆解析 `wxid：称呼`，明确禁止模型

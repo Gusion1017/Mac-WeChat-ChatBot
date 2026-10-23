@@ -31,6 +31,10 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
 - **按会话人格** / 系统提示词 / 模型与温度覆盖；DeepSeek、OpenAI、Ollama 或任意 OpenAI 兼容端点
 - **记忆**：10 条短期窗口 + 8 条批量总结；会话文件夹；综合权重 = 基础 × 重要度 × 召回 × 30 天半衰期，基础权重可调
 - **拟人化延迟**、回复进度倒计时、防睡眠、定时主动消息、实时会话看板、运行日志
+- **聊天图片获取**（按会话开关，会话详情 → 菜单 →「媒体」；默认开启，关闭后只显示「图片」占位）：
+  收到图片时自动从微信下载、解密并保存到本机媒体目录，会话里直接显示；**识图模型**
+  （AI 模型页配置，可单独指定视觉通道/模型）对近期入站图片生成文字描述，作为回复上下文，
+  描述显示在图片下方；引用图片时会把被引用原图的内容描述带入本轮回复
 - **4.1.15.55 / 4.2.0.5 R3 原生文本发送**（设置内开关，无句柄时自动排队）；**通讯录真实昵称 / 群名**（本机只读）
 - **中 / 英双语界面**；原生 Liquid Glass 风格、菜单栏常驻；无 WebView / Electron
 
@@ -38,11 +42,11 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
 
 | 模块 | 状态 |
 | --- | --- |
-| SwiftUI App / Swift 核心 | ✅ 184 项测试通过；4.1.15.55 / 4.2.0.5 真机 E2E |
-| OneBot bridge（Go） | ✅ 构建 / 鉴权 / 真机附加 / 60 项测试通过 |
+| SwiftUI App / Swift 核心 | ✅ 220 项测试通过；4.1.15.55 / 4.2.0.5 真机 E2E |
+| OneBot bridge（Go） | ✅ 构建 / 鉴权 / 真机附加 / 95 项测试通过 |
 | 微信 4.1.12.53 | ✅ legacy 收发 + 主动发送 |
 | 微信 4.1.15.55 | ✅ Message finalizer 接收 + R3 文本发送（首次需在本机微信手动发一条消息捕获句柄） |
-| 微信 4.2.0.5 | ✅ 真机验证（2026-10-22）：私聊/自消息入站、通讯录、R3 文本发送（含 bridge 重启句柄恢复）；群聊 @ / 拍一拍沿用既有逻辑未单独复测，媒体下载维持已知缺失 |
+| 微信 4.2.0.5 | ✅ 真机验证（2026-10-22/23）：私聊/自消息入站、通讯录、R3 文本发送（含 bridge 重启句柄恢复）、**图片获取**（自然分片优先/按需触发 + 解密，HEVC 走缩略图）；群聊 @ / 拍一拍沿用既有逻辑未单独复测 |
 
 环境：Apple Silicon、macOS 26+；从源码构建另需 Xcode 27。
 
@@ -58,8 +62,8 @@ WeChatAI.app (SwiftUI)          bridge/onebot (Go)              WeChat.app
 
 ### 快速开始
 
-- **普通用户**：下载 [`WeChat-AI-1.2.4.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.2.4/WeChat-AI-1.2.4.zip)
-  （63 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.2.4/WeChat-AI-1.2.4.zip.sha256)），
+- **普通用户**：下载 [`WeChat-AI-1.2.5.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.2.5/WeChat-AI-1.2.5.zip)
+  （63 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.2.5/WeChat-AI-1.2.5.zip.sha256)），
   解压后**右键 → 打开**；首启向导会安装 Hook。历史标签见 [Tags](https://github.com/Gusion1017/Mac-WeChat-ChatBot/tags)，
   步骤详见 [`docs/install.md`](docs/install.md)。
 - **从源码构建**（需 Xcode 27）：
@@ -67,7 +71,7 @@ WeChatAI.app (SwiftUI)          bridge/onebot (Go)              WeChat.app
 ```bash
 git clone https://github.com/Gusion1017/Mac-WeChat-ChatBot.git && cd Mac-WeChat-ChatBot
 bash scripts/fetch_gadget.sh     # Frida Gadget 17.8.0（校验 SHA256）
-bash scripts/build_bridge.sh     # Go 1.25 构建 + 60 项测试
+bash scripts/build_bridge.sh     # Go 1.25 构建 + 95 项测试
 bash scripts/build_app.sh        # 生成 dist/WeChat AI.app
 bash scripts/install_app.sh      # 安装到 ~/Applications
 ```
@@ -91,7 +95,7 @@ bash tools/manage_wechat.sh restore   # 还原官方 App
 ### 目录结构
 
 ```
-app/        SwiftUI App（SwiftPM）+ 184 项测试
+app/        SwiftUI App（SwiftPM）+ 220 项测试
 bridge/     Go OneBot 桥接（GPL-3.0 衍生，改动见 NOTICE）
 hook/       script.js（唯一事实来源）与版本地址表
 tools/      Hook 安装、备份、还原
@@ -105,8 +109,8 @@ docs/       架构、契约、记忆与 UI 设计
 ### 开发与测试
 
 ```bash
-bash scripts/check.sh               # 静态检查 + Swift 184 项
-bash scripts/build_bridge.sh        # Go 构建 + 60 项测试
+bash scripts/check.sh               # 静态检查 + Swift 220 项
+bash scripts/build_bridge.sh        # Go 构建 + 95 项测试
 bash scripts/package_release.sh     # Releases 用 zip + sha256
 ```
 
@@ -157,6 +161,12 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
   weight = base × importance × recall × 30-day half-life, with an adjustable base weight
 - **Human-like delay**, reply progress countdown, sleep prevention, scheduled messages, live
   conversation board and runtime logs
+- **Chat image fetch** (per-conversation switch under the conversation menu → "Media"; on by
+  default, off keeps only the "图片" placeholder): incoming images are downloaded from WeChat,
+  decrypted and saved into the local media directory, then shown inline. The **vision model**
+  (configured under AI Models, with an optional vision channel/model) describes recent incoming
+  images as text for reply context; the description is shown below the image. Quoting an image
+  brings the referenced image's description into the current reply.
 - **4.1.15.55 / 4.2.0.5 R3 native text sending** (toggle in Settings, auto-queues without a send handle);
   **real contact nicknames / group names** (local, read-only)
 - **Chinese / English UI**; native Liquid Glass look, menu-bar app; no WebView / Electron
@@ -165,11 +175,11 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
 
 | Component | Status |
 | --- | --- |
-| SwiftUI app / Swift core | ✅ 184 tests passing; 4.1.15.55 / 4.2.0.5 real-device E2E |
-| OneBot bridge (Go) | ✅ builds / auth / device attach / 60 tests passing |
+| SwiftUI app / Swift core | ✅ 220 tests passing; 4.1.15.55 / 4.2.0.5 real-device E2E |
+| OneBot bridge (Go) | ✅ builds / auth / device attach / 95 tests passing |
 | WeChat 4.1.12.53 | ✅ legacy send + receive |
 | WeChat 4.1.15.55 | ✅ Message-finalizer receive + R3 text sending (send one message in WeChat once to capture the handle) |
-| WeChat 4.2.0.5 | ✅ Real-device verified (2026-10-22): private-chat/self-message receive, contact directory, R3 text sending incl. bridge-restart handle recovery; group @ / pat-pat reuse existing logic and were not separately retested; media download remains a known limitation |
+| WeChat 4.2.0.5 | ✅ Real-device verified (2026-10-22/23): private-chat/self-message receive, contact directory, R3 text sending incl. bridge-restart handle recovery, **image fetch** (natural chunks first / on-demand trigger + decryption, thumbnail fallback for HEVC); group @ / pat-pat reuse existing logic and were not separately retested |
 
 Requirements: Apple Silicon, macOS 26+; building from source also needs Xcode 27.
 
@@ -187,8 +197,8 @@ Contracts in [`docs/architecture.md`](docs/architecture.md); document index in
 ### Quick Start
 
 - **Regular users**: download
-  [`WeChat-AI-1.2.4.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.2.4/WeChat-AI-1.2.4.zip)
-  (63 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.2.4/WeChat-AI-1.2.4.zip.sha256)), unzip and
+  [`WeChat-AI-1.2.5.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.2.5/WeChat-AI-1.2.5.zip)
+  (63 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.2.5/WeChat-AI-1.2.5.zip.sha256)), unzip and
   **right-click → Open**; the first-run wizard installs the hook. Older tags are on
   [Tags](https://github.com/Gusion1017/Mac-WeChat-ChatBot/tags); details in [`docs/install.md`](docs/install.md).
 - **Build from source** (Xcode 27 required):
@@ -196,7 +206,7 @@ Contracts in [`docs/architecture.md`](docs/architecture.md); document index in
 ```bash
 git clone https://github.com/Gusion1017/Mac-WeChat-ChatBot.git && cd Mac-WeChat-ChatBot
 bash scripts/fetch_gadget.sh     # Frida Gadget 17.8.0 (SHA256 verified)
-bash scripts/build_bridge.sh     # Go 1.25 build + 60 tests
+bash scripts/build_bridge.sh     # Go 1.25 build + 95 tests
 bash scripts/build_app.sh        # builds dist/WeChat AI.app
 bash scripts/install_app.sh      # installs to ~/Applications
 ```
@@ -221,7 +231,7 @@ remain in the known-supported list and install directly (their version files are
 ### Repository Layout
 
 ```
-app/        SwiftUI app (SwiftPM) + 184 tests
+app/        SwiftUI app (SwiftPM) + 220 tests
 bridge/     Go OneBot bridge (GPL-3.0 derivative, changes listed in NOTICE)
 hook/       script.js (single source of truth) and version address tables
 tools/      hook install, backup and restore
@@ -236,8 +246,8 @@ Rebuildable, never committed: `app/.build*`, `bridge/onebot`, `dist/`, `log/`,
 ### Build and Test
 
 ```bash
-bash scripts/check.sh               # static checks + 184 Swift tests
-bash scripts/build_bridge.sh        # Go build + 60 tests
+bash scripts/check.sh               # static checks + 200 Swift tests
+bash scripts/build_bridge.sh        # Go build + 95 tests
 bash scripts/package_release.sh     # release zip + sha256
 ```
 

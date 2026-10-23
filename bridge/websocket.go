@@ -9,10 +9,36 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+// logPreviewMaxRunes 是事件调试日志预览的最大字符数。
+// 历史回放/批量消息时不打印完整事件 JSON，避免大量字符串分配与磁盘 IO
+// （App 还会消费 bridge stdout，完整 payload 会放大到 SQLite/UI 刷新）。
+const logPreviewMaxRunes = 256
+
+// truncateForLog 把 s 截断到最多 maxRunes 个字符（rune），超出部分以 "..." 结尾。
+// 只用于日志预览，不改变任何实际发送/解析的数据。
+func truncateForLog(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "..."
+}
+
+// logEventDebug 以 Debug 级别记录一条事件负载的「字节长度 + 截断预览」。
+// 默认日志级别是 Info，此时直接返回，不为被丢弃的日志构造完整字符串。
+func logEventDebug(msg string, data []byte) {
+	if !Logger.logger.Debug().Enabled() {
+		return
+	}
+	Debug(msg, "data_len", len(data), "preview", truncateForLog(string(data), logPreviewMaxRunes))
+}
 
 var upgrader = websocket.Upgrader{}
 var conn *websocket.Conn
@@ -69,7 +95,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-		Info("收到消息", "msg", string(msgByte))
+		logEventDebug("收到消息", msgByte)
 		err = json.Unmarshal(msgByte, m)
 		if err != nil {
 			Error("解析失败", "err", err)
@@ -149,8 +175,8 @@ func SendWebSocketMsg(jsonData []byte) {
 		return
 	}
 
-	time.Sleep(time.Duration(config.SendInterval) * time.Millisecond)
-
+	// 事件推送不节流：入站事件需要立即写入 WS，send_interval 只约束真正
+	// 发往微信的消息（worker.go SendWechatMsg）。历史回放不再被固定 1s 拖慢。
 	jsonReq, err := HandleMsg(jsonData)
 	if err != nil {
 		Error("JSON 序列化失败", "err", err)
@@ -160,7 +186,7 @@ func SendWebSocketMsg(jsonData []byte) {
 		return
 	}
 
-	Info("发送数据", "msg", string(jsonReq))
+	logEventDebug("发送数据", jsonReq)
 	err = wsWriteMessage(websocket.TextMessage, jsonReq)
 	if err != nil {
 		Error("发送消息失败", "err", err)

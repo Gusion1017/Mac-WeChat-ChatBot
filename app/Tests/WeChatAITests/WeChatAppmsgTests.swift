@@ -32,12 +32,31 @@ final class WeChatAppmsgTests: XCTestCase {
         let xml = appmsgXML(
             type: 57,
             title: "这是什么",
-            extra: referXML(type: 3, displayName: "张三", content: escapedXML(inner))
+            extra: referXML(
+                type: 3,
+                displayName: "张三",
+                content: escapedXML(inner),
+                svrid: "6521083521539268203"
+            )
         )
         let appmsg = try XCTUnwrap(WeChatAppmsg.parse(xml))
         XCTAssertEqual(appmsg.text, "这是什么\n【引用 张三：[图片]】")
         XCTAssertEqual(appmsg.quote?.snippet, "[图片]")
         XCTAssertEqual(appmsg.quote?.messageType, 3)
+        XCTAssertEqual(appmsg.quote?.svrid, "6521083521539268203")
+        XCTAssertEqual(appmsg.quote?.imageMessageID, "ob-6521083521539268203")
+        XCTAssertTrue(appmsg.quote?.isImage ?? false)
+    }
+
+    func testTextQuoteIsNotTreatedAsImage() throws {
+        let xml = appmsgXML(
+            type: 57,
+            title: "嗯",
+            extra: referXML(type: 1, displayName: "李四", content: "普通文字", svrid: "123")
+        )
+        let quote = try XCTUnwrap(WeChatAppmsg.parse(xml)?.quote)
+        XCTAssertFalse(quote.isImage)
+        XCTAssertEqual(quote.imageMessageID, "ob-123")
     }
 
     /// refermsg 只有 `<type>`、没有 `<content>` 时按媒体类型兜底。
@@ -432,11 +451,15 @@ final class WeChatAppmsgTests: XCTestCase {
         displayName: String?,
         content: String?,
         chatUser: String? = nil,
-        fromUser: String? = nil
+        fromUser: String? = nil,
+        svrid: String? = nil
     ) -> String {
         var body = ""
         if let type {
             body += "<type>\(type)</type>"
+        }
+        if let svrid {
+            body += "<svrid>\(svrid)</svrid>"
         }
         if let displayName {
             body += "<displayname>\(displayName)</displayname>"

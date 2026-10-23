@@ -1141,3 +1141,25 @@
 "窗口时长" = "Window length";
 "群聊被唤醒后，同一发送者在此时长内继续发言无需再次 @ / 关键词 / 引用；仅群聊生效" = "After the bot is woken in a group chat, the same sender can keep chatting for this long without another @ / keyword / quote; group chats only";
 "%d 分钟" = "%d min";
+
+"媒体" = "Media";
+"获取图片" = "Fetch Images";
+"收到图片时从微信下载到本机并显示；关闭后只显示「图片」占位" = "Downloads images from WeChat to this Mac and shows them; when off, only a \"图片\" placeholder is shown";
+"关闭后 App 不再向微信请求图片内容；已获取过的图片仍会显示。理解图片将在后续版本提供。" = "When off, the app no longer requests image content from WeChat; images fetched earlier still display. Image understanding is planned for a later version.";
+
+"获取图片（已开启）" = "Fetch Images (On)";
+"获取图片（已关闭）" = "Fetch Images (Off)";
+"已开启此会话的图片获取" = "Image fetching enabled for this conversation";
+"已关闭此会话的图片获取" = "Image fetching disabled for this conversation";
+
+"识图模型" = "Vision Model";
+"收到图片时先用视觉模型生成描述，再交给回复模型参考" = "When an image arrives, a vision model describes it first and the reply model uses that description";
+"启用识图" = "Enable Image Recognition";
+"关闭时只显示图片占位，不发起视觉请求" = "When off, images show a placeholder only and no vision request is sent";
+"识图通道" = "Vision Channel";
+"默认跟随「默认通道」；可为识图单独指定通道" = "Follows the default channel by default; you can pick a separate channel for image recognition";
+"跟随默认通道" = "Follow Default Channel";
+"留空时跟随所选通道的模型；需支持 OpenAI 兼容的 image_url 图片输入" = "Leave blank to use the selected channel's model; it must support OpenAI-compatible image_url input";
+"跟随通道模型" = "Follow Channel Model";
+"识图结果保存在本机，并随消息作为后续回复的上下文；建议选择支持图片输入的模型（如 gpt-4o-mini、qwen-vl-max）。" = "Recognition results are stored on this Mac and travel with the message as context for later replies; prefer a model that accepts image input (e.g. gpt-4o-mini, qwen-vl-max).";
+"复制识图描述" = "Copy Image Description";

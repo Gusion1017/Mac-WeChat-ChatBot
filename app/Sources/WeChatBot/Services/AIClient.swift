@@ -12,14 +12,20 @@ struct AIMessage: Codable, Sendable, Hashable {
 
     var role: Role
     var content: String
+    /// 多模态图片（`data:image/jpeg;base64,…` 或 http(s) URL）。仅 user 消息使用；
+    /// 为空时请求体保持旧的字符串 content，文本通道行为完全不变。
+    var imageURLs: [String] = []
 
-    init(role: Role, content: String) {
+    init(role: Role, content: String, imageURLs: [String] = []) {
         self.role = role
         self.content = content
+        self.imageURLs = imageURLs
     }
 
     static func system(_ content: String) -> AIMessage { .init(role: .system, content: content) }
-    static func user(_ content: String) -> AIMessage { .init(role: .user, content: content) }
+    static func user(_ content: String, images: [String] = []) -> AIMessage {
+        .init(role: .user, content: content, imageURLs: images)
+    }
     static func assistant(_ content: String) -> AIMessage { .init(role: .assistant, content: content) }
 }
 
@@ -95,6 +101,15 @@ enum AIError: LocalizedError, Equatable {
 
 // MARK: - Client
 
+/// DeepSeek 思考模式开关（OpenAI 兼容请求体里的顶层 `thinking` 字段）。
+///
+/// 识图请求默认关闭：思考内容会占用输出额度，短描述场景既慢又容易把
+/// `max_tokens` 全部消耗在推理上，导致 `content` 为空（2026-10-23 真机日志）。
+enum AIThinkingMode: String, Sendable, Equatable {
+    case enabled
+    case disabled
+}
+
 /// AI 凭据可用性。`.unreadable` 表示 Keychain 条目存在但当前签名无权读取，
 /// 与「用户还没填 Key」是两种不同的故障，UI/日志需要分别提示。
 enum ProviderCredentialState: Sendable, Equatable {
@@ -148,20 +163,44 @@ final class AIClient: @unchecked Sendable {
 
     /// Builds the chat-completions body. `temperature` is omitted unless the model
     /// has an explicit per-model value, so each model can use its own default.
+    ///
+    /// 带图片的 user 消息使用 OpenAI 多模态 content 数组：
+    /// `[{"type":"text","text":…},{"type":"image_url","image_url":{"url":…}}]`；
+    /// 无图片时仍发送字符串 content，兼容只支持纯文本的旧端点。
     static func requestBody(
         messages: [AIMessage],
         provider: AIProvider,
         temperature: Double? = nil,
-        stream: Bool
+        stream: Bool,
+        thinking: AIThinkingMode? = nil
     ) throws -> Data {
         var payload: [String: Any] = [
             "model": effectiveModel(for: provider),
-            "messages": messages.map { ["role": $0.role.rawValue, "content": $0.content] },
+            "messages": messages.map { message in
+                var encoded: [String: Any] = ["role": message.role.rawValue]
+                if message.imageURLs.isEmpty {
+                    encoded["content"] = message.content
+                } else {
+                    var parts: [[String: Any]] = []
+                    if !message.content.isEmpty {
+                        parts.append(["type": "text", "text": message.content])
+                    }
+                    for url in message.imageURLs {
+                        parts.append(["type": "image_url", "image_url": ["url": url]])
+                    }
+                    encoded["content"] = parts
+                }
+                return encoded
+            },
             "max_tokens": max(1, provider.maxTokens),
             "stream": stream
         ]
         if let temperature {
             payload["temperature"] = min(max(temperature, 0), 2)
+        }
+        if let thinking {
+            // DeepSeek 扩展字段：顶层 {"thinking": {"type": "enabled/disabled"}}。
+            payload["thinking"] = ["type": thinking.rawValue]
         }
         do {
             return try JSONSerialization.data(withJSONObject: payload, options: [])
@@ -213,6 +252,7 @@ final class AIClient: @unchecked Sendable {
         provider: AIProvider,
         temperature: Double? = nil,
         forceStream: Bool? = nil,
+        thinking: AIThinkingMode? = nil,
         onDelta: (@Sendable (String) -> Void)? = nil
     ) async throws -> AICompletionResult {
         let useStream = forceStream ?? provider.stream
@@ -223,13 +263,24 @@ final class AIClient: @unchecked Sendable {
         let finishReason: String?
 
         if useStream {
-            let outcome = try await performStream(messages: messages, provider: provider, temperature: temperature, onDelta: onDelta)
+            let outcome = try await performStream(
+                messages: messages,
+                provider: provider,
+                temperature: temperature,
+                thinking: thinking,
+                onDelta: onDelta
+            )
             text = outcome.text
             usage = outcome.usage
             model = outcome.model
             finishReason = outcome.finishReason
         } else {
-            let outcome = try await performJSON(messages: messages, provider: provider, temperature: temperature)
+            let outcome = try await performJSON(
+                messages: messages,
+                provider: provider,
+                temperature: temperature,
+                thinking: thinking
+            )
             text = outcome.text
             usage = outcome.usage
             model = outcome.model
@@ -257,7 +308,13 @@ final class AIClient: @unchecked Sendable {
         var finishReason: String?
     }
 
-    private func makeRequest(messages: [AIMessage], provider: AIProvider, temperature: Double?, stream: Bool) throws -> URLRequest {
+    private func makeRequest(
+        messages: [AIMessage],
+        provider: AIProvider,
+        temperature: Double?,
+        stream: Bool,
+        thinking: AIThinkingMode? = nil
+    ) throws -> URLRequest {
         let url = try Self.endpoint(for: provider)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -277,12 +334,29 @@ final class AIClient: @unchecked Sendable {
             if provider.apiKeyReference.isEmpty { throw AIError.missingAPIKey }
         }
 
-        request.httpBody = try Self.requestBody(messages: messages, provider: provider, temperature: temperature, stream: stream)
+        request.httpBody = try Self.requestBody(
+            messages: messages,
+            provider: provider,
+            temperature: temperature,
+            stream: stream,
+            thinking: thinking
+        )
         return request
     }
 
-    private func performJSON(messages: [AIMessage], provider: AIProvider, temperature: Double?) async throws -> Outcome {
-        let request = try makeRequest(messages: messages, provider: provider, temperature: temperature, stream: false)
+    private func performJSON(
+        messages: [AIMessage],
+        provider: AIProvider,
+        temperature: Double?,
+        thinking: AIThinkingMode? = nil
+    ) async throws -> Outcome {
+        let request = try makeRequest(
+            messages: messages,
+            provider: provider,
+            temperature: temperature,
+            stream: false,
+            thinking: thinking
+        )
         let data: Data
         let response: URLResponse
         do {
@@ -310,9 +384,16 @@ final class AIClient: @unchecked Sendable {
         messages: [AIMessage],
         provider: AIProvider,
         temperature: Double?,
+        thinking: AIThinkingMode? = nil,
         onDelta: (@Sendable (String) -> Void)?
     ) async throws -> Outcome {
-        let request = try makeRequest(messages: messages, provider: provider, temperature: temperature, stream: true)
+        let request = try makeRequest(
+            messages: messages,
+            provider: provider,
+            temperature: temperature,
+            stream: true,
+            thinking: thinking
+        )
         let timeout = max(5, provider.timeoutSeconds)
 
         return try await withThrowingTaskGroup(of: Outcome.self) { group in

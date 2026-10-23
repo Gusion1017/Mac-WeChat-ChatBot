@@ -11,6 +11,7 @@
 #   PORT         监听端口，默认 58080
 #   TOKEN        OneBot token；为空时随机生成 32 字节 hex 并打印
 #   IMAGE_PATH   微信图片临时目录（必填，且必须已存在）
+#   MEDIA_DIR    入站图片获取落盘目录（默认 ~/Library/Application Support/WeChatAI/media）
 #   GADGET_ADDR  Frida Gadget 地址，默认 127.0.0.1:27042
 #   LOG_LEVEL    debug|info|warn|error，默认 info
 #   BRIDGE_BIN   自定义 onebot 路径，默认 <repo>/bridge/onebot
@@ -33,6 +34,7 @@ WECHAT_CONF="${WECHAT_CONF:-${ROOT_DIR}/hook/versions/4_2_0_5_mac.json}"
 PORT="${PORT:-58080}"
 TOKEN="${TOKEN:-}"
 IMAGE_PATH="${IMAGE_PATH:-}"
+MEDIA_DIR="${MEDIA_DIR:-$HOME/Library/Application Support/WeChatAI/media}"
 GADGET_ADDR="${GADGET_ADDR:-127.0.0.1:27042}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 BRIDGE_BIN="${BRIDGE_BIN:-${BRIDGE_DIR}/onebot}"
@@ -54,12 +56,13 @@ usage() {
   --port <port>         监听端口（默认 58080，仅绑定 127.0.0.1）
   --token <token>       OneBot token（默认随机生成 64 字符 hex）
   --image-path <dir>    微信图片临时目录（必填，必须已存在）
+  --media-dir <dir>     入站图片落盘目录（默认 ~/Library/Application Support/WeChatAI/media）
   --gadget-addr <addr>  Frida Gadget 地址（默认 127.0.0.1:27042）
   --log-level <level>   debug|info|warn|error（默认 info）
   --bin <path>          onebot 可执行文件（默认 bridge/onebot）
   -h, --help            显示本帮助
 
-对应环境变量：WECHAT_CONF、PORT、TOKEN、IMAGE_PATH、GADGET_ADDR、
+对应环境变量：WECHAT_CONF、PORT、TOKEN、IMAGE_PATH、MEDIA_DIR、GADGET_ADDR、
 LOG_LEVEL、BRIDGE_BIN、HOOK_SEND_DISABLED（默认 true，强制关闭主动发送）。
 命令行参数优先于环境变量。
 EOF
@@ -95,6 +98,9 @@ while (( $# > 0 )); do
     --image-path)
       [[ $# -ge 2 ]] || fail "$1 需要一个目录"
       IMAGE_PATH="$2"; shift 2 ;;
+    --media-dir)
+      [[ $# -ge 2 ]] || fail "$1 需要一个目录"
+      MEDIA_DIR="$2"; shift 2 ;;
     --gadget-addr)
       [[ $# -ge 2 ]] || fail "$1 需要一个地址"
       GADGET_ADDR="$2"; shift 2 ;;
@@ -118,6 +124,8 @@ IMAGE_PATH="$(expand_tilde "${IMAGE_PATH}")"
 if [[ -n "${IMAGE_PATH}" ]]; then
   IMAGE_PATH="$(abs_path "${IMAGE_PATH}")"
 fi
+MEDIA_DIR="$(expand_tilde "${MEDIA_DIR}")"
+MEDIA_DIR="$(abs_path "${MEDIA_DIR}")"
 BRIDGE_BIN="$(expand_tilde "${BRIDGE_BIN}")"
 BRIDGE_BIN="$(abs_path "${BRIDGE_BIN}")"
 BRIDGE_DIR="$(cd "$(dirname "${BRIDGE_BIN}")" 2>/dev/null && pwd)" \
@@ -130,6 +138,8 @@ BRIDGE_DIR="$(cd "$(dirname "${BRIDGE_BIN}")" 2>/dev/null && pwd)" \
 [[ -f "${WECHAT_CONF}" ]] || fail "Hook 版本配置不存在：${WECHAT_CONF}\n  该文件由 hook 成员/App 生成；默认期望 hook/versions/4_2_0_5_mac.json。"
 [[ -n "${IMAGE_PATH}" ]] || fail "缺少 IMAGE_PATH。\n  指向微信容器目录：.../xwechat_files/<wxid>/temp/<...>/Img/（App 负责探测/创建）。"
 [[ -d "${IMAGE_PATH}" ]] || fail "IMAGE_PATH 不存在或不是目录：${IMAGE_PATH}\n  请先确认微信已运行并创建该临时目录；App 侧会做同样检查。"
+mkdir -p "${MEDIA_DIR}" 2>/dev/null || fail "无法创建 MEDIA_DIR：${MEDIA_DIR}\n  请确认路径可写；入站图片获取会写入该目录。"
+[[ -d "${MEDIA_DIR}" ]] || fail "MEDIA_DIR 不是目录：${MEDIA_DIR}"
 
 if ! [[ "${PORT}" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
   fail "PORT 非法：${PORT}（必须是 1-65535 的整数）"
@@ -167,6 +177,7 @@ listen : 127.0.0.1:${PORT} (WS /ws, HTTP /send_private_msg, /send_group_msg)
 gadget : ${GADGET_ADDR}
 conf   : ${WECHAT_CONF}
 image  : ${IMAGE_PATH}
+media  : ${MEDIA_DIR}
 token  : ${token_display} ${token_note}
 send   : HOOK_SEND_DISABLED=${HOOK_SEND_DISABLED}（true=强制关闭主动发送；false=由 Hook/JSON 决定）
 log    : ${BRIDGE_DIR}/log/macos.log（轮转 100MB×10，保留 30 天）
@@ -181,4 +192,5 @@ exec "${BRIDGE_BIN}" \
   -token="${TOKEN}" \
   -conn_type=websocket \
   -image_path="${IMAGE_PATH}" \
+  -media_dir="${MEDIA_DIR}" \
   -log_level="${LOG_LEVEL}"

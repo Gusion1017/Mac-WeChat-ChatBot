@@ -316,6 +316,9 @@ struct DashboardView: View {
 private struct DashboardRecentLogsCard: View {
     @Environment(AppStore.self) private var store
     @State private var entries: [LogEntry] = []
+    /// 上次采样对应的 `store.logRevision`：revision 未变时跳过重新取尾部日志，
+    /// 空闲时不再每 750ms 做一次无意义的数组复制。
+    @State private var sampledRevision: UInt64?
 
     var body: some View {
         SectionCard(title: "最近活动", subtitle: "最新的运行日志", symbol: "text.alignleft", tint: Theme.info) {
@@ -348,16 +351,19 @@ private struct DashboardRecentLogsCard: View {
     }
 
     private func refreshLoop() async {
+        // 首次必须刷新；之后只在 revision 变化时重新采样（750ms 采样节奏保持不变）。
         refresh()
         while !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(750))
             if Task.isCancelled { return }
+            guard sampledRevision != store.logRevision else { continue }
             refresh()
         }
     }
 
     @MainActor
     private func refresh() {
+        sampledRevision = store.logRevision
         entries = Array(store.logs.suffix(7))
     }
 }

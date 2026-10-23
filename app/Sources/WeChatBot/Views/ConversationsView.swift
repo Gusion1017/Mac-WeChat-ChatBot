@@ -277,6 +277,19 @@ struct ConversationsView: View {
                         }
                     }
                 }
+                Section(L("媒体")) {
+                    let enabled = conversation.effectiveImageFetchEnabled(
+                        global: store.settings.bot.fetchImagesEnabled
+                    )
+                    Button {
+                        setImageFetch(!enabled, for: conversation)
+                    } label: {
+                        Label(
+                            L(enabled ? "获取图片（已开启）" : "获取图片（已关闭）"),
+                            systemImage: enabled ? "checkmark.circle.fill" : "photo.on.rectangle"
+                        )
+                    }
+                }
                 Section(L("会话")) {
                     Button(L(conversation.isPinned ? "取消置顶" : "置顶会话")) {
                         togglePin(conversation)
@@ -540,6 +553,18 @@ struct ConversationsView: View {
         guard var updated = store.conversations.first(where: { $0.id == conversation.id }) else { return }
         updated.isPinned.toggle()
         store.saveConversation(updated)
+    }
+
+    /// 会话级「获取图片」开关：写入覆盖值并立即持久化（nil=跟随旧全局默认）。
+    private func setImageFetch(_ enabled: Bool, for conversation: Conversation) {
+        guard var updated = store.conversations.first(where: { $0.id == conversation.id }) else { return }
+        updated.imageFetchEnabled = enabled
+        store.saveConversation(updated)
+        toast.show(
+            enabled ? "已开启此会话的图片获取" : "已关闭此会话的图片获取",
+            tone: .success,
+            symbol: enabled ? "photo.badge.checkmark" : "photo.badge.minus"
+        )
     }
 
     /// 保存用户起的会话名；空字符串表示恢复自动名称（见 `ConversationName`）。

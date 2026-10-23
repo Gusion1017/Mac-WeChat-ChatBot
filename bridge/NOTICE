@@ -16,7 +16,6 @@ onebot 的 GPL-3.0 衍生/复用构建。完整许可证见同目录 LICENSE
 
 本目录中与上游 onebot/ 完全一致、未修改的文件
 ------------------------------------------------
-msg.go
 protobuf_handler.go
 img_builder.go
 upload_builder.go
@@ -41,6 +40,8 @@ script.js
   以上游 onebot/script.js 为基础，同步了本仓库 hook/script.js 的 WeChat
   4.1.12 / 4.1.15 ABI 适配（入站消息、R3 发送、通讯录等）。该文件不是上游原版，
   修改来自 Hook 移植工作；GPL-3.0 同样适用于这些修改。
+  2026-10-23：同步入站图片获取相关修复——下载 Hook 点改为可挂载的取参指令、
+  下载请求的变长字符串补齐长度/容量、消息 finalizer 命中即标记登录稳定。
   维护方式：`hook/script.js` 是唯一事实来源，修改后运行
   `bash scripts/sync_hook_script.sh` 覆盖本文件，并用
   `bash scripts/sync_hook_script.sh --check` 校验；不要把哈希写死在文档里。
@@ -51,6 +52,7 @@ main.go
   避免写入 app bundle 破坏 ad-hoc 签名）。其余启动流程与上游一致。
   Frida ready 后调用 `restoreContactDBKeys()`，把本机受限缓存中的通讯录读取密钥用
   `setDbKeys` 回灌给 hook（无缓存/失败只记日志，密钥不打印）。
+  2026-10-23：新增 `-media_dir`（入站图片落盘根目录）与 `POST /fetch_image` 路由。
 
 logger.go
   日志文件路径改为由 `-log_file` 指定，并在启动时创建所在目录。
@@ -60,6 +62,7 @@ param.go
   `target_id` 字段（自消息方向与会话归属），以及 `pat_from_wxid` /
   `pat_chat_wxid` / `pat_target_wxid` / `pat_suffix` / `pat_template`
   （拍一拍目标判定）；同时接收 `-self_id` 覆盖值。
+  2026-10-23：`Config` 增加 `media_dir`（`-media_dir`）。
 
 incoming.go
   4.1.15 Message finalizer 入站事件归一化：把 `hook/script.js` 上报的
@@ -72,29 +75,57 @@ incoming.go
   归一化后调用 `enrichIncomingSender`，用通讯录目录补全 `sender.nickname`
   与群事件 `group_name`（目录未命中时保持原样）；拍一拍的 `pat_*` 字段
   透传（不参与 is_self 改写），仅非法 `pat_chat_wxid` 会被清空。
+  2026-10-23：推送前调用 `registerIncomingImage`，解析入站图片 XML 并登记
+  按需下载元数据，把文本占位替换成无 data 的 image 段。
+  2026-10-23：`收到入站消息事件` 日志降为 Debug（保留 `data_len`），历史回放时
+  不再每条事件写 Info 日志。
 
 worker.go
   新增 `pat` 发送分支：构建 appmsg type=62 的 `SendAppMsgReq` 并调用 hook
   `triggerSendPatMessage`；R3 模式下 `pat` 与 `text`/`reply` 一样提交后不再等待
   buf2resp。**App 已不再发送 `pat` 段**（2026-10-21 移除原生回拍），该分支保留为
   历史/实验路径，`r3PatSend` 永久保持 `false`。
+  2026-10-23：入站图片事件经过 `SendWebSocketMsg → HandleMsg` 时，legacy 的
+  `image` 分支会尝试把空 `data.text` 当 XML 解析并返回 EOF，导致整条图片事件被丢弃。
+  现在空文本/无 data 的 image 段直接跳过 legacy 下载逻辑，事件原样转发给 App。
 
 websocket.go
   新增 WS 动作 `get_contact_directory`：按 `image_path` 推导 `db_storage`，
   调 hook `getContactDirectory`，成功回 `{echo,status:"ok",data:<目录>}`，
   失败回 `{echo,status:"failed",error}`；`at` 昵称在群成员缓存未命中时
   回退通讯录昵称。另支持 `pat` 消息段。另按 gofmt 清理了空白（无语义变化）。
+  2026-10-23：事件推送不再受 `send_interval` 延迟：`SendWebSocketMsg` 里的固定
+  sleep 已删除，事件立即写 WS；`send_interval` 只约束真正发往微信的消息
+  （`worker.go SendWechatMsg`）。`发送数据` / `收到消息` 日志降为 Debug，只记
+  字节长度与最多 256 字符的截断预览（新增 `truncateForLog` / `logEventDebug`），
+  不再打印完整事件 JSON。
 
 http.go
   `/send_group_msg` 的 `at` 昵称同样在群成员缓存未命中时回退通讯录昵称
   （与 WS 发送路径共用 `resolveAtNickname`）。`pat` 消息段解析保留为历史路径
   （App 不再发送）；入站 `pat_*` 结构化字段保留给 App 做拍一拍文字/AI 回复。
   另按 gofmt 删除文件末尾空行（无语义变化）。
+  2026-10-23：新增 `fetchImageHandler`（`POST /fetch_image`，Bearer 鉴权、
+  按 `message_id` 触发入站图片下载并返回本地路径）。
+  2026-10-23：`SendHttpReq` 同步删除 `send_interval` sleep，入站事件立即 POST；
+  `发送数据` 日志降为 Debug，只记字节长度与最多 256 字符的截断预览。
+
+msg.go
+  2026-10-23：`Download()` 在某个 CDN key 的首个分片到达时记录下载代次与 key，
+  供入站图片获取在真机 key 被规范化时兜底匹配（`latestDownloadAfter`）。
+  同时把该函数的启动日志从打印 `file_id`（可能含账号）与 `cdn_url`（CDN key）
+  改为只记录媒体长度（隐私红线）。其余逻辑与上游一致。
 
 本项目新增文件（非上游代码）
 ----------------------------
 NOTICE                    本说明
 .gitignore                构建产物忽略规则
+media.go                  入站图片获取：图片 XML 解析、`pendingImageJobs` 登记、
+                          Frida `triggerDownload` 触发、下载分片等待、AES-ECB
+                          解密、图片魔数校验、`-media_dir` 落盘与 `/fetch_image`
+                          handler（2026-10-23）
+media_test.go             上述逻辑的单元测试（XML 解析、事件段替换、解密、注入式
+                          下载触发、HTTP 鉴权/参数/错误映射；不连接微信/Frida）
 http_auth_test.go         无 Gadget 场景下验证 HTTP 鉴权、参数校验与 /ws 动作的
                           httptest 测试（不启动真实端口、不连接 Frida）
 incoming_msg_test.go      `HandleMsg` 序列化保留 mentions / 自消息字段的回归测试

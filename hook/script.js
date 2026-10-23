@@ -48,7 +48,23 @@ var isReq2bufLayout415 = (req2bufLayout === "v4_1_15");
 var messageFinalizerAddr = "{{.messageFinalizerAddr}}";
 var messageVtableAddr = "{{.messageVtable}}";
 var messageFinalizerEnabled = (typeof messageFinalizerAddr === "string" && messageFinalizerAddr.indexOf("0x") === 0);
+// 入站去重窗口（2026-10-23 内存优化）。
+// 旧实现把 serverId 永久写进普通对象：长时间运行或历史回放（上滑聊天记录会重复
+// finalize 同一条消息）后，微信进程里的去重表会单调增长，属于纯内存泄漏。
+// 现在用固定长度的环形窗口覆盖：窗口外的重复由 App 侧 message_id 去重 + SQLite
+// upsert 幂等兜底，语义不变。
+var INCOMING_SEEN_LIMIT = 4096;
 var incomingMessageSeen = {};
+var incomingSeenOrder = new Array(INCOMING_SEEN_LIMIT);
+var incomingSeenCursor = 0;
+
+function rememberIncomingMessage(serverId) {
+    var evicted = incomingSeenOrder[incomingSeenCursor];
+    if (evicted) delete incomingMessageSeen[evicted];
+    incomingSeenOrder[incomingSeenCursor] = serverId;
+    incomingMessageSeen[serverId] = true;
+    incomingSeenCursor = (incomingSeenCursor + 1) % INCOMING_SEEN_LIMIT;
+}
 
 
 // 诊断日志开关: 真机排查时用 HOOK_DEBUG=1 启动 bridge/微信即可打开, 也可直接改常量。
@@ -599,7 +615,11 @@ function attachMessageFinalizer() {
                     var content = readStdStringCompat(obj.add(0x130), 4 * 1024 * 1024);
                     if (from === null || to === null || content === null) return;
                     if (!from || !to) return;
-                    if (serverId !== "0") incomingMessageSeen[serverId] = true;
+                    // 能 finalize 出真实消息 = 已登录且消息链路稳定。提前解除 CdnManager
+                    // 冷启动的「登录稳定门禁」，避免 bridge 启动 60s 内收到图片时
+                    // triggerDownload 直接返回 fail（图片获取失败）。
+                    incomingTrafficSeen = true;
+                    if (serverId !== "0") rememberIncomingMessage(serverId);
                     var group = "";
                     var user = from;
                     var text = content;
@@ -2348,7 +2368,10 @@ var r3State = {
     patX3Copy: null,
     patX4Ptr: null,
     pendingLog: null,
+    logFlushTimer: null,
     captureTicks: 0,
+    captureStartedAt: 0,
+    seedBoostUntil: 0,
     scanTicks: 0,
     nullScans: 0,
     lastScan: null,
@@ -2514,6 +2537,7 @@ function r3ConsiderTask(task) {
             " (captured=" + r3State.capturedCount + ", kept=" + r3State.clones.length + ")");
         r3State.pendingSeedPersist = clone.toString();
         r3ScheduleFlush();
+        r3ScheduleLogFlush();
         return 3;
     } catch (e) {
         r3State.lastError = "capture task: " + e.message;
@@ -2565,7 +2589,7 @@ function r3ScanMapOnce() {
 
 // slot13 捕获: 只读 onEnter(不写内存、不做 PC 跳转), 在调用线程上直接 __clone 闭包。
 // slot13 是 UI 提交的真实入口(0x46353A0 -> 0x4634710), 不在 owl coroutine 上;
-// 回调只做少量指针读取 + 一次 __clone, 日志延迟到 10ms 定时器里输出。
+// 回调只做少量指针读取 + 一次 __clone, 日志延迟到 0ms 的待发队列 flush 输出。
 // 捕获 sendpat 真实请求对象：高层构造器 0x3399258 会把 requestObject 复制进 B1
 // (0x50eb5c0)。记录其 vtable，供后续找到 New/ctor 并复用真实请求类型。
 function r3StartPatRequestCapture() {
@@ -2613,9 +2637,11 @@ function r3StartPatRequestCapture() {
                         }
                     } catch (eMem) { line += " memError=" + eMem.message; }
                     if (r3State.pendingCaptures.length < 8) r3State.pendingCaptures.push(line);
+                    r3ScheduleLogFlush();
                 } catch (e) {
                     if (r3State.pendingCaptures.length < 8) {
                         r3State.pendingCaptures.push("[capture] sendpat request inspect failed: " + e.message);
+                        r3ScheduleLogFlush();
                     }
                 }
             }
@@ -2664,9 +2690,11 @@ function r3StartPatBuilderCapture() {
                         }
                     } catch (e4) { line += " x4err=" + e4.message; }
                     if (r3State.pendingCaptures.length < 8) r3State.pendingCaptures.push(line);
+                    r3ScheduleLogFlush();
                 } catch (e) {
                     if (r3State.pendingCaptures.length < 8) {
                         r3State.pendingCaptures.push("[capture] sendpat builder inspect failed: " + e.message);
+                        r3ScheduleLogFlush();
                     }
                 }
             }
@@ -2705,7 +2733,7 @@ function r3StartSlot13Capture(quiet) {
                             if (!r3State.taskSeen[sig]) {
                                 r3State.taskSeen[sig] = true;
                                 // 不能在 slot13 onEnter 里 console.log（Frida IPC 可能与
-                                // bridge 的同步 RPC 互相等待）；交给 10ms 定时器输出。
+                                // bridge 的同步 RPC 互相等待）；交给 0ms 日志 flush 输出。
                                 if (r3State.pendingCaptures.length < 8) {
                                     var line = "[capture] slot13 task=" + task +
                                         " op=0x" + op.toString(16) + " vtable=" + vt + " url=" + url +
@@ -2717,6 +2745,7 @@ function r3StartSlot13Capture(quiet) {
                                         if (cvtMod) line += " cvtModule=" + cvtMod.name + "@0x" + cvtMod.base.toString(16);
                                     } catch (eMod) { }
                                     r3State.pendingCaptures.push(line);
+                                    r3ScheduleLogFlush();
                                     if (op === 0x351) {
                                         try {
                                             var ser = task.add(0x78);
@@ -2756,8 +2785,10 @@ function r3StartSlot13Capture(quiet) {
                                             } catch (eFields) { extra = " fields_error=" + eFields.message; }
                                             r3State.pendingCaptures.push("[capture] sendpat protoLen=" + protoLen +
                                                 " protoHex=" + protoHex + " seed=" + seedHex + extra);
+                                            r3ScheduleLogFlush();
                                         } catch (ePat) {
                                             r3State.pendingCaptures.push("[capture] sendpat inspect failed: " + ePat.message);
+                                            r3ScheduleLogFlush();
                                         }
                                     }
                                 }
@@ -2783,6 +2814,7 @@ function r3StartSlot13Capture(quiet) {
                         " (captured=" + r3State.capturedCount + ", kept=" + r3State.clones.length + ")";
                     r3State.pendingSeedPersist = clone.toString();
                     r3ScheduleFlush();
+                    r3ScheduleLogFlush();
                 } catch (e) {
                     r3State.lastError = "slot13 capture: " + e.message;
                 }
@@ -2796,41 +2828,122 @@ function r3StartSlot13Capture(quiet) {
     }
 }
 
-function r3StartCaptureLoop() {
-    if (r3State.captureTimer) return;
-    if (typeof setInterval !== "function") {
-        console.error("[!] R3: 当前 JS 运行时没有 setInterval, 闭包捕获不可用");
+// 闭包捕获调度参数（2026-10-23 能耗优化）。
+// 旧实现是常驻 setInterval(10ms)：100Hz 唤醒 + 每 tick 遍历 classA 哈希表（最多 96 个
+// 节点、每节点多次内存读）。已拿到发送句柄（seed）后仍持续运行，微信空闲时也在耗电。
+// 现在改成 one-shot 调度：
+//   - 未解析 classA：500ms 低频重试（旧实现也是 500ms 才 resolve 一次，节奏不变）；
+//   - 已解析、未拿到 seed：前 2s 10ms 快扫，10s 内 50ms，之后 250ms 兜底；
+//     发送入口缺句柄时会触发一次 5s 快扫（r3KickSeedScan）；
+//   - 拿到 seed：flush 完待发日志后彻底停止周期任务。
+// slot13 onEnter 仍会在每次真实发送时兜底捕获闭包，不依赖 map 轮询。
+var R3_CAPTURE_FAST_MS = 10;
+var R3_CAPTURE_MEDIUM_MS = 50;
+var R3_CAPTURE_IDLE_MS = 250;
+var R3_CAPTURE_FAST_WINDOW_MS = 2000;
+var R3_CAPTURE_MEDIUM_WINDOW_MS = 10000;
+var R3_RESOLVE_RETRY_MS = 500;
+var R3_SEED_BOOST_MS = 5000;
+
+// 把 hook 回调里攒下的日志 / seed 持久化一次性发出。
+// Frida 回调线程里不能同步 console.log / send（会与 bridge 同步 RPC 互等），
+// 因此回调只入队；这里由 0ms one-shot 或捕获 tick 统一输出。
+function r3FlushPendingLogs() {
+    if (r3State.pendingLog) {
+        console.log(r3State.pendingLog);
+        r3State.pendingLog = null;
+    }
+    while (r3State.pendingCaptures && r3State.pendingCaptures.length) {
+        console.log(r3State.pendingCaptures.shift());
+    }
+    while (r3State.pendingResponses && r3State.pendingResponses.length) {
+        console.log(r3State.pendingResponses.shift());
+    }
+    if (r3State.pendingSeedPersist) {
+        try {
+            send({ type: "r3_seed", pid: Process.id, seed: r3State.pendingSeedPersist });
+            console.log("[+] R3: 发送句柄已提交持久化 (seed=" + r3State.pendingSeedPersist + ")");
+        } catch (e) { }
+        r3State.pendingSeedPersist = null;
+    }
+}
+
+// 入队后立即安排一次 0ms flush，日志不再等下一次轮询 tick。
+function r3ScheduleLogFlush() {
+    if (r3State.logFlushTimer) return;
+    if (typeof setTimeout !== "function") {
+        r3FlushPendingLogs();
         return;
     }
-    var tick = 0;
-    r3State.captureTimer = setInterval(function () {
+    r3State.logFlushTimer = setTimeout(function () {
+        r3State.logFlushTimer = null;
         try {
-            tick++;
-            r3State.captureTicks++;
-            if (r3State.pendingLog) {
-                console.log(r3State.pendingLog);
-                r3State.pendingLog = null;
-            }
-            while (r3State.pendingCaptures && r3State.pendingCaptures.length) {
-                console.log(r3State.pendingCaptures.shift());
-            }
-            while (r3State.pendingResponses && r3State.pendingResponses.length) {
-                console.log(r3State.pendingResponses.shift());
-            }
-            if (r3State.pendingSeedPersist) {
-                try {
-                    send({ type: "r3_seed", pid: Process.id, seed: r3State.pendingSeedPersist });
-                    console.log("[+] R3: 发送句柄已提交持久化 (seed=" + r3State.pendingSeedPersist + ")");
-                } catch (e) { }
-                r3State.pendingSeedPersist = null;
-            }
-            if (!r3State.resolved && (tick % 50) === 0) r3TryResolve(false);
-            if (r3State.resolved) r3ScanMapOnce();
+            r3FlushPendingLogs();
         } catch (e) {
-            r3State.lastError = "capture tick: " + e.message;
+            r3State.lastError = "log flush: " + e.message;
         }
-    }, 10);
-    console.log("[+] R3: 闭包捕获已启动(10ms 轮询 classA map; 需要一次真实 newsendmsg 发送产生闭包)");
+    }, 0);
+}
+
+function r3ScheduleCaptureTick(delayMs) {
+    if (r3State.captureTimer) return;
+    if (typeof setTimeout !== "function") {
+        console.error("[!] R3: 当前 JS 运行时没有 setTimeout, 闭包捕获不可用");
+        return;
+    }
+    r3State.captureTimer = setTimeout(r3CaptureTick, delayMs);
+}
+
+function r3CaptureTick() {
+    r3State.captureTimer = null;
+    if (!r3ModeActive) return;
+    try {
+        r3State.captureTicks++;
+        r3FlushPendingLogs();
+        if (!r3State.resolved) {
+            r3TryResolve(false);
+        } else if (!r3State.seed) {
+            r3ScanMapOnce();
+        }
+    } catch (e) {
+        r3State.lastError = "capture tick: " + e.message;
+    }
+    if (!r3ModeActive) return;
+    // seed 到手：发送句柄已经持久化，没有任何周期任务需要继续；收尾后停止。
+    if (r3State.resolved && r3State.seed) {
+        try { r3FlushPendingLogs(); } catch (e) { }
+        return;
+    }
+    var delay = R3_CAPTURE_IDLE_MS;
+    if (!r3State.resolved) {
+        delay = R3_RESOLVE_RETRY_MS;
+    } else {
+        var now = Date.now();
+        if (now < r3State.seedBoostUntil) {
+            delay = R3_CAPTURE_FAST_MS;
+        } else {
+            var elapsed = now - r3State.captureStartedAt;
+            if (elapsed < R3_CAPTURE_FAST_WINDOW_MS) delay = R3_CAPTURE_FAST_MS;
+            else if (elapsed < R3_CAPTURE_MEDIUM_WINDOW_MS) delay = R3_CAPTURE_MEDIUM_MS;
+        }
+    }
+    r3ScheduleCaptureTick(delay);
+}
+
+function r3StartCaptureLoop() {
+    if (r3State.captureTimer) return;
+    r3State.captureStartedAt = Date.now();
+    r3ScheduleCaptureTick(0);
+    console.log("[+] R3: 闭包捕获已启动(按需扫描; seed 到手后停止周期任务)");
+}
+
+// 发送入口发现缺 seed 时，短暂提高扫描频率（而不是恢复 100Hz 常驻）。
+function r3KickSeedScan() {
+    if (!r3ModeActive || !r3State.cfg) return;
+    if (!r3State.cfg.closureCapture) return;
+    if (r3State.resolved && r3State.seed) return;
+    r3State.seedBoostUntil = Date.now() + R3_SEED_BOOST_MS;
+    r3ScheduleCaptureTick(0);
 }
 
 function r3Init() {
@@ -2892,6 +3005,8 @@ function r3SendTextMessage(taskId, protoHex, fromQueue) {
     if (!r3BuildFakeSerializer()) return "fail";
     if (!r3TryResolve(true)) return "fail";
     if (!r3State.seed) {
+        // 缺句柄时只临时快扫 5s（见 r3KickSeedScan），不再恢复常驻轮询。
+        r3KickSeedScan();
         if (r3State.cfg.queueUntilSeed && !fromQueue) {
             r3State.sendQueue.push({ taskId: taskId, protoHex: protoHex, ts: Date.now() });
             if (r3State.sendQueue.length > 8) r3State.sendQueue.shift();
@@ -3003,6 +3118,7 @@ function r3SendAppMsgMessage(taskId, protoHex) {
     if (!r3BuildFakeSerializer()) return "fail";
     if (!r3TryResolve(true)) return "fail";
     if (!r3State.seed) {
+        r3KickSeedScan();
         console.error("[!] R3 appmsg: 尚无发送句柄(种子闭包); 请先在本机微信手动发一条文本。");
         return "fail";
     }
@@ -3210,6 +3326,13 @@ function r3RestoreSeed(pid, seedHex) {
 }
 
 function r3Status() {
+    // captureMode: off=未启动 / seeded=已拿到句柄且周期任务停止 / resolving|scanning=按需轮询中。
+    var captureMode = "off";
+    if (r3State.seed) {
+        captureMode = "seeded";
+    } else if (r3State.captureTimer) {
+        captureMode = r3State.resolved ? "scanning" : "resolving";
+    }
     return JSON.stringify({
         mode: REQ2BUF_SEND_MODE,
         active: r3ModeActive,
@@ -3217,6 +3340,7 @@ function r3Status() {
         classA: r3State.classA ? r3State.classA.toString() : null,
         keptClones: r3State.clones.length,
         captured: r3State.capturedCount,
+        captureMode: captureMode,
         captureTimer: !!r3State.captureTimer,
         slot13Hooked: r3State.slot13Hooked,
         slot13Calls: r3State.slot13Calls,
@@ -4042,6 +4166,7 @@ function setReceiver() {
                 if (r3State.pendingResponses.length < 8) {
                     r3State.pendingResponses.push("[+] R3 " + r3Sent.label + " response: taskId=" +
                         respTaskId + " len=" + x2 + " head=" + head.join(","));
+                    r3ScheduleLogFlush();
                 }
                 return;
             }
@@ -4352,16 +4477,24 @@ function triggerDownload(receiver, cdnUrl, aesKey, filePath, fileType) {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
 
-    patchString(fileIdAddr, receiver + "_" + String(Math.floor(Date.now() / 1000)) + "_" + Math.floor(Math.random() * 1001) + "_1");
-    patchString(fileCdnUrlAddr, cdnUrl)
-    patchString(downloadAesKeyAddr, aesKey)
-    patchString(filePathAddr, filePath);
-
+    // 4.2.0.5 / 4.1.15 的下载任务用 libc++ std::string（对象 0x18 字节：
+    // +0 数据指针、+8 长度、+0x10 容量且最高位=long 标记）。只写指针而沿用
+    // 模板里的旧长度会把较长的 CDN file key 截断（194 → 178 字符），任务因此
+    // 无效、回调不触发。这里按实际值写长度与容量。
+    var fileIdValue = receiver + "_" + String(Math.floor(Date.now() / 1000)) + "_" + Math.floor(Math.random() * 1001) + "_1";
+    // 先铺模板，再写字符串对象（模板会覆盖 0x40~0xA8）。
     downloadFileX1.writeByteArray(downloadMediaPayload);
-    downloadFileX1.add(0x40).writePointer(fileIdAddr);
-    downloadFileX1.add(0x58).writePointer(fileCdnUrlAddr);
-    downloadFileX1.add(0x70).writePointer(downloadAesKeyAddr);
-    downloadFileX1.add(0x88).writePointer(filePathAddr);
+    function patchDownloadString(objectOffset, dataAddr, value) {
+        patchString(dataAddr, value);
+        downloadFileX1.add(objectOffset).writePointer(dataAddr);
+        downloadFileX1.add(objectOffset + 8).writeU64(value.length);
+        downloadFileX1.add(objectOffset + 0x10).writeU64(uint64("0x8000000000000000").add(value.length + 1));
+    }
+    patchDownloadString(0x40, fileIdAddr, fileIdValue);
+    patchDownloadString(0x58, fileCdnUrlAddr, cdnUrl);
+    patchDownloadString(0x70, downloadAesKeyAddr, aesKey);
+    patchDownloadString(0x88, filePathAddr, filePath);
+
     downloadFileX1.add(0xa0).writeU32(fileType);
 
     const startDwMedia = new NativeFunction(startDownloadMedia, 'int64', ['pointer', 'pointer']);
