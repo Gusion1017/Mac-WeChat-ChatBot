@@ -59,9 +59,9 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 		} else if (v.Type == "voice" || v.Type == "record") && v.Data != nil && strings.TrimSpace(v.Data.PCM16K) != "" {
-			// 语音发送契约（_local/voice-impl-spec.md §3.3）：优先复用
+			// 语音发送契约（docs/voice.md）：优先复用
 			// /send_private_msg 的 voice 段，data.pcm16k 是 base64 的 16k 单声道 s16le
-			// PCM，bridge 用 go-silk 编码 Tencent SILK（不依赖 ffmpeg/pilk）。
+			// PCM，bridge 使用 SILK SDK 编码 Tencent SILK（不依赖 ffmpeg/pilk）。
 			// Hook 未支持语音发送时返回 {"ok":false,"error":"voice_send_unsupported"}，
 			// App 据此自动降级为文字；语音段同步处理，不经过发送 worker。
 			durationMs, voiceErr := sendVoicePCM16k(req.UserID, req.GroupID, v.Data.PCM16K, v.Data.DurationMs)
