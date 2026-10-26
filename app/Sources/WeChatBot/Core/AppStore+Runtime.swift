@@ -99,6 +99,10 @@ final class RuntimeCoordinator {
     private var voiceTranscriptionAttempted: Set<String> = []
     /// 上一次声明的「语音转写总开关」，用于设置关闭时取消未完成的获取请求。
     private var lastVoiceTranscriptionEnabled: Bool?
+    /// 本次 App 会话是否已因句柄缺失自动弹过「捕获发送句柄」引导。
+    private var didAutoPromptVoiceSetup = false
+    /// 运行时启动后等待 hook 就绪的句柄检测任务（bridge 刚启动时 /voice_status 可能暂不可用）。
+    private var voiceSetupWatchTask: Task<Void, Never>?
     private var memoryMaintenanceInFlight: Set<String> = []
     private var lastSchedulerTasks: [ScheduledTask] = []
     /// 最近一次可用的通讯录目录（内存副本）；数据库缓存由 `MemoryStore` 负责。
@@ -209,6 +213,7 @@ final class RuntimeCoordinator {
         await ensureFirstRunDefaults()
         await loadPersistedState()
         await loadStats()
+        autoStartCosyVoiceIfNeeded()
         log(.debug, "Runtime", "本地状态已加载，正在检测微信与 Hook 状态…")
         await refreshStatus()
         bootstrapped = true
@@ -738,7 +743,7 @@ final class RuntimeCoordinator {
 
     // MARK: Start / stop
 
-    /// 4.1.15.55 / 4.2.0.5 使用 R3 原生文本发送（由 App 设置开启）；
+    /// 4.1.15.55 / 4.2.0.5 / 4.2.0.9 使用 R3 原生文本发送（由 App 设置开启）；
     /// 4.1.12 及更早版本保持 legacy 发送路径，不做任何覆盖。
     /// 首次使用 R3 前需要在本机微信手动发一条消息以捕获发送句柄。
     /// 刷新 bridge `/voice_status`（登录稳定倒计时、文本/语音句柄、CdnManager）。
@@ -761,6 +766,43 @@ final class RuntimeCoordinator {
         }
     }
 
+    /// 运行时启动后检查一次语音发送句柄：已开启语音回复但缺少文本/语音句柄时，
+    /// 自动弹出捕获引导（每个 App 会话最多一次，避免轮询/重启反复打扰）。
+    private func promptVoiceSetupIfNeeded() {
+        guard !didAutoPromptVoiceSetup,
+              store.settings.bot.voiceReplyEnabled,
+              store.voiceRuntimeStatus.needsHandleCapturePromptOnStartup
+        else { return }
+        didAutoPromptVoiceSetup = true
+        store.isVoiceSetupPromptPresented = true
+        log(.info, "Voice", "语音回复已开启，但发送句柄缺失；已弹出捕获引导")
+    }
+
+    /// bridge 刚启动时 hook 可能尚未连接，`/voice_status` 会短暂不可用；
+    /// 这里在后台等待它就绪后再判断一次，避免「启动时检测」因为太早而永远不触发。
+    private func startVoiceSetupWatchIfNeeded() {
+        guard store.settings.bot.voiceReplyEnabled, !didAutoPromptVoiceSetup else { return }
+        voiceSetupWatchTask?.cancel()
+        voiceSetupWatchTask = Task { [weak self] in
+            // 最多约 60 秒（20 × 3s）：微信登录/加载较慢时也能覆盖。
+            for _ in 0..<20 {
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled, let self else { return }
+                guard self.store.settings.bot.voiceReplyEnabled else { return }
+                await self.refreshVoiceStatus()
+                let status = self.store.voiceRuntimeStatus
+                if status.needsHandleCapturePromptOnStartup {
+                    self.promptVoiceSetupIfNeeded()
+                    return
+                }
+                if status.available {
+                    // hook 已响应：句柄齐全，或 R3/版本不满足（另有状态文案），无需继续等待。
+                    return
+                }
+            }
+        }
+    }
+
     private func nativeSendConfigOverrides() async -> [String: String] {
         let path = store.settings.hook.wechatPath
         let installation = await Task.detached(priority: .userInitiated) {
@@ -772,7 +814,7 @@ final class RuntimeCoordinator {
         )
         guard isR3Supported else { return [:] }
         if store.settings.hook.enableNativeSend {
-            log(.info, "Hook", "微信 4.1.15.55 / 4.2.0.5：启用 R3 原生发送（首次使用前需在本机微信手动发一条消息以捕获发送句柄）")
+            log(.info, "Hook", "微信 4.1.15.55 / 4.2.0.5 / 4.2.0.9：启用 R3 原生发送（首次使用前需在本机微信手动发一条消息以捕获发送句柄）")
             var overrides = [
                 "enableSend": "true",
                 "req2bufSendMode": "r3",
@@ -784,7 +826,7 @@ final class RuntimeCoordinator {
             ]
             return overrides
         } else {
-            log(.warning, "Hook", "微信 4.1.15.55 / 4.2.0.5：R3 原生发送已关闭，主动发送不可用（接收不受影响）")
+            log(.warning, "Hook", "微信 4.1.15.55 / 4.2.0.5 / 4.2.0.9：R3 原生发送已关闭，主动发送不可用（接收不受影响）")
             return [
                 "enableSend": "false",
                 "req2bufSendMode": "off",
@@ -875,6 +917,8 @@ final class RuntimeCoordinator {
         oneBotClient = client
         startedOneBotConfiguration = configuration
         await refreshVoiceStatus()
+        promptVoiceSetupIfNeeded()
+        startVoiceSetupWatchIfNeeded()
         store.imageFetcher.configure(
             fetch: { [weak self] bridgeMessageID in
                 guard let client = self?.oneBotClient else { throw OneBotError.notRunning }
@@ -934,6 +978,8 @@ final class RuntimeCoordinator {
     }
 
     func stopRuntime() async {
+        voiceSetupWatchTask?.cancel()
+        voiceSetupWatchTask = nil
         oneBotClient?.stop()
         oneBotClient = nil
         startedOneBotConfiguration = nil
@@ -1115,7 +1161,6 @@ final class RuntimeCoordinator {
         scheduleVoiceFetchIfNeeded(
             event: event,
             message: chatMessage,
-            conversation: conversation,
             receivedAt: receivedAt
         )
 
@@ -1142,7 +1187,7 @@ final class RuntimeCoordinator {
         // 语音消息：自动回复必须等转写完成（≤15s）；超时按「转写失败」继续回复，
         // 不丢消息。用最新消息副本做规则判定，关键词触发才能看到转写文本。
         var replyMessage = chatMessage
-        if chatMessage.kind == .voice, voiceTranscriptionEnabled(for: conversation) {
+        if chatMessage.kind == .voice, store.settings.bot.voiceTranscriptionEnabled {
             replyMessage = await waitForVoiceReplyMessage(
                 conversationID: conversationID,
                 messageID: chatMessage.id,
@@ -1268,7 +1313,7 @@ final class RuntimeCoordinator {
             // 语音时长来自 bridge 段（可能为空）；转写状态先置 pending，
             // 关闭转写时直接 disabled，气泡不显示「转写中」。
             message.voiceDurationMs = event.voiceDurationMs
-            let enabled = voiceTranscriptionEnabled(for: conversation)
+            let enabled = store.settings.bot.voiceTranscriptionEnabled
             // 自己发出的语音不转写（不触发自动回复，也没有上下文价值）；
             // 历史回放的语音不自动下载，标失败让用户可在气泡里手动重试。
             if !event.isSelf, enabled, !isStaleReplay {
@@ -1351,32 +1396,16 @@ final class RuntimeCoordinator {
     /// 自动回复等待语音转写完成的预算（spec §2.3：≤15s，超时按转写失败继续）。
     private static let voiceTranscriptionWait: TimeInterval = 15
 
-    /// 该会话生效的语音转写开关：会话覆盖 → 全局设置。
-    private func voiceTranscriptionEnabled(for conversation: Conversation) -> Bool {
-        conversation.effectiveVoiceTranscriptionEnabled(
-            global: store.settings.bot.voiceTranscriptionEnabled
-        )
-    }
-
-    /// 按会话 ID 取生效的语音转写开关；会话已删除/未加载时退回全局设置。
-    private func voiceTranscriptionEnabled(conversationID: String) -> Bool {
-        guard let conversation = store.conversations.first(where: { $0.id == conversationID }) else {
-            return store.settings.bot.voiceTranscriptionEnabled
-        }
-        return voiceTranscriptionEnabled(for: conversation)
-    }
-
     /// 消息入库后决定是否向 bridge 请求语音音频。门槛见 `VoiceFetchPolicy`：
-    /// 该会话生效的转写开关、非自消息、kind=voice、无本地音频、message_id 非空；
+    /// 全局转写开关、非自消息、kind=voice、无本地音频、message_id 非空；
     /// 另加与自动回复相同的历史回放门禁（打开旧会话重放历史不触发批量下载）。
     private func scheduleVoiceFetchIfNeeded(
         event: OneBotEvent,
         message: ChatMessage,
-        conversation: Conversation,
         receivedAt: Date
     ) {
         guard receivedAt.timeIntervalSince(event.timestamp) <= Self.staleReplyWindow else { return }
-        let enabled = voiceTranscriptionEnabled(for: conversation)
+        let enabled = store.settings.bot.voiceTranscriptionEnabled
         guard VoiceFetchPolicy.shouldFetch(
             kind: message.kind,
             enabled: enabled,
@@ -1479,9 +1508,7 @@ final class RuntimeCoordinator {
             return
         }
         let conversation = store.conversations.first(where: { $0.id == conversationID })
-        let enabled = conversation?.effectiveVoiceTranscriptionEnabled(
-            global: store.settings.bot.voiceTranscriptionEnabled
-        ) ?? store.settings.bot.voiceTranscriptionEnabled
+        let enabled = store.settings.bot.voiceTranscriptionEnabled
         guard enabled else {
             pendingVoiceTranscriptionIDs.remove(messageID)
             _ = await updateVoiceMessage(conversationID: conversationID, messageID: messageID) {
@@ -1635,7 +1662,7 @@ final class RuntimeCoordinator {
             transcript = refreshed.flatMap(ChatEngine.normalizedVoiceTranscript)
         }
 
-        let enabled = voiceTranscriptionEnabled(for: conversation)
+        let enabled = store.settings.bot.voiceTranscriptionEnabled
         guard enabled || transcript != nil else { return nil }
         return VoiceQuoteText.quotedVoiceNote(transcript: transcript)
     }
@@ -1725,9 +1752,9 @@ final class RuntimeCoordinator {
             await transcribeVoiceMessage(conversationID: conversationID, messageID: messageID, force: true)
             return
         }
-        let enabled = voiceTranscriptionEnabled(conversationID: conversationID)
+        let enabled = store.settings.bot.voiceTranscriptionEnabled
         guard enabled else {
-            log(.debug, "Voice", "重试跳过：该会话已关闭语音转写（\(conversationID)）")
+            log(.debug, "Voice", "重试跳过：语音转写已关闭（\(conversationID)）")
             return
         }
         _ = await updateVoiceMessage(conversationID: conversationID, messageID: messageID) {
@@ -2394,8 +2421,7 @@ final class RuntimeCoordinator {
 
         // 语音回复决策：只在「单段 + 无 @ 提及」时尝试，避免多段语音刷屏或丢失群 @。
         let voiceSettings = store.settings.bot.voice ?? VoiceSettings()
-        // 会话级覆盖优先：全局关闭但该会话显式开启时仍要尝试语音回复。
-        let voiceConfigured = conversation.effectiveVoiceReplyEnabled(global: voiceSettings.replyEnabled)
+        let voiceConfigured = voiceSettings.replyEnabled
         var runtimeReady = false
         if voiceConfigured {
             await refreshVoiceStatus()
@@ -2403,10 +2429,9 @@ final class RuntimeCoordinator {
         }
         let voiceDecision = decideVoiceReply(VoiceReplyContext(
             global: voiceSettings,
-            conversation: conversation,
             incomingWasVoice: incomingWasVoice,
             replyText: plan.fullText,
-            modelsReady: VoiceSynthesisService.isReady(voiceSettings.engine),
+            modelsReady: voiceModelsReady(voiceSettings),
             runtimeReady: runtimeReady,
             rng: Double.random(in: 0..<1)
         ))
@@ -2632,22 +2657,21 @@ final class RuntimeCoordinator {
 
     /// 尝试把一段 AI 回复合成语音并通过 bridge 发送。
     ///
+    /// 尝试把一段 AI 回复合成语音并通过 bridge 发送。
+    ///
+    /// 引擎回退遵循 `VoiceFallbackPlanner`：
+    /// - `.cosyVoice`：服务就绪 → CosyVoice3；合成/服务失败 → Kokoro；Kokoro 也失败 → 文字；
+    /// - `.kokoro` / `.zipvoiceClone`：保持原行为（合成失败即文字）。
+    ///
     /// 返回 `false` 时调用方必须降级为文字（spec §3.3）：模型未就绪、合成失败、
     /// bridge 返回 `voice_send_unsupported`（4.2 Hook 尚未支持）都走这一条。
     /// 只有真正发送成功才落一条 outgoing 语音消息，避免出现「本地已发、微信没收到」。
-    ///
-    /// `modelDownloadConsent` 只约束**下载**入口（`VoiceModelStore.download`），
-    /// 不是使用门槛：模型已就绪时必须能直接合成，否则已下载模型的用户会永远只发文字。
     @discardableResult
     private func sendOutgoingVoice(
         _ text: String,
         conversation: Conversation,
         settings: VoiceSettings
     ) async -> Bool {
-        guard VoiceSynthesisService.isReady(settings.engine) else {
-            log(.debug, "Voice", "跳过语音回复：语音模型未就绪（\(settings.engine.rawValue)）")
-            return false
-        }
         if !store.voiceRuntimeStatus.canSendVoice() {
             await refreshVoiceStatus()
             guard store.voiceRuntimeStatus.canSendVoice() else {
@@ -2655,22 +2679,63 @@ final class RuntimeCoordinator {
                 return false
             }
         }
-        let voice = VoiceSelection(settings: settings)
-        if voice.engine == .zipvoiceClone,
-           (voice.cloneID ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            log(.debug, "Voice", "跳过语音回复：克隆引擎未选择音色档案")
-            return false
+
+        let cosyVoiceSelected = settings.engine == .cosyVoice && settings.hasCosyVoiceVoice
+        // 没有选择音色时不做 CosyVoice 健康探测（启动/合成都不可用，直接按回退计划走）。
+        let cosyVoice: (installed: Bool, serviceReady: Bool, endpoint: URL) =
+            cosyVoiceSelected
+                ? await cosyVoiceAvailability(settings)
+                : (false, false, settings.effectiveCosyVoiceEndpoint)
+        if settings.engine == .cosyVoice, !settings.hasCosyVoiceVoice {
+            log(.debug, "Voice", "未选择 CosyVoice3 音色，本条按回退计划处理")
         }
-        let synthesis: SynthesisResult
-        do {
-            synthesis = try await store.voiceSynthesis.synthesize(
-                text: text,
-                voice: voice,
-                maxSeconds: settings.effectiveMaxVoiceSeconds,
-                allowsTruncation: settings.overLimit == .truncate
-            )
-        } catch {
-            log(.warning, "Voice", "语音合成失败：\(error.localizedDescription)；本条改发文字")
+        // 服务未运行且允许自动启动：后台拉起（首次加载模型慢，不阻塞本条回复）。
+        // 未选音色或音色库为空时不起服务（App 不内置任何音色）。
+        if settings.engine == .cosyVoice, cosyVoice.installed, !cosyVoice.serviceReady,
+           settings.cosyVoiceAutoStart, cosyVoiceSelected {
+            log(.info, "Voice", "CosyVoice3 服务未运行，已在后台启动；本条按回退计划处理")
+            startCosyVoiceInBackground(endpoint: cosyVoice.endpoint)
+        }
+        if settings.engine == .cosyVoice {
+            await syncCosyVoiceEndpoint(settings)
+        }
+
+        let attempts = VoiceFallbackPlanner.attempts(
+            for: settings.engine,
+            cosyVoiceInstalled: cosyVoice.installed,
+            cosyVoiceServiceReady: cosyVoice.serviceReady && cosyVoiceSelected,
+            kokoroReady: VoiceSynthesisService.isReady(.kokoro),
+            zipvoiceReady: VoiceSynthesisService.isReady(.zipvoiceClone)
+        )
+        var synthesis: SynthesisResult?
+        var lastFailure: String?
+        for (index, attempt) in attempts.enumerated() {
+            guard attempt != .text else { break }
+            let selection = voiceSelection(for: attempt, settings: settings)
+            do {
+                synthesis = try await store.voiceSynthesis.synthesize(
+                    text: text,
+                    voice: selection,
+                    maxSeconds: settings.effectiveMaxVoiceSeconds,
+                    allowsTruncation: settings.overLimit == .truncate
+                )
+                if index > 0 {
+                    log(.info, "Voice", "已回退 \(voiceEngineLabel(attempt)) 发送语音")
+                }
+            } catch {
+                lastFailure = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+                log(.warning, "Voice",
+                    "\(voiceEngineLabel(attempt)) 语音合成失败：\(lastFailure ?? "未知错误")")
+                continue
+            }
+            if synthesis != nil { break }
+        }
+        guard let synthesis else {
+            let reason = lastFailure
+                ?? (settings.engine == .cosyVoice && !cosyVoice.installed
+                    ? "CosyVoice3 尚未安装"
+                    : "没有可用的语音引擎")
+            log(.warning, "Voice", "语音合成不可用（\(reason)）；本条改发文字")
             return false
         }
         guard let client = oneBotClient else {
@@ -2719,6 +2784,126 @@ final class RuntimeCoordinator {
             // 典型：voice_send_unsupported（4.2 Hook 未支持）；不重试语音，直接降级文字。
             log(.info, "Voice", "语音发送未成功（\(error.localizedDescription)）；本条改发文字")
             return false
+        }
+    }
+
+    /// 出站语音的模型就绪判定：CosyVoice3 允许「服务未起但 Kokoro 可用」，
+    /// 这样回复决策仍会尝试语音（实际发送时回退 Kokoro），而不是直接发文字。
+    private func voiceModelsReady(_ settings: VoiceSettings) -> Bool {
+        switch settings.engine {
+        case .cosyVoice:
+            guard CosyVoiceInstallation.isInstalled() else { return false }
+            // App 不内置音色：没选音色就没有可合成的 CosyVoice 音色。
+            guard settings.hasCosyVoiceVoice else { return false }
+            return CosyVoiceRuntime.shared.isServiceReadySnapshot
+                || VoiceSynthesisService.isReady(.kokoro)
+        case .kokoro, .zipvoiceClone:
+            return VoiceSynthesisService.isReady(settings.engine)
+        }
+    }
+
+    /// 一次 CosyVoice3 可用性探测（安装状态 + 服务健康）。
+    private func cosyVoiceAvailability(
+        _ settings: VoiceSettings
+    ) async -> (installed: Bool, serviceReady: Bool, endpoint: URL) {
+        let installed = CosyVoiceInstallation.isInstalled()
+        let endpoint = settings.effectiveCosyVoiceEndpoint
+        guard installed else { return (false, false, endpoint) }
+        let state = await CosyVoiceRuntime.shared.quickStatus(endpoint: endpoint)
+        return (true, state.isRunning, endpoint)
+    }
+
+    private func voiceSelection(
+        for attempt: VoiceSynthesisAttempt,
+        settings: VoiceSettings
+    ) -> VoiceSelection {
+        switch attempt {
+        case .cosyVoice:
+            return VoiceSelection(
+                engine: .cosyVoice,
+                speed: settings.effectiveCosyVoiceSpeed,
+                cosyVoiceVoiceID: settings.effectiveCosyVoiceVoiceID
+            )
+        case .kokoro:
+            return VoiceSelection(
+                engine: .kokoro,
+                kokoroSpeakerID: settings.effectiveKokoroSpeakerID,
+                speed: settings.effectiveKokoroSpeed
+            )
+        case .zipvoiceClone:
+            return VoiceSelection(
+                engine: .zipvoiceClone,
+                speed: settings.effectiveKokoroSpeed,
+                cloneID: settings.cloneID
+            )
+        case .text:
+            return VoiceSelection(engine: .kokoro)
+        }
+    }
+
+    private func voiceEngineLabel(_ attempt: VoiceSynthesisAttempt) -> String {
+        switch attempt {
+        case .cosyVoice: return "CosyVoice3"
+        case .kokoro: return "Kokoro"
+        case .zipvoiceClone: return "ZipVoice 克隆"
+        case .text: return "文字"
+        }
+    }
+
+    /// 本机音色库是否非空（空音色时 App 不启动服务，提示用户先添加音色）。
+    private func hasCosyVoiceVoices() async -> Bool {
+        let voices = (try? await CosyVoiceVoiceStore.shared.list()) ?? []
+        return !voices.isEmpty
+    }
+
+    /// 把设置里的服务地址同步给 `CosyVoiceClient.shared`（Lead 的 `.cosyVoice` dispatch 用它合成）。
+    /// 非主线程做文件/网络以外的写配置，开销可忽略；地址未变时直接返回。
+    func syncCosyVoiceEndpoint(_ settings: VoiceSettings) async {
+        let endpoint = settings.effectiveCosyVoiceEndpoint
+        let current = await CosyVoiceClient.shared.currentConfiguration().endpoint
+        guard current != endpoint else { return }
+        await CosyVoiceClient.shared.updateEndpoint(endpoint)
+    }
+
+    /// 后台启动 CosyVoice3 服务（失败只记日志，不影响文字回复）。
+    private func startCosyVoiceInBackground(endpoint: URL) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard await self.hasCosyVoiceVoices() else {
+                self.log(.info, "Voice", "未添加任何 CosyVoice3 音色，跳过自动启动服务")
+                return
+            }
+            do {
+                _ = try await CosyVoiceRuntime.shared.start(endpoint: endpoint)
+                self.log(.info, "Voice", "CosyVoice3 服务已就绪")
+            } catch {
+                self.log(.info, "Voice",
+                    "CosyVoice3 自动启动未完成：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// App 启动时按设置自动拉起 CosyVoice3 服务（安装完整且开启自动启动时）。
+    private func autoStartCosyVoiceIfNeeded() {
+        let voice = store.settings.bot.voiceSettings
+        guard voice.engine == .cosyVoice,
+              voice.cosyVoiceAutoStart,
+              CosyVoiceInstallation.isInstalled() else { return }
+        let endpoint = voice.effectiveCosyVoiceEndpoint
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard await self.hasCosyVoiceVoices() else {
+                self.log(.info, "Voice", "未添加任何 CosyVoice3 音色，跳过自动启动服务")
+                return
+            }
+            await self.syncCosyVoiceEndpoint(voice)
+            do {
+                _ = try await CosyVoiceRuntime.shared.start(endpoint: endpoint)
+                self.log(.info, "Voice", "CosyVoice3 服务已就绪")
+            } catch {
+                self.log(.info, "Voice",
+                    "CosyVoice3 自动启动未完成：\(error.localizedDescription)")
+            }
         }
     }
 
@@ -2888,6 +3073,12 @@ final class RuntimeCoordinator {
     func settingsDidChange() {
         guard bootstrapped || bootstrapping else { return }
         hookManager.configure(wechatPath: store.settings.hook.wechatPath)
+        if store.settings.bot.voiceSettings.engine == .cosyVoice {
+            let voice = store.settings.bot.voiceSettings
+            Task { @MainActor [weak self] in
+                await self?.syncCosyVoiceEndpoint(voice)
+            }
+        }
         // 语音转写总开关关闭：取消未完成的语音获取（已在途的转写完成后仍会落库，
         // 只是不再发起新的 bridge 下载）。与图片开关的行为保持一致。
         let voiceEnabled = store.settings.bot.voiceTranscriptionEnabled

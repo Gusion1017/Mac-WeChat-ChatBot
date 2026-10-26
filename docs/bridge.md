@@ -143,7 +143,7 @@ App 启动时会把 `-log_file` 指向 `~/Library/Logs/WeChatAI/bridge/macos.log
    Gadget 监听 `127.0.0.1:27042`（端口可在 App 设置中改，脚本用 `--gadget-addr` 或
    `GADGET_ADDR`）；
 2. 微信已启动，且 Gadget 已启动；
-3. Hook 版本 JSON 存在，默认 `hook/versions/4_2_0_5_mac.json`；
+3. Hook 版本 JSON 存在，默认 `hook/versions/4_2_0_9_mac.json`；
 4. 微信图片临时目录存在（`.../xwechat_files/<wxid>/temp/<...>/Img/`），
    App 侧会探测/创建；脚本会检查；
 5. `bridge/onebot` 与 `bridge/script.js` 已构建/同目录存在。
@@ -160,7 +160,7 @@ scripts/run_bridge.sh [选项]
 
 | 环境变量 | 命令行参数 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `WECHAT_CONF` | `--wechat-conf` | `hook/versions/4_2_0_5_mac.json` | Hook 版本 JSON |
+| `WECHAT_CONF` | `--wechat-conf` | `hook/versions/4_2_0_9_mac.json` | Hook 版本 JSON |
 | `PORT` | `--port` | `58080` | HTTP/WS 监听端口；始终只绑定 `127.0.0.1` |
 | `TOKEN` | `--token` | 随机生成 64 字符 hex | OneBot token；HTTP 鉴权用 |
 | `IMAGE_PATH` | `--image-path` | 无（**必填**） | 微信图片/语音/视频/文件临时目录，必须已存在 |
@@ -181,7 +181,7 @@ IMAGE_PATH="$HOME/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwecha
 scripts/run_bridge.sh \
   --port 58081 \
   --token "$(openssl rand -hex 32)" \
-  --wechat-conf hook/versions/4_2_0_5_mac.json \
+  --wechat-conf hook/versions/4_2_0_9_mac.json \
   --image-path "/Users/me/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/wxid_x/temp/2026-10/Img"
 ```
 
@@ -192,7 +192,7 @@ scripts/run_bridge.sh \
 bridge/onebot \
   -type=gadget \
   -gadget_addr=127.0.0.1:27042 \
-  -wechat_conf=/path/to/hook/versions/4_2_0_5_mac.json \
+  -wechat_conf=/path/to/hook/versions/4_2_0_9_mac.json \
   -receive_host=127.0.0.1:58080 \
   -token=<token> \
   -conn_type=websocket \
@@ -250,7 +250,7 @@ bridge/onebot \
   `face`。legacy `HandleMsg` 路径的媒体事件在推送前会同步下载/落盘，失败时整条事件
   可能被丢弃（见 §6）。
 - 事件在 `HandleMsg` 中同步处理：图片/文件/视频/语音会先下载到 `image_path`
-  再推送，因此大文件会拖慢该条事件（仅 legacy protobuf 路径；4.1.15 / 4.2.0.5 的
+  再推送，因此大文件会拖慢该条事件（仅 legacy protobuf 路径；4.1.15 / 4.2.0.5 / 4.2.0.9 的
   Message finalizer 入站路径不再同步下载，见下一条）。
 - **入站图片（4.1.15 / 4.2.0.5，2026-10-23）**：hook 只给文本占位 `[图片]`，图片 XML
   在 `raw_message`。`incoming.go` 的 `registerIncomingImage` 在推送前解析
@@ -336,7 +336,7 @@ Content-Type: application/json
 
 
 > **语音接口（2026-10-26）**：`POST /fetch_voice`、`POST /send_voice` 与 `GET /voice_status` 的完整契约、
-> 状态与 4.2.0.5 限制见 [`voice.md`](voice.md)。入站下载默认 `fileType=15` 已真机验证；
+> 状态与 4.2.0.9 / 4.2.0.5 限制见 [`voice.md`](voice.md)。入站下载默认 `fileType=15` 已真机验证；
 > 出站仍存在“气泡可见但音频无声”的上传关联问题，默认 `r3VoiceSend=false`，App 自动降级文字；
 > `/voice_status` 提供登录稳定倒计时与句柄状态。
 

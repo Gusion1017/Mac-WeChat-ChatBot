@@ -64,16 +64,29 @@ enum VoiceTextSanitizer {
         // 6. emoji、零宽/控制字符。
         text = removeEmojiAndInvisibles(text)
 
-        // 7. 空白折叠。
+        // 7. 朗读稿：微信 @ 前缀、破折号、百分号/货币（在 FST 之前）。
+        //    `@` 和 em dash 都是 OOV，会被 TTS 静默丢掉；`%`/`¥` 不会被
+        //    number-zh.fst 处理，必须在进 FST 前转成中文读法。
+        text = replacing(
+            text,
+            #"(?m)^\s*@[^\s@，。！？、,;:；：]{1,32}(?=\s|[，。！？、,;:；：]|$)\s*[，。！？、,;:；：]?\s*"#,
+            with: "")
+        text = replacing(text, #"[—–]{1,2}"#, with: "，")
+        text = replacing(text, #"(\d+(?:\.\d+)?)\s*[%％]"#, with: "百分之$1")
+        text = replacing(text, #"[¥￥]\s*(\d+(?:\.\d+)?)"#, with: "$1元")
+        text = replacing(text, #"\$\s*(\d+(?:\.\d+)?)"#, with: "$1美元")
+        text = replacing(text, #"#(?=\S)"#, with: "")
+
+        // 8. 空白折叠。
         text = replacing(text, "[ \t\u{00A0}\u{3000}]+", with: " ")
         text = replacing(text, #"\n{3,}"#, with: "\n\n")
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // 8. 缩略词小词典（词边界匹配，避免替换到单词内部）。
+        // 9. 缩略词小词典（词边界匹配，避免替换到单词内部）。
         let dictionary = abbreviations ?? defaultAbbreviations
         text = applyAbbreviations(text, dictionary: dictionary)
 
-        // 9. 长度上限。
+        // 10. 长度上限。
         if text.count > maxInputCharacters {
             text = String(text.prefix(maxInputCharacters))
         }

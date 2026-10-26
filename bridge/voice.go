@@ -32,8 +32,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/aes"
-	"crypto/md5"
 	"crypto/hmac"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -91,9 +91,10 @@ const (
 	// voiceDurationToleranceMs 是「解码时长明显短于 voicelength」的容差，用于识别半截数据。
 	voiceDurationToleranceMs = 600
 
-	// maxVoiceSendPCMBytes / minVoiceSendPCMBytes 限制 App 传入的 pcm16k 大小。
-	maxVoiceSendPCMBytes = voiceSampleRate * 2 * 120 // 120s
-	minVoiceSendPCMBytes = voiceSampleRate * 2 / 50  // 20ms
+	// maxVoiceSendPCMBytes / minVoiceSendPCMBytes 限制 App 传入的 PCM 大小。
+	// 24 kHz 是 Kokoro/CosyVoice 的原生输出，按 24k×120s 放宽上限。
+	maxVoiceSendPCMBytes = 24000 * 2 * 120          // 120s @24k
+	minVoiceSendPCMBytes = voiceSampleRate * 2 / 50 // 20ms @16k
 
 	// envVoiceFileType 覆盖 /fetch_voice 的下载 fileType 尝试列表（默认 15=语音）。
 	envVoiceFileType = "WECHATAI_VOICE_FILE_TYPE"
@@ -1266,11 +1267,13 @@ var triggerVoiceUpload = func(targetID, voicePath, payloadHex, audioHex string, 
 	return fmt.Sprint(ret), nil
 }
 
-// decodeVoicePCM16kBase64 解码 App 传入的 pcm16k（base64 的 16k 单声道 s16le）。
-func decodeVoicePCM16kBase64(encoded string) ([]byte, error) {
+// decodeVoicePCM16kBase64 解码 App 传入的语音 PCM/WAV（base64）。
+// 兼容：16k 单声道 s16le 裸 PCM（旧契约，默认按 16k 处理）、
+// 16k/24k 单声道 16-bit WAV（App 现在直接传原生采样率 WAV）。
+func decodeVoicePCM16kBase64(encoded string) ([]byte, int, error) {
 	raw := strings.TrimSpace(encoded)
 	if raw == "" {
-		return nil, errVoicePCMEmpty
+		return nil, 0, errVoicePCMEmpty
 	}
 	if strings.HasPrefix(raw, "base64://") {
 		raw = strings.TrimPrefix(raw, "base64://")
@@ -1280,39 +1283,42 @@ func decodeVoicePCM16kBase64(encoded string) ([]byte, error) {
 	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil, errVoicePCMEmpty
+		return nil, 0, errVoicePCMEmpty
 	}
 	data, err := base64.StdEncoding.DecodeString(raw)
 	if err != nil {
 		if fallback, fallbackErr := base64.RawStdEncoding.DecodeString(strings.TrimRight(raw, "=")); fallbackErr == nil {
 			data = fallback
 		} else {
-			return nil, errVoicePCMInvalid
+			return nil, 0, errVoicePCMInvalid
 		}
 	}
 	if len(data) == 0 {
-		return nil, errVoicePCMEmpty
+		return nil, 0, errVoicePCMEmpty
 	}
-	// 契约是 base64 的 s16le PCM；同时兼容 App 直接传 16k WAV base64
-	//（去掉 RIFF 头后取 data chunk），降低 App 侧拆 WAV 头的集成风险。
-	data, err = extractPCMFromWAVIfPresent(data)
+	// WAV 直接带采样率；裸 PCM 按旧契约视为 16k。
+	sampleRate := voiceSampleRate
+	data, sampleRate, err = extractPCMFromWAVIfPresent(data, sampleRate)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	if sampleRate != 16000 && sampleRate != 24000 {
+		return nil, 0, errVoicePCMInvalid
 	}
 	if len(data)%2 != 0 || len(data) < minVoiceSendPCMBytes {
-		return nil, errVoicePCMInvalid
+		return nil, 0, errVoicePCMInvalid
 	}
 	if len(data) > maxVoiceSendPCMBytes {
-		return nil, errVoicePCMLength
+		return nil, 0, errVoicePCMLength
 	}
-	return data, nil
+	return data, sampleRate, nil
 }
 
-// extractPCMFromWAVIfPresent 若输入是 WAV（RIFF/WAVE）则校验 16k / 单声道 / 16-bit
-// 并返回 data chunk 的 s16le PCM；普通 PCM 原样返回。
-func extractPCMFromWAVIfPresent(data []byte) ([]byte, error) {
+// extractPCMFromWAVIfPresent 若输入是 WAV（RIFF/WAVE）则校验单声道 / 16-bit /
+// 16k 或 24k，并返回 data chunk 的 s16le PCM 与实际采样率；普通 PCM 原样返回。
+func extractPCMFromWAVIfPresent(data []byte, fallbackSampleRate int) ([]byte, int, error) {
 	if len(data) < 12 || string(data[0:4]) != "RIFF" || string(data[8:12]) != "WAVE" {
-		return data, nil
+		return data, fallbackSampleRate, nil
 	}
 	offset := 12
 	sampleRate := 0
@@ -1323,20 +1329,20 @@ func extractPCMFromWAVIfPresent(data []byte) ([]byte, error) {
 		chunkID := string(data[offset : offset+4])
 		chunkSize := int(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
 		if chunkSize < 0 || offset+8+chunkSize > len(data) {
-			return nil, errVoicePCMInvalid
+			return nil, 0, errVoicePCMInvalid
 		}
 		body := offset + 8
 		switch chunkID {
 		case "fmt ":
 			if chunkSize < 16 {
-				return nil, errVoicePCMInvalid
+				return nil, 0, errVoicePCMInvalid
 			}
 			audioFormat := binary.LittleEndian.Uint16(data[body : body+2])
 			channels = int(binary.LittleEndian.Uint16(data[body+2 : body+4]))
 			sampleRate = int(binary.LittleEndian.Uint32(data[body+4 : body+8]))
 			bitsPerSample = int(binary.LittleEndian.Uint16(data[body+14 : body+16]))
 			if audioFormat != 1 {
-				return nil, errVoicePCMInvalid
+				return nil, 0, errVoicePCMInvalid
 			}
 		case "data":
 			pcm = data[body : body+chunkSize]
@@ -1346,10 +1352,11 @@ func extractPCMFromWAVIfPresent(data []byte) ([]byte, error) {
 			offset++ // RIFF 奇数长度 chunk 的补齐字节
 		}
 	}
-	if len(pcm) == 0 || sampleRate != voiceSampleRate || channels != voiceChannels || bitsPerSample != voiceBitsPerSample {
-		return nil, errVoicePCMInvalid
+	if len(pcm) == 0 || (sampleRate != 16000 && sampleRate != 24000) ||
+		channels != voiceChannels || bitsPerSample != voiceBitsPerSample {
+		return nil, 0, errVoicePCMInvalid
 	}
-	return pcm, nil
+	return pcm, sampleRate, nil
 }
 
 // encodeVoicePCM16kToTencentSilk 用 go-silk 把 16k 单声道 s16le PCM 编码成
@@ -1374,13 +1381,22 @@ func encodeVoicePCM16kToTencentSilk(pcm []byte) ([]byte, int32, error) {
 	return trimmed, durationMs, nil
 }
 
-// encodeVoicePCM16kToWeChatSilk 用官方 SILK SDK 编出微信可播放的 24k SILK。
+// encodeVoicePCMToWeChatSilk 用官方 SILK SDK 编出微信可播放的 24k SILK。
 // 真机（2026-10-26）：go-silk 输出在微信无声/不停止；官方 -tencent 24k 可播放。
-func encodeVoicePCM16kToWeChatSilk(pcm []byte) ([]byte, int32, error) {
+// 16k 输入线性插值到 24k；24k 输入直接编码（Kokoro/CosyVoice 原生 24k）。
+func encodeVoicePCMToWeChatSilk(pcm []byte, sampleRate int) ([]byte, int32, error) {
 	if len(pcm) == 0 || len(pcm)%2 != 0 {
 		return nil, 0, errVoicePCMInvalid
 	}
-	pcm24 := resamplePCM16kTo24k(pcm)
+	var pcm24 []byte
+	switch sampleRate {
+	case 24000:
+		pcm24 = pcm
+	case 16000:
+		pcm24 = resamplePCM16kTo24k(pcm)
+	default:
+		return nil, 0, errVoicePCMInvalid
+	}
 	// 官方编码器要求 20ms 整数帧；TTS 采样数通常不是整数帧，补静音对齐。
 	const packetSamples = 24000 / 50
 	if samples := len(pcm24) / 2; samples%packetSamples != 0 {
@@ -1411,8 +1427,12 @@ func resamplePCM16kTo24k(pcm []byte) []byte {
 	outSamples := inSamples * 3 / 2
 	out := make([]byte, outSamples*2)
 	read := func(i int) float64 {
-		if i < 0 { i = 0 }
-		if i >= inSamples { i = inSamples - 1 }
+		if i < 0 {
+			i = 0
+		}
+		if i >= inSamples {
+			i = inSamples - 1
+		}
 		return float64(int16(binary.LittleEndian.Uint16(pcm[i*2:])))
 	}
 	for i := 0; i < outSamples; i++ {
@@ -1420,8 +1440,12 @@ func resamplePCM16kTo24k(pcm []byte) []byte {
 		idx := int(pos)
 		frac := pos - float64(idx)
 		v := read(idx)*(1-frac) + read(idx+1)*frac
-		if v > 32767 { v = 32767 }
-		if v < -32768 { v = -32768 }
+		if v > 32767 {
+			v = 32767
+		}
+		if v < -32768 {
+			v = -32768
+		}
 		binary.LittleEndian.PutUint16(out[i*2:], uint16(int16(math.Round(v))))
 	}
 	return out
@@ -1439,7 +1463,7 @@ func sendVoicePCM16k(userID, groupID, pcm16kBase64 string, durationHintMs int) (
 		return 0, errVoiceTargetMissing
 	}
 
-	pcm, err := decodeVoicePCM16kBase64(pcm16kBase64)
+	pcm, sampleRate, err := decodeVoicePCM16kBase64(pcm16kBase64)
 	if err != nil {
 		return 0, err
 	}
@@ -1447,11 +1471,11 @@ func sendVoicePCM16k(userID, groupID, pcm16kBase64 string, durationHintMs int) (
 	// 默认不尝试上传：Hook 未支持时返回固定 code，App 据此降级文字。
 	if !voiceSendEnabled() {
 		Debug("语音发送未启用", "reason", voiceSendUnsupportedCode,
-			"pcm_bytes", len(pcm), "duration_hint_ms", durationHintMs)
+			"pcm_bytes", len(pcm), "sample_rate", sampleRate, "duration_hint_ms", durationHintMs)
 		return 0, errVoiceSendDisabled
 	}
 
-	silkData, _, err := encodeVoicePCM16kToWeChatSilk(pcm)
+	silkData, _, err := encodeVoicePCMToWeChatSilk(pcm, sampleRate)
 	if err != nil {
 		return 0, err
 	}

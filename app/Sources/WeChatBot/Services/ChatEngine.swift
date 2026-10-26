@@ -188,6 +188,10 @@ final class ChatEngine: @unchecked Sendable {
             + "那是被引用语音的转写，不是本轮的新内容。"
             + "如果写成「（引用的语音转写暂不可用）」，说明系统没有拿到该语音的转写，"
             + "不要凭空猜测语音内容。")
+        if settings.bot.voiceSettings.replyEnabled {
+            systemLines.append("本轮回复可能会转成微信语音：请用口语化短句，少用破折号、括号、"
+                + "表情符号和 @ 昵称，数字/日期正常写即可，系统会负责朗读化处理。")
+        }
         let note = conversation.note.trimmingCharacters(in: .whitespacesAndNewlines)
         if !note.isEmpty {
             systemLines.append("关于此会话的长期记忆：\(note)")

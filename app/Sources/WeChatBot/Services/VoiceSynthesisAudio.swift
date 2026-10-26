@@ -61,12 +61,20 @@ enum VoiceSynthesisAudio {
 
     // MARK: 写 WAV
 
-    /// 写 16 kHz 单声道 16-bit PCM WAV（`samples` 必须是 16k float）。
+    /// 写 16 kHz 单声道 16-bit PCM WAV（兼容旧调用；克隆参考/单测用）。
+    @discardableResult
     static func writePCM16WAV(samples: [Float], to url: URL) throws -> URL {
+        try writePCM16WAV(samples: samples, sampleRate: targetSampleRate, to: url)
+    }
+
+    /// 按指定采样率写单声道 16-bit PCM WAV（Kokoro/ZipVoice 原生 24k 直通）。
+    @discardableResult
+    static func writePCM16WAV(samples: [Float], sampleRate: Int, to url: URL) throws -> URL {
         guard !samples.isEmpty else { throw VoiceSynthesisAudioError.emptyAudio }
+        guard sampleRate > 0 else { throw VoiceSynthesisAudioError.writeFailed("采样率无效") }
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: Double(targetSampleRate),
+            AVSampleRateKey: Double(sampleRate),
             AVNumberOfChannelsKey: 1,
             AVLinearPCMBitDepthKey: 16,
             AVLinearPCMIsFloatKey: false,

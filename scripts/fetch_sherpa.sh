@@ -101,7 +101,7 @@ say "校验 SHA256"
 actual="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
 if [ "$actual" != "$SHA256" ]; then
   rm -f "$archive_path"
-  fail "SHA256 不匹配（期望 $SHA256，实际 $actual）"
+  fail "SHA256 不匹配（期望 ${SHA256}，实际 ${actual}）"
 fi
 
 say "解包到 $VENDOR_DIR"

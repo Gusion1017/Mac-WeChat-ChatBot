@@ -32,11 +32,6 @@ struct VoiceModelSpec: Sendable, Equatable {
     let plainFileName: String?
 
     var isArchive: Bool { extractedDirectory != nil }
-    var sizeText: String {
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: approximateBytes)
-    }
 }
 
 // MARK: - State
@@ -116,6 +111,58 @@ enum VoiceModelError: Error, LocalizedError, Equatable {
         case .diskWriteFailed(let reason):
             return "模型写入失败：\(reason)"
         }
+    }
+}
+
+// MARK: - Engine model plan
+
+extension VoiceEngineKind {
+    /// 该引擎实际需要的模型文件：ZipVoice 还依赖 24 kHz 声码器。
+    var requiredModels: [VoiceModelKind] {
+        switch self {
+        case .kokoro: return [.kokoro]
+        case .zipvoiceClone: return [.zipvoice, .vocoder]
+        // CosyVoice3 的模型/运行环境由 CosyVoiceInstaller 单独管理，不进入
+        // sherpa 模型下载清单。
+        case .cosyVoice: return []
+        }
+    }
+}
+
+/// 某个引擎的模型聚合状态（UI 一行展示；下载只针对缺失项）。
+struct VoiceEngineModelStatus: Sendable, Equatable {
+    let engine: VoiceEngineKind
+    let kinds: [VoiceModelKind]
+    let missing: [VoiceModelKind]
+    let readyKinds: [VoiceModelKind]
+    let busyState: VoiceModelState?
+    let failedState: VoiceModelState?
+    let fraction: Double
+    let totalBytes: Int64
+    let missingBytes: Int64
+
+    /// 全部模型已就绪。
+    var isReady: Bool { missing.isEmpty }
+
+    /// 有模型正在下载/校验/解包。
+    var isBusy: Bool { busyState?.isBusy ?? false }
+
+    /// 失败原因（若有）。
+    var failureReason: String? {
+        if case .failed(let reason)? = failedState { return reason }
+        return nil
+    }
+
+    /// 下载/校验进度（0...1）。
+    var progress: Double {
+        if isBusy { return busyState?.fraction ?? 0 }
+        return isReady ? 1 : 0
+    }
+
+    /// 服务器未给总大小时的下载中状态（UI 用不确定进度条）。
+    var isIndeterminateDownload: Bool {
+        if case .downloading(let progress)? = busyState { return progress == nil }
+        return false
     }
 }
 
@@ -199,27 +246,70 @@ final class VoiceModelStore {
         states[kind] ?? (Self.isModelReady(kind) ? .ready : .notDownloaded)
     }
 
+    /// 聚合某个引擎所需的全部模型（Kokoro 1 个；ZipVoice = 主模型 + 声码器）。
+    ///
+    /// 下载按钮只下载 `missing`，因此部分就绪（例如换了声码器）不会重复下载主模型。
+    func status(for engine: VoiceEngineKind) -> VoiceEngineModelStatus {
+        let kinds = engine.requiredModels
+        let resolved = kinds.map { (kind: $0, state: state(for: $0)) }
+        let missing = resolved.filter { !$0.state.isReady }.map(\.kind)
+        let ready = resolved.filter { $0.state.isReady }.map(\.kind)
+        let busy = resolved.first { $0.state.isBusy }?.state
+        let failed = resolved.first {
+            if case .failed = $0.state { return true }
+            return false
+        }?.state
+        let totalBytes = kinds.reduce(Int64(0)) { sum, kind in
+            sum + (Self.catalog.first { $0.kind == kind }?.approximateBytes ?? 0)
+        }
+        let missingBytes = missing.reduce(Int64(0)) { sum, kind in
+            sum + (Self.catalog.first { $0.kind == kind }?.approximateBytes ?? 0)
+        }
+        return VoiceEngineModelStatus(
+            engine: engine,
+            kinds: kinds,
+            missing: missing,
+            readyKinds: ready,
+            busyState: busy,
+            failedState: failed,
+            fraction: busy?.fraction ?? (missing.isEmpty ? 1 : 0),
+            totalBytes: totalBytes,
+            missingBytes: missingBytes
+        )
+    }
+
     /// 指定引擎的模型是否齐全（只查文件系统）。
     nonisolated static func isReady(_ engine: VoiceEngineKind) -> Bool {
         switch engine {
         case .kokoro: return kokoroConfig() != nil
         case .zipvoiceClone: return zipvoiceConfig() != nil
+        case .cosyVoice: return false // 由 CosyVoiceRuntime 的运行时快照决定
         }
     }
 
-    /// 某个模型文件是否已落盘（tar 解包目录/单文件存在）。
+    /// 某个模型文件是否已完整落盘。
+    ///
+    /// 不能只看解包目录是否存在：tar 中途失败会留下半截目录，旧实现会把它当成就绪，
+    /// 下载按钮随即跳过、合成时才报“模型不完整”。这里按模型实际需要的文件校验。
     nonisolated static func isModelReady(_ kind: VoiceModelKind) -> Bool {
-        guard let spec = catalog.first(where: { $0.kind == kind }) else { return false }
-        let fileManager = FileManager.default
-        if let directory = spec.extractedDirectory {
-            let url = modelsDirectory.appendingPathComponent(directory, isDirectory: true)
-            return fileManager.fileExists(atPath: url.path)
+        switch kind {
+        case .kokoro:
+            return kokoroConfig() != nil
+        case .zipvoice:
+            return zipvoiceFilesPresent()
+        case .vocoder:
+            let url = modelsDirectory.appendingPathComponent("vocos_24khz.onnx")
+            return FileManager.default.fileExists(atPath: url.path)
         }
-        if let name = spec.plainFileName {
-            let url = modelsDirectory.appendingPathComponent(name)
-            return fileManager.fileExists(atPath: url.path)
-        }
-        return false
+    }
+
+    /// ZipVoice 自身文件齐全（声码器是独立模型，单独下载/校验）。
+    nonisolated private static func zipvoiceFilesPresent() -> Bool {
+        let directory = modelsDirectory.appendingPathComponent(
+            "sherpa-onnx-zipvoice-distill-int8-zh-en-emilia", isDirectory: true)
+        return existing("tokens.txt", in: directory) != nil
+            && firstMatching("encoder", extension: "onnx", in: directory) != nil
+            && firstMatching("decoder", extension: "onnx", in: directory) != nil
     }
 
     /// 全部模型是否就绪。
@@ -241,19 +331,27 @@ final class VoiceModelStore {
     nonisolated static func kokoroConfig() -> SherpaTtsKokoroConfig? {
         let directory = modelsDirectory.appendingPathComponent(
             "kokoro-multi-lang-v1_1", isDirectory: true)
-        let fileManager = FileManager.default
         guard let model = firstMatching("model", extension: "onnx", in: directory),
               let voices = existing("voices.bin", in: directory),
               let tokens = existing("tokens.txt", in: directory) else {
             return nil
         }
-        let lexicons = lexicons(in: directory)
+        let lexicons = kokoroLexicons(in: directory)
+        // 数字/日期/电话规范化：Kokoro 词表没有 ASCII 数字，不传这些 FST 会
+        // 把 `3`/`2026`/`13800138000`/`85%` 当 OOV 静默跳过（不是读错，是没读）。
+        // 顺序：date → phone → number；phone 必须在 number 之前，否则手机号
+        // 会先被 number-zh 读成一个巨大的基数（“一百三十八亿…”）。
+        let ruleFsts = ["date-zh.fst", "phone-zh.fst", "number-zh.fst"]
+            .compactMap { existing($0, in: directory) }
+            .map(\.path)
+            .joined(separator: ",")
         return SherpaTtsKokoroConfig(
             model: model.path,
             voices: voices.path,
             tokens: tokens.path,
             lexicon: lexicons.map(\.path).joined(separator: ","),
-            lang: ""
+            lang: "",
+            ruleFsts: ruleFsts
         )
     }
 
@@ -275,20 +373,6 @@ final class VoiceModelStore {
             vocoder: vocoder.path,
             lexicon: lexicons.map(\.path).joined(separator: ",")
         )
-    }
-
-    /// Kokoro 内置音色数（从 voices.bin 大小推导：向量维度固定 256，每音色 511 字节）。
-    /// 解析失败时返回 0，由调用方按 1 处理。
-    nonisolated static func kokoroSpeakerCount() -> Int {
-        let voices = modelsDirectory
-            .appendingPathComponent("kokoro-multi-lang-v1_1/voices.bin")
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: voices.path),
-              let size = attributes[.size] as? Int, size > 0 else {
-            return 0
-        }
-        // Kokoro v1_1: 每音色 512 字节（256 float16 × 2）。
-        let count = size / 512
-        return count > 0 ? count : 0
     }
 
     // MARK: Download / verify / extract
@@ -480,6 +564,16 @@ final class VoiceModelStore {
             .filter { $0.pathExtension.lowercased() == ext && $0.lastPathComponent.contains(keyword) }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
             .first
+    }
+
+    /// Kokoro 的词典：官方示例只给 `lexicon-us-en.txt,lexicon-zh.txt`。
+    /// 同时加载 gb+us 会出现重复键（英文读音随机被 gb 覆盖），因此优先 us+zh；
+    /// 两者缺一时回退到目录内全部 `lexicon-*.txt`。
+    nonisolated private static func kokoroLexicons(in directory: URL) -> [URL] {
+        let us = existing("lexicon-us-en.txt", in: directory)
+        let zh = existing("lexicon-zh.txt", in: directory)
+        if let us, let zh { return [us, zh] }
+        return lexicons(in: directory)
     }
 
     /// 目录内 `lexicon-*.txt`；ZipVoice 还可以借用 English 词典。

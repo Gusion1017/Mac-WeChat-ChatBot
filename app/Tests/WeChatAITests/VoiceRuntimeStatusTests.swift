@@ -51,10 +51,8 @@ final class VoiceRuntimeStatusTests: XCTestCase {
         var settings = VoiceSettings()
         settings.replyEnabled = true
         settings.replyProbability = 1
-        let conversation = Conversation(id: "c", kind: .direct, title: "测试")
         let decision = decideVoiceReply(VoiceReplyContext(
             global: settings,
-            conversation: conversation,
             incomingWasVoice: true,
             replyText: "好的",
             modelsReady: true,
@@ -62,6 +60,39 @@ final class VoiceRuntimeStatusTests: XCTestCase {
             rng: 0
         ))
         XCTAssertEqual(decision, .text(reason: "语音发送句柄未就绪或仍在启动倒计时"))
+    }
+
+    func testStartupHandlePromptPolicy() {
+        let missingVoiceSeed = VoiceRuntimeStatus(
+            available: true,
+            configured: true,
+            voiceSend: true,
+            textSeed: true,
+            voiceSeed: false,
+            cdnReady: true,
+            loginSettled: true,
+            warmupRemainingMs: 0,
+            voiceReady: false,
+            error: nil,
+            receivedAt: Date()
+        )
+        XCTAssertTrue(missingVoiceSeed.needsHandleCapturePromptOnStartup)
+
+        var warmupOnly = missingVoiceSeed
+        warmupOnly.textSeed = true
+        warmupOnly.voiceSeed = true
+        warmupOnly.loginSettled = false
+        warmupOnly.warmupRemainingMs = 30_000
+        warmupOnly.voiceReady = false
+        XCTAssertFalse(warmupOnly.needsHandleCapturePromptOnStartup, "仅登录预热不应弹句柄引导")
+
+        var bridgeDown = missingVoiceSeed
+        bridgeDown.available = false
+        XCTAssertFalse(bridgeDown.needsHandleCapturePromptOnStartup)
+
+        var r3Off = missingVoiceSeed
+        r3Off.configured = false
+        XCTAssertFalse(r3Off.needsHandleCapturePromptOnStartup, "R3 未启用时捕获句柄也无效")
     }
 
     func testVoiceStatusRequestUsesBearerToken() throws {

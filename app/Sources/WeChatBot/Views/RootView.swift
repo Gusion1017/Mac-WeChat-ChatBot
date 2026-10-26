@@ -24,6 +24,11 @@ struct RootView: View {
             OnboardingView()
                 .environment(store)
         }
+        // 首次启用语音回复或运行时启动后检测到发送句柄缺失：无论当前在哪个页面都提示一次。
+        .sheet(isPresented: $store.isVoiceSetupPromptPresented) {
+            VoiceHandleSetupSheet()
+                .environment(store)
+        }
         .onAppear {
             if !hasCompletedOnboarding {
                 store.isOnboardingPresented = true

@@ -387,24 +387,7 @@ final class VoiceReadTests: XCTestCase {
         XCTAssertEqual(decoded.bot.voice, voice)
     }
 
-    // MARK: - 8. 会话覆盖
-
-    func testConversationVoiceOverrides() {
-        var conversation = Conversation(id: "c1", kind: .group, title: "群")
-        XCTAssertNil(conversation.voiceTranscriptionEnabled)
-        XCTAssertTrue(conversation.effectiveVoiceTranscriptionEnabled(global: true))
-        XCTAssertFalse(conversation.effectiveVoiceReplyEnabled(global: false))
-        XCTAssertEqual(conversation.effectiveVoiceReplyProbability(global: 0.3), 0.3, accuracy: 0.0001)
-
-        conversation.voiceTranscriptionEnabled = false
-        conversation.voiceReplyEnabled = true
-        conversation.voiceReplyProbability = 0.85
-        XCTAssertFalse(conversation.effectiveVoiceTranscriptionEnabled(global: true))
-        XCTAssertTrue(conversation.effectiveVoiceReplyEnabled(global: false))
-        XCTAssertEqual(conversation.effectiveVoiceReplyProbability(global: 0.1), 0.85, accuracy: 0.0001)
-    }
-
-    // MARK: - 9. 持久化与旧库迁移
+    // MARK: - 8. 持久化与旧库迁移
 
     func testMemoryStorePersistsVoiceFields() async throws {
         let directory = FileManager.default.temporaryDirectory
@@ -417,10 +400,7 @@ final class VoiceReadTests: XCTestCase {
             try? FileManager.default.removeItem(at: directory)
         }
 
-        var conversation = Conversation(id: "c1", kind: .direct, title: "测试")
-        conversation.voiceTranscriptionEnabled = true
-        conversation.voiceReplyEnabled = false
-        conversation.voiceReplyProbability = 0.7
+        let conversation = Conversation(id: "c1", kind: .direct, title: "测试")
         try await store.upsertConversation(conversation)
 
         let message = ChatMessage(
@@ -456,9 +436,8 @@ final class VoiceReadTests: XCTestCase {
         XCTAssertEqual(hits.first?.message.id, "m-voice", "转写写入 text 后应能被搜索")
 
         let storedConversation = try await store.conversation(id: "c1")
-        XCTAssertEqual(storedConversation?.voiceTranscriptionEnabled, true)
-        XCTAssertEqual(storedConversation?.voiceReplyEnabled, false)
-        XCTAssertEqual(storedConversation?.voiceReplyProbability ?? 0, 0.7, accuracy: 0.0001)
+        XCTAssertEqual(storedConversation?.id, "c1")
+        XCTAssertEqual(storedConversation?.displayTitle, "测试")
 
         await store.close()
         let reopened = MemoryStore(databaseURL: file)
@@ -556,48 +535,6 @@ final class VoiceReadTests: XCTestCase {
         let migrated = try await reopened.message(id: "m1")
         XCTAssertEqual(migrated?.voiceTranscript, "迁移后转写")
         XCTAssertEqual(migrated?.voiceTranscriptState, .failed)
-    }
-
-    func testLegacyConversationsTableGetsVoiceOverrideColumns() async throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("wechatai-voice-conv-migrate-\(UUID().uuidString)", isDirectory: true)
-        let file = directory.appendingPathComponent("chatbot.sqlite")
-        let store = MemoryStore(databaseURL: file)
-        try await store.open()
-        var conversation = Conversation(id: "c1", kind: .direct, title: "测试")
-        conversation.voiceReplyEnabled = true
-        try await store.upsertConversation(conversation)
-        await store.close()
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        var handle: OpaquePointer?
-        XCTAssertEqual(sqlite3_open(file.path, &handle), SQLITE_OK)
-        var dropFailed = false
-        for column in [
-            "voice_transcription_enabled", "voice_reply_enabled", "voice_reply_probability"
-        ] {
-            if sqlite3_exec(handle, "ALTER TABLE conversations DROP COLUMN \(column);", nil, nil, nil) != SQLITE_OK {
-                dropFailed = true
-                break
-            }
-        }
-        sqlite3_close(handle)
-        if dropFailed { throw XCTSkip("当前 SQLite 不支持 DROP COLUMN，跳过旧库迁移子测试") }
-
-        let reopened = MemoryStore(databaseURL: file)
-        try await reopened.open()
-        defer { Task { await reopened.close() } }
-        let legacy = try await reopened.conversation(id: "c1")
-        XCTAssertNotNil(legacy)
-        XCTAssertNil(legacy?.voiceTranscriptionEnabled)
-        XCTAssertNil(legacy?.voiceReplyEnabled)
-        XCTAssertNil(legacy?.voiceReplyProbability)
-
-        var updated = try XCTUnwrap(legacy)
-        updated.voiceReplyProbability = 0.25
-        try await reopened.upsertConversation(updated)
-        let migrated = try await reopened.conversation(id: "c1")
-        XCTAssertEqual(migrated?.voiceReplyProbability ?? 0, 0.25, accuracy: 0.0001)
     }
 
     // MARK: - 10. 提示词格式
@@ -720,7 +657,6 @@ final class VoiceReadTests: XCTestCase {
 
     private func replyContext(
         global: VoiceSettings = VoiceSettings(),
-        conversation: Conversation = Conversation(id: "c", kind: .direct, title: "测试"),
         incomingWasVoice: Bool = false,
         replyText: String = "好",
         modelsReady: Bool = true,
@@ -728,7 +664,6 @@ final class VoiceReadTests: XCTestCase {
     ) -> VoiceReplyContext {
         VoiceReplyContext(
             global: global,
-            conversation: conversation,
             incomingWasVoice: incomingWasVoice,
             replyText: replyText,
             modelsReady: modelsReady,
@@ -742,23 +677,6 @@ final class VoiceReadTests: XCTestCase {
         var on = VoiceSettings()
         on.replyEnabled = true
         XCTAssertTrue(decideVoiceReply(replyContext(global: on, rng: 0.1)).isVoice)
-    }
-
-    func testDecideVoiceReplyConversationSwitchOverride() {
-        // 全局关闭 + 会话显式开启：会话覆盖生效。
-        var conversation = Conversation(id: "c", kind: .direct, title: "测试")
-        conversation.voiceReplyEnabled = true
-        XCTAssertTrue(decideVoiceReply(replyContext(conversation: conversation, rng: 0)).isVoice)
-
-        // 全局开启 + 会话显式关闭：只发文字。
-        var on = VoiceSettings()
-        on.replyEnabled = true
-        conversation.voiceReplyEnabled = false
-        XCTAssertFalse(decideVoiceReply(replyContext(global: on, conversation: conversation, rng: 0)).isVoice)
-
-        // nil = 跟随全局。
-        conversation.voiceReplyEnabled = nil
-        XCTAssertTrue(decideVoiceReply(replyContext(global: on, conversation: conversation, rng: 0)).isVoice)
     }
 
     func testDecideVoiceReplyModelsNotReady() {
@@ -816,28 +734,6 @@ final class VoiceReadTests: XCTestCase {
         // NaN rng 视为不命中，不崩溃。
         settings.replyProbability = 1
         XCTAssertFalse(decideVoiceReply(replyContext(global: settings, rng: .nan)).isVoice)
-    }
-
-    func testConversationVoiceProbabilityStaysGlobal() {
-        var settings = VoiceSettings()
-        settings.replyEnabled = true
-        settings.replyProbability = 0.2
-        var conversation = Conversation(id: "c", kind: .direct, title: "测试")
-        conversation.voiceReplyProbability = 0.9
-        // 会话只覆盖总开关；概率仍用全局 20%，rng=0.8 不命中，避免旧的概率覆盖遗留。
-        XCTAssertFalse(decideVoiceReply(replyContext(
-            global: settings,
-            conversation: conversation,
-            rng: 0.8
-        )).isVoice)
-
-        conversation.voiceReplyProbability = 0
-        settings.replyProbability = 1
-        XCTAssertTrue(decideVoiceReply(replyContext(
-            global: settings,
-            conversation: conversation,
-            rng: 0
-        )).isVoice)
     }
 }
 

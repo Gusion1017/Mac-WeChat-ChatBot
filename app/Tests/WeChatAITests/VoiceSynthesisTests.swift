@@ -57,6 +57,30 @@ final class VoiceSynthesisTests: XCTestCase {
         XCTAssertEqual(text, "好呀～哈哈，那就这样吧！")
     }
 
+    func testSanitizeStripsLeadingWeChatMention() {
+        XCTAssertEqual(
+            VoiceTextSanitizer.sanitizeForSpeech("@我的枪很长 老大爷嘛，今天怎么样？"),
+            "老大爷嘛，今天怎么样？")
+        XCTAssertEqual(
+            VoiceTextSanitizer.sanitizeForSpeech("@张三，你好呀。"),
+            "你好呀。")
+    }
+
+    func testSanitizeConvertsPercentAndCurrencyForFST() {
+        XCTAssertEqual(
+            VoiceTextSanitizer.sanitizeForSpeech("涨了85%，预算3000块。"),
+            "涨了百分之85，预算3000块。")
+        XCTAssertEqual(
+            VoiceTextSanitizer.sanitizeForSpeech("门票¥120，折合$20。"),
+            "门票120元，折合20美元。")
+    }
+
+    func testSanitizeConvertsEmDashToComma() {
+        XCTAssertEqual(
+            VoiceTextSanitizer.sanitizeForSpeech("掉到线下就剩骨架——我懒。"),
+            "掉到线下就剩骨架，我懒。")
+    }
+
     func testSanitizeKeepsAbbreviationsByDefault() {
         let text = VoiceTextSanitizer.sanitizeForSpeech("PR 已经看过了，Slack 上也通知了 AI 组。")
         XCTAssertTrue(text.contains("PR"))
@@ -280,6 +304,24 @@ final class VoiceSynthesisTests: XCTestCase {
         XCTAssertEqual(meta.duration, 0.5, accuracy: 0.02)
     }
 
+    func testWriteWAVSupportsNative24k() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tts-wav24-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sampleRate = 24_000
+        let samples = (0..<12_000).map { index in
+            Float(sin(2 * Double.pi * 220 * Double(index) / Double(sampleRate))) * 0.4
+        }
+        try VoiceSynthesisAudio.writePCM16WAV(
+            samples: samples, sampleRate: sampleRate, to: url)
+
+        let meta = try VoiceSynthesisAudio.wavMetadata(url: url)
+        XCTAssertEqual(meta.sampleRate, 24_000)
+        XCTAssertEqual(meta.channels, 1)
+        XCTAssertEqual(meta.bitsPerSample, 16)
+        XCTAssertEqual(meta.duration, 0.5, accuracy: 0.02)
+    }
+
     func testDecodeMono16kRoundTrip() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("tts-decode-\(UUID().uuidString).wav")
@@ -411,13 +453,13 @@ final class VoiceSynthesisTests: XCTestCase {
         let result = try await service.synthesize(text: text, voice: voice, maxSeconds: 30)
         let elapsed = Date().timeIntervalSince(start)
 
-        XCTAssertEqual(result.sampleRate, 16_000)
+        XCTAssertEqual(result.sampleRate, 24_000, "Kokoro 原生 24k，不再强制降 16k")
         XCTAssertGreaterThan(result.duration, 0.5)
         XCTAssertLessThanOrEqual(result.duration, 30.5)
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.wavURL.path))
 
         let meta = try VoiceSynthesisAudio.wavMetadata(url: result.wavURL)
-        XCTAssertEqual(meta.sampleRate, 16_000)
+        XCTAssertEqual(meta.sampleRate, 24_000)
         XCTAssertEqual(meta.channels, 1)
         XCTAssertEqual(meta.bitsPerSample, 16)
         XCTAssertEqual(meta.duration, result.duration, accuracy: 0.05)
@@ -438,6 +480,25 @@ final class VoiceSynthesisTests: XCTestCase {
         XCTAssertGreaterThan(second.duration, 0)
         let loaded = await service.loadedEngineCount
         XCTAssertGreaterThanOrEqual(loaded, 1)
+    }
+
+    func testKokoroReadsNumbersAsOneChunk() async throws {
+        try XCTSkipUnless(VoiceSynthesisService.isReady(.kokoro), "Kokoro 模型未下载")
+        let service = VoiceSynthesisService()
+        let voice = VoiceSelection(engine: .kokoro, kokoroSpeakerID: 18, speed: 1.25)
+        let text = "3点半到2026年10月26日，电话13800138000，涨了85%。"
+
+        let result = try await service.synthesize(text: text, voice: voice, maxSeconds: 60)
+        XCTAssertEqual(result.sampleRate, 24_000)
+        // 不传 rule_fsts / 不展开数字时只有 3.25s；展开成中文读法后应明显更长。
+        XCTAssertGreaterThan(result.duration, 6.0, "数字/日期/电话应被正常读出")
+        XCTAssertLessThanOrEqual(result.duration, 60.5)
+
+        let meta = try VoiceSynthesisAudio.wavMetadata(url: result.wavURL)
+        XCTAssertEqual(meta.sampleRate, 24_000)
+        XCTAssertEqual(meta.channels, 1)
+        try Self.copySample(result.wavURL, name: "kokoro-numbers-\(Self.stamp()).wav")
+        print("[TTS] kokoro numbers duration=\(result.duration)s file=\(result.wavURL.path)")
     }
 
     func testKokoroTruncationAndTooLong() async throws {
@@ -486,10 +547,10 @@ final class VoiceSynthesisTests: XCTestCase {
             text: "小米的价值观是真诚、热爱。", voice: voice, maxSeconds: 30)
         let elapsed = Date().timeIntervalSince(start)
 
-        XCTAssertEqual(result.sampleRate, 16_000)
+        XCTAssertEqual(result.sampleRate, 24_000)
         XCTAssertGreaterThan(result.duration, 0.3)
         let meta = try VoiceSynthesisAudio.wavMetadata(url: result.wavURL)
-        XCTAssertEqual(meta.sampleRate, 16_000)
+        XCTAssertEqual(meta.sampleRate, 24_000)
         XCTAssertEqual(meta.channels, 1)
         XCTAssertEqual(meta.bitsPerSample, 16)
         print(String(

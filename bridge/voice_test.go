@@ -561,6 +561,21 @@ func TestDecodeVoiceSilkSample(t *testing.T) {
 	}
 }
 
+func TestEncodeVoicePCM24kToWeChatSilkDirect(t *testing.T) {
+	// 24k 是 Kokoro/CosyVoice 的原生输出：应直接编码，不再 16k→24k 插值。
+	pcm := syntheticVoicePCM(24000) // 1s @24k = 50 个 20ms 帧
+	silkData, durationMs, err := encodeVoicePCMToWeChatSilk(pcm, 24000)
+	if err != nil {
+		t.Fatalf("24k 编码失败: %v", err)
+	}
+	if len(silkData) < 11 || string(silkData[:10]) != "\x02#!SILK_V3" {
+		t.Fatalf("SILK 头不正确: %q", silkData[:min(10, len(silkData))])
+	}
+	if durationMs < 950 || durationMs > 1100 {
+		t.Fatalf("时长异常: %dms（期望约 1000ms）", durationMs)
+	}
+}
+
 func TestEncodeVoicePCM16kToTencentSilk(t *testing.T) {
 	pcm := syntheticVoicePCM(16000) // 1s
 
@@ -1219,9 +1234,12 @@ func TestDecodeVoicePCM16kBase64(t *testing.T) {
 			"base64":   "base64://" + encoded,
 			"rawNoPad": strings.TrimRight(encoded, "="),
 		} {
-			got, err := decodeVoicePCM16kBase64(input)
+			got, rate, err := decodeVoicePCM16kBase64(input)
 			if err != nil {
 				t.Fatalf("%s: 解码失败: %v", name, err)
+			}
+			if rate != 16000 {
+				t.Fatalf("%s: 裸 PCM 应按 16k 处理，got %d", name, rate)
 			}
 			if !bytes.Equal(got, pcm) {
 				t.Fatalf("%s: 解码内容不一致", name)
@@ -1235,35 +1253,49 @@ func TestDecodeVoicePCM16kBase64(t *testing.T) {
 		if err != nil {
 			t.Fatalf("生成 WAV 失败: %v", err)
 		}
-		got, err := decodeVoicePCM16kBase64(base64.StdEncoding.EncodeToString(wav))
+		got, rate, err := decodeVoicePCM16kBase64(base64.StdEncoding.EncodeToString(wav))
 		if err != nil {
 			t.Fatalf("WAV base64 解码失败: %v", err)
+		}
+		if rate != 16000 {
+			t.Fatalf("16k WAV 采样率错误: %d", rate)
 		}
 		if !bytes.Equal(got, pcm) {
 			t.Fatalf("WAV 提取 PCM 不一致: got %d bytes want %d", len(got), len(pcm))
 		}
 
-		// 非 16k WAV 必须拒绝（避免把错误采样率的音频当 pcm16k 编码）。
+		// 24k WAV（Kokoro/CosyVoice 原生输出）必须接受。
+		wav24 := append([]byte(nil), wav...)
+		binary.LittleEndian.PutUint32(wav24[24:28], 24000)
+		got24, rate24, err := decodeVoicePCM16kBase64(base64.StdEncoding.EncodeToString(wav24))
+		if err != nil {
+			t.Fatalf("24k WAV 应接受: %v", err)
+		}
+		if rate24 != 24000 || !bytes.Equal(got24, pcm) {
+			t.Fatalf("24k WAV 解析错误: rate=%d bytes=%d", rate24, len(got24))
+		}
+
+		// 其他采样率必须拒绝（避免把错误采样率的音频当 PCM 编码）。
 		badWAV := append([]byte(nil), wav...)
 		binary.LittleEndian.PutUint32(badWAV[24:28], 44100)
-		if _, err := decodeVoicePCM16kBase64(base64.StdEncoding.EncodeToString(badWAV)); !errors.Is(err, errVoicePCMInvalid) {
-			t.Fatalf("非 16k WAV 应失败: %v", err)
+		if _, _, err := decodeVoicePCM16kBase64(base64.StdEncoding.EncodeToString(badWAV)); !errors.Is(err, errVoicePCMInvalid) {
+			t.Fatalf("非 16k/24k WAV 应失败: %v", err)
 		}
 	})
 
 	t.Run("非法输入", func(t *testing.T) {
-		if _, err := decodeVoicePCM16kBase64(""); !errors.Is(err, errVoicePCMEmpty) {
+		if _, _, err := decodeVoicePCM16kBase64(""); !errors.Is(err, errVoicePCMEmpty) {
 			t.Fatalf("空输入应返回 errVoicePCMEmpty: %v", err)
 		}
-		if _, err := decodeVoicePCM16kBase64("!!!"); !errors.Is(err, errVoicePCMInvalid) {
+		if _, _, err := decodeVoicePCM16kBase64("!!!"); !errors.Is(err, errVoicePCMInvalid) {
 			t.Fatalf("非法 base64 应失败: %v", err)
 		}
 		odd := base64.StdEncoding.EncodeToString(make([]byte, 641))
-		if _, err := decodeVoicePCM16kBase64(odd); !errors.Is(err, errVoicePCMInvalid) {
+		if _, _, err := decodeVoicePCM16kBase64(odd); !errors.Is(err, errVoicePCMInvalid) {
 			t.Fatalf("奇数长度应失败: %v", err)
 		}
 		tooLong := base64.StdEncoding.EncodeToString(make([]byte, maxVoiceSendPCMBytes+2))
-		if _, err := decodeVoicePCM16kBase64(tooLong); !errors.Is(err, errVoicePCMLength) {
+		if _, _, err := decodeVoicePCM16kBase64(tooLong); !errors.Is(err, errVoicePCMLength) {
 			t.Fatalf("超长应失败: %v", err)
 		}
 		if _, err := sendVoicePCM16k("", "", encoded, 0); !errors.Is(err, errVoiceTargetMissing) {

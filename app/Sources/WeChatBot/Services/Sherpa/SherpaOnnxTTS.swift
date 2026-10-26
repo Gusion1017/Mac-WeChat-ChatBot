@@ -63,6 +63,11 @@ struct SherpaTtsKokoroConfig: Sendable, Equatable {
     var lexicon: String
     /// Optional language hint (`en`, `zh`, ...); empty lets the model decide.
     var lang: String = ""
+    /// Comma-separated text-normalization FSTs, e.g.
+    /// `date-zh.fst,phone-zh.fst,number-zh.fst`. The order matters:
+    /// `phone-zh.fst` must run before `number-zh.fst`, otherwise a phone number
+    /// is read as one huge cardinal number.
+    var ruleFsts: String = ""
     /// Speech-rate scale; values < 1 are slower.
     var lengthScale: Float = 1.0
 }
@@ -169,7 +174,11 @@ final class SherpaTtsEngine {
         var ttsConfig = SherpaOnnxOfflineTtsConfig()
         ttsConfig.model = modelConfig
         ttsConfig.max_num_sentences = 1
-        ttsConfig.silence_scale = 0.2
+        // 0.2 会把 >0.2s 的句读停顿压到 20%，整段合成时听起来会“喘不上气”。
+        ttsConfig.silence_scale = 0.8
+        if !config.ruleFsts.isEmpty {
+            ttsConfig.rule_fsts = arena.str(config.ruleFsts)
+        }
 
         return try create(&ttsConfig, describe: config.model)
     }
@@ -197,7 +206,7 @@ final class SherpaTtsEngine {
         var ttsConfig = SherpaOnnxOfflineTtsConfig()
         ttsConfig.model = modelConfig
         ttsConfig.max_num_sentences = 1
-        ttsConfig.silence_scale = 0.2
+        ttsConfig.silence_scale = 0.8
 
         return try create(&ttsConfig, describe: config.encoder)
     }

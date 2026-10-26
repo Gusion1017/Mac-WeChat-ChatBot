@@ -9,6 +9,9 @@ import Foundation
 enum VoiceEngineKind: String, Codable, Sendable, CaseIterable, Hashable, Identifiable {
     case kokoro
     case zipvoiceClone
+    /// 本地 CosyVoice3 旁路（Python HTTP 服务）。模型/运行环境按需下载，
+    /// 服务不可用时由上层回退 Kokoro。
+    case cosyVoice = "cosyvoice"
 
     var id: String { rawValue }
 
@@ -16,37 +19,45 @@ enum VoiceEngineKind: String, Codable, Sendable, CaseIterable, Hashable, Identif
         switch self {
         case .kokoro: return "Kokoro"
         case .zipvoiceClone: return "ZipVoice 克隆"
+        case .cosyVoice: return "CosyVoice3"
         }
     }
 }
 
-/// 一次合成要用的音色参数（由 `VoiceSettings`/会话覆盖解析而来）。
+/// 一次合成要用的音色参数（由全局 `VoiceSettings` 解析而来）。
 struct VoiceSelection: Sendable, Equatable, Hashable {
     var engine: VoiceEngineKind
     var kokoroSpeakerID: Int
     var speed: Double
     /// `engine == .zipvoiceClone` 时必填。
     var cloneID: String?
+    /// `engine == .cosyVoice` 时使用；nil 时由服务回退到 "girl"。
+    var cosyVoiceVoiceID: String?
 
     init(
         engine: VoiceEngineKind = .kokoro,
         kokoroSpeakerID: Int = 0,
         speed: Double = 1.0,
-        cloneID: String? = nil
+        cloneID: String? = nil,
+        cosyVoiceVoiceID: String? = nil
     ) {
         self.engine = engine
         self.kokoroSpeakerID = kokoroSpeakerID
         self.speed = speed
         self.cloneID = cloneID
+        self.cosyVoiceVoiceID = cosyVoiceVoiceID
     }
 
     /// 从设置解析（把范围收敛、克隆 ID 归一化）。T2/运行时可直接用。
     init(settings: VoiceSettings, cloneID: String? = nil) {
         self.init(
             engine: settings.engine,
-            kokoroSpeakerID: settings.kokoroSpeakerID,
-            speed: settings.effectiveKokoroSpeed,
-            cloneID: cloneID ?? settings.cloneID
+            kokoroSpeakerID: settings.effectiveKokoroSpeakerID,
+            speed: settings.engine == .cosyVoice
+                ? settings.effectiveCosyVoiceSpeed
+                : settings.effectiveKokoroSpeed,
+            cloneID: cloneID ?? settings.cloneID,
+            cosyVoiceVoiceID: settings.effectiveCosyVoiceVoiceID
         )
     }
 
@@ -56,9 +67,9 @@ struct VoiceSelection: Sendable, Equatable, Hashable {
         return min(max(speed, 0.5), 2.0)
     }
 
-    /// 生效的 Kokoro 音色编号（负数按 0 处理；上限由引擎的音色数兜底）。
+    /// 生效的 Kokoro 音色编号（收敛到当前模型内置的 103 个音色；引擎侧还会按实际数量兜底）。
     var effectiveSpeakerID: Int {
-        max(0, kokoroSpeakerID)
+        KokoroVoiceCatalog.clampedSpeakerID(kokoroSpeakerID)
     }
 }
 
@@ -123,7 +134,8 @@ enum VoiceSynthesisError: Error, LocalizedError, Equatable {
 /// - **actor**：合成串行、引擎懒加载并复用（一次加载，多次合成）；
 /// - **纯离线**：只依赖本地模型文件（`VoiceModelStore`），不联网；
 /// - 输入清洗与超限截断是纯函数（`VoiceTextSanitizer`），可单测；
-/// - 输出统一转 16 kHz 单声道 16-bit WAV（微信 SILK 链路需要 16k PCM）。
+/// - 输出沿用引擎原生采样率（Kokoro/ZipVoice 24 kHz）的单声道 16-bit WAV；
+///   微信 SILK 链路由 bridge 负责重采样/编码，App 不再强制降到 16k。
 ///
 /// 与 `VoiceModelStore` / `VoiceCloneStore` 的分工：本服务只读文件与档案，
 /// 下载、删除、CRUD 由那两个存储负责。
@@ -131,12 +143,16 @@ actor VoiceSynthesisService {
     static let defaultMaxSeconds = 30
     static let minMaxSeconds = 5
     static let maxMaxSeconds = 60
-    /// 输出采样率（微信语音 16k PCM）。
-    static let outputSampleRate = 16_000
+    /// 微信现有链路支持的采样率；引擎原生 24k 直接落盘，不再二次重采样。
+    static let supportedOutputSampleRates: Set<Int> = [16_000, 24_000]
     /// ZipVoice distill 的默认 flow-matching 步数（官方 example 用 4）。
     static let zipvoiceNumSteps = 4
-    /// ZipVoice 切句最小字符数（官方 example 的 extra 参数）。
-    static let zipvoiceMinCharInSentence = "10"
+    /// 关闭 Kokoro/ZipVoice 内部按标点切分：整段一次合成，语气才连贯。
+    /// 上限给得很大，实际长度由 `maxVoiceSeconds` 与 sanitizer 的 1000 字上限约束。
+    static let sentenceMergeExtra = [
+        "min_words_in_sentence": "10000",
+        "max_words_in_sentence": "10000",
+    ]
     /// TTS 产物保留时长（每次合成前顺手清理更早的文件，避免无限增长）。
     static let outputRetention: TimeInterval = 24 * 60 * 60
 
@@ -164,6 +180,9 @@ actor VoiceSynthesisService {
             return VoiceModelStore.kokoroConfig() != nil
         case .zipvoiceClone:
             return VoiceModelStore.zipvoiceConfig() != nil
+        case .cosyVoice:
+            // 已安装 + 最近一次健康检查通过；真正的健康检查在后台 actor 推进。
+            return CosyVoiceRuntime.shared.isServiceReadySnapshot
         }
     }
 
@@ -210,7 +229,7 @@ actor VoiceSynthesisService {
         guard !spoken.isEmpty else { throw VoiceSynthesisError.emptyText }
 
         try Task.checkCancellation()
-        let audio = try makeAudio(for: voice, text: spoken)
+        let audio = try await makeAudio(for: voice, text: spoken)
         var raw = audio
         var duration = audio.duration
 
@@ -231,7 +250,7 @@ actor VoiceSynthesisService {
             }
             spoken = capped
             try Task.checkCancellation()
-            raw = try makeAudio(for: voice, text: capped)
+            raw = try await makeAudio(for: voice, text: capped)
             duration = raw.duration
             if duration > Double(limit) * 1.02 {
                 throw VoiceSynthesisError.tooLong(
@@ -243,20 +262,20 @@ actor VoiceSynthesisService {
             throw VoiceSynthesisError.synthesisFailed("引擎返回空音频")
         }
 
-        let resampled: [Float]
-        do {
-            resampled = try VoiceSynthesisAudio.resampleTo16k(
-                raw.samples, sampleRate: raw.sampleRate)
-        } catch {
+        let outputRate = raw.sampleRate
+        guard Self.supportedOutputSampleRates.contains(outputRate) else {
             throw VoiceSynthesisError.outputWriteFailed(
-                (error as? LocalizedError)?.errorDescription ?? "\(error)")
+                "引擎输出采样率 \(outputRate) Hz 不在支持范围（16k/24k）")
         }
+        var outputSamples = raw.samples
+        Self.applyEdgeFade(&outputSamples, sampleRate: outputRate)
 
         try Task.checkCancellation()
         pruneOldOutputs()
         let outputURL = Self.makeOutputURL()
         do {
-            try VoiceSynthesisAudio.writePCM16WAV(samples: resampled, to: outputURL)
+            try VoiceSynthesisAudio.writePCM16WAV(
+                samples: outputSamples, sampleRate: outputRate, to: outputURL)
         } catch {
             try? FileManager.default.removeItem(at: outputURL)
             throw VoiceSynthesisError.outputWriteFailed(
@@ -265,15 +284,26 @@ actor VoiceSynthesisService {
 
         return SynthesisResult(
             wavURL: outputURL,
-            duration: Double(resampled.count) / Double(Self.outputSampleRate),
-            sampleRate: Self.outputSampleRate
+            duration: Double(outputSamples.count) / Double(outputRate),
+            sampleRate: outputRate
         )
+    }
+
+    /// 首尾 5 ms 淡入淡出，避免 WAV 边界爆音（SILK 编码后尤其明显）。
+    static func applyEdgeFade(_ samples: inout [Float], sampleRate: Int) {
+        guard sampleRate > 0, samples.count > 2 else { return }
+        let fade = min(max(1, sampleRate / 200), samples.count / 2)
+        for index in 0..<fade {
+            let gain = Float(index) / Float(fade)
+            samples[index] *= gain
+            samples[samples.count - 1 - index] *= gain
+        }
     }
 
     // MARK: Engine loading
 
     /// 用指定引擎合成（内部只返回 sherpa 原始 24k 音频）。
-    private func makeAudio(for voice: VoiceSelection, text: String) throws -> SherpaGeneratedAudio {
+    private func makeAudio(for voice: VoiceSelection, text: String) async throws -> SherpaGeneratedAudio {
         switch voice.engine {
         case .kokoro:
             let engine = try loadKokoroEngine()
@@ -281,27 +311,52 @@ actor VoiceSynthesisService {
             var config = SherpaTtsGenerationConfig(
                 speed: Float(voice.effectiveSpeed),
                 speakerID: min(voice.effectiveSpeakerID, speakerCount - 1),
-                silenceScale: 0.2
+                silenceScale: 0.8
             )
             config.numSteps = Self.zipvoiceNumSteps
+            config.extra = Self.sentenceMergeExtra
             do {
                 return try engine.generate(text: text, config: config)
             } catch let error as SherpaTtsEngineError {
                 throw VoiceSynthesisError.synthesisFailed(
                     error.errorDescription ?? "\(error)")
             }
+        case .cosyVoice:
+            do {
+                let raw = try await CosyVoiceClient.shared.synthesizeRaw(
+                    text: text,
+                    voiceID: voice.cosyVoiceVoiceID ?? "girl",
+                    speed: voice.effectiveSpeed)
+                return SherpaGeneratedAudio(
+                    samples: raw.samples, sampleRate: raw.sampleRate)
+            } catch let error as CosyVoiceError {
+                switch error {
+                case .notInstalled, .serviceNotRunning, .serviceLoading, .serviceUnavailable:
+                    throw VoiceSynthesisError.engineNotReady(
+                        engine: .cosyVoice,
+                        reason: error.errorDescription ?? "本地服务不可用")
+                default:
+                    throw VoiceSynthesisError.synthesisFailed(
+                        error.errorDescription ?? "CosyVoice3 合成失败")
+                }
+            } catch {
+                throw VoiceSynthesisError.synthesisFailed(
+                    (error as? LocalizedError)?.errorDescription ?? "\(error)")
+            }
         case .zipvoiceClone:
             let reference = try resolveCloneReference(voice)
             let engine = try loadZipvoiceEngine()
             var config = SherpaTtsGenerationConfig(
                 speed: Float(voice.effectiveSpeed),
-                silenceScale: 0.2
+                silenceScale: 0.8
             )
             config.referenceAudio = reference.samples
             config.referenceSampleRate = reference.sampleRate
             config.referenceText = reference.text
             config.numSteps = Self.zipvoiceNumSteps
-            config.extra = ["min_char_in_sentence": Self.zipvoiceMinCharInSentence]
+            // v2.0.0 的 ZipVoice 用的是 min/max_words_in_sentence，不是
+            // 旧版 min_char_in_sentence；不覆盖就会按默认 5/20 切碎。
+            config.extra = Self.sentenceMergeExtra
             do {
                 return try engine.generate(text: text, config: config)
             } catch let error as SherpaTtsEngineError {

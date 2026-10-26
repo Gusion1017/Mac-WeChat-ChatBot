@@ -225,7 +225,7 @@ struct OnboardingView: View {
             InlineNotice(
                 kind: .warning,
                 title: "开始前的准备",
-                message: "需要已安装官方微信 4.1.15.55 / 4.2.0.5（arm64）。安装 Hook 会修改微信应用包，请先退出微信并确认了解风险。"
+                message: "需要已安装官方微信 4.1.15.55 / 4.2.0.5 / 4.2.0.9（arm64）。安装 Hook 会修改微信应用包，请先退出微信并确认了解风险。"
             )
         }
     }

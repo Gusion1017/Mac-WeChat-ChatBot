@@ -1665,6 +1665,38 @@ final class CoreServicesTests: XCTestCase {
         XCTAssertNil(cleared?.workingHours, "nil 应表示跟随全局")
     }
 
+    func testMemoryStoreDeleteConversationRemovesChatData() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechatai-delete-chat-\(UUID().uuidString)", isDirectory: true)
+        let store = MemoryStore(databaseURL: directory.appendingPathComponent("chatbot.sqlite"))
+        try await store.open()
+        defer {
+            Task { await store.close() }
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        try await store.upsertConversation(Conversation(id: "c1", kind: .direct, title: "测试"))
+        try await store.upsertMessages([ChatMessage(
+            id: "m1",
+            conversationID: "c1",
+            senderID: "u1",
+            senderName: "用户",
+            direction: .incoming,
+            text: "你好",
+            timestamp: Date()
+        )])
+        try await store.upsertMemory(LongTermMemory(conversationID: "c1", summary: "会话摘要"))
+
+        try await store.deleteConversation(id: "c1")
+
+        let deletedConversation = try await store.conversation(id: "c1")
+        let remainingMessages = try await store.fetchMessages(conversationID: "c1")
+        let remainingMemories = try await store.fetchMemories()
+        XCTAssertNil(deletedConversation)
+        XCTAssertTrue(remainingMessages.isEmpty)
+        XCTAssertTrue(remainingMemories.isEmpty, "删除聊天会同时删除相关记忆")
+    }
+
     // MARK: Pat / multi-select triggers
 
     func testGroupPatTriggerDetectsSystemMessage() {

@@ -30,7 +30,7 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
 - **白 / 黑名单**（会话 ID 或 wxid）、冷却、每分钟限流、工作时段，均可按会话覆盖
 - **按会话人格** / 系统提示词 / 模型与温度覆盖；DeepSeek、OpenAI、Ollama 或任意 OpenAI 兼容端点
 - **记忆**：10 条短期窗口 + 8 条批量总结；会话文件夹；综合权重 = 基础 × 重要度 × 召回 × 30 天半衰期，基础权重可调
-- **拟人化延迟**、回复进度倒计时、防睡眠、定时主动消息、实时会话看板、运行日志
+- **拟人化延迟**、回复进度倒计时、防睡眠、定时主动消息、实时会话看板、会话重命名/置顶/删除聊天（仅本机）、运行日志
 - **设备与账户**：总览「设备与账户」卡与菜单栏弹层显示本机电池电量 / 充电状态 / 剩余时间
   （IOKit，30 秒刷新）和 DeepSeek 账户余额（总额、赠送/充值、可用状态；启动查询 + 每 5 分钟刷新，
   可手动刷新；Key 读取自 Keychain 中的 DeepSeek 通道，未配置时给出去 AI 模型页的入口）
@@ -39,11 +39,16 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
   （AI 模型页配置，可单独指定视觉通道/模型）对近期入站图片生成文字描述，作为回复上下文，
   描述显示在图片下方；引用图片时会把被引用原图的内容描述带入本轮回复
 - **语音转写（本地）**：收到的语音消息经 Apple 本地 Speech 框架（SpeechAnalyzer）转成文字，
-  气泡展示/进上下文与记忆，可逐项关闭；**语音回复（本地 TTS）**：sherpa-onnx + Kokoro（内置音色）
-  或 ZipVoice（零样本克隆），模型按需下载，支持语音时长/概率/对等/短回复设置；语音设置位于「机器人」页。
+  气泡展示/进上下文与记忆，可逐项关闭；**语音回复（本地 TTS）**：sherpa-onnx + Kokoro
+  （官方 103 个内置音色，按中文女声/中文男声/英文女声分组，可搜索与试听）、ZipVoice
+  （零样本克隆）或 CosyVoice3（可选本地大模型旁路，需额外安装约 8GB；**App 不内置任何音色**，
+  可在「管理音色」导入 5–30s 参考音新增/编辑/删除/试听），
+  模型按当前引擎按需下载（确认体积、可取消/重试/删除），支持语速、语音时长/
+  概率/对等/短回复设置；语音设置位于「机器人」页。
   > 4.2.0.5 已真机打通语音**下载/转写与发送**；出站使用官方 SILK SDK 的 24k WeChat 兼容编码。
-  > 首次启用/微信重启后需手动发一条文字 + 一条语音捕获句柄，bridge 重启自动恢复；详见 [`docs/voice.md`](docs/voice.md)。
-- **4.1.15.55 / 4.2.0.5 R3 原生文本发送**（设置内开关，无句柄时自动排队）；**通讯录真实昵称 / 群名**（本机只读）
+  > 首次启用/微信重启后需手动发一条文字 + 一条语音捕获句柄，bridge 重启自动恢复；
+  > 首次开启语音回复或 bridge 启动检测到句柄缺失时会自动弹出捕获引导。详见 [`docs/voice.md`](docs/voice.md)。
+- **4.1.15.55 / 4.2.0.5 / 4.2.0.9 R3 原生文本发送**（设置内开关，无句柄时自动排队）；**通讯录真实昵称 / 群名**（本机只读）
 - **机器人页 6 个子栏目**：常规 / 触发 / 互动 / 名单 / 节奏 / 语音，工具栏下方 sticky 分栏条，
   切换回填顶部、按窗口记忆上次子栏目
 - **首启向导环境检查**：显示 Xcode Command Line Tools 状态，可一键「安装 Command Line Tools」
@@ -54,14 +59,15 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
 
 | 模块 | 状态 |
 | --- | --- |
-| SwiftUI App / Swift 核心 | ✅ 325 项测试（2 项模型依赖测试按模型就绪跳过）；4.1.15.55 / 4.2.0.5 文本真机 E2E |
+| SwiftUI App / Swift 核心 | ✅ 396 项测试（8 项按环境跳过：模型未下载/联网/真实 E2E）；4.1.15.55 / 4.2.0.5 文本真机 E2E |
 | OneBot bridge（Go） | ✅ 构建 / 鉴权 / 真机附加 / 62 顶层 · 159 用例测试通过 |
 | 首启向导 / 安装 | ✅ CLT 检测与安装引导、微信版本 / Hook 预检、备份约 665MB（磁盘需 ≥2.5GB） |
 | 微信 4.1.12.53 | ✅ legacy 收发 + 主动发送 |
 | 微信 4.1.15.55 | ✅ Message finalizer 接收 + R3 文本发送（首次需在本机微信手动发一条消息捕获句柄） |
 | 微信 4.2.0.5 | ✅ 真机验证（2026-10-22/23）：私聊/自消息入站、通讯录、R3 文本发送（含 bridge 重启句柄恢复）、**图片获取**（自然分片优先/按需触发 + 解密，HEVC 走缩略图）；群聊 @ / 拍一拍沿用既有逻辑未单独复测 |
+| 微信 4.2.0.9 | ✅ 适配并完成文本真机验证（2026-10-27）：新增 `hook/versions/4_2_0_9_mac.json`、版本门禁与脚本默认目标；Gadget 注入/重签、通讯录解密、入站事件、R3 文本发送均通过；语音发送与媒体/群聊 @ 未复测 |
 
-环境：Apple Silicon、macOS 26+；微信须为 4.2.0.5 (270341) / 4.1.15.55 (270135) / 4.1.12.53 (269365)
+环境：Apple Silicon、macOS 26+；微信须为 4.2.0.9 (270345) / 4.2.0.5 (270341) / 4.1.15.55 (270135) / 4.1.12.53 (269365)
 之一，默认位于 `/Applications/WeChat.app` 且当前用户可写；**安装 Hook 需 Xcode Command Line Tools**
 （`xcode-select --install`；完整 Xcode 亦可，不需要 Apple 开发者账号）；从源码构建另需 Xcode 27。
 
@@ -77,8 +83,8 @@ WeChatAI.app (SwiftUI)          bridge/onebot (Go)              WeChat.app
 
 ### 快速开始
 
-- **普通用户**：下载 [`WeChat-AI-1.4.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.4.0/WeChat-AI-1.4.0.zip)
-  （约 71 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.4.0/WeChat-AI-1.4.0.zip.sha256)），
+- **普通用户**：下载 [`WeChat-AI-1.5.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.5.0/WeChat-AI-1.5.0.zip)
+  （约 72 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.5.0/WeChat-AI-1.5.0.zip.sha256)），
   按下面步骤安装；历史版本见 [Tags](https://github.com/Gusion1017/Mac-WeChat-ChatBot/tags)。
 
   1. 解压得到 `WeChat AI.app`，拖到 `~/Applications`（当前用户，无需管理员）或 `/Applications`（所有用户）。
@@ -100,7 +106,7 @@ WeChatAI.app (SwiftUI)          bridge/onebot (Go)              WeChat.app
      未就绪时 Hook 安装按钮禁用）→ 检测微信（版本须精确匹配）→ 完全退出微信后备份并安装 Hook
      （备份约 665MB、1–2 分钟，磁盘预留 ≥2.5GB）→ 配置 AI → 启动。安装后需**手动打开并登录微信**；
      拒绝「App 数据」授权会导致图片/语音相关功能与 `image_path` 检测失败。
-  5. 首次发送（4.1.15.55 / 4.2.0.5 的 R3 原生发送）：在本机微信手动发一条消息捕获发送句柄
+  5. 首次发送（4.1.15.55 / 4.2.0.5 / 4.2.0.9 的 R3 原生发送）：在本机微信手动发一条消息捕获发送句柄
      （语音还需发一条语音），否则回复会排队。完整步骤与还原方式见 [`docs/install.md`](docs/install.md)。
 
 - **从源码构建**（需 Xcode 27）：
@@ -128,14 +134,14 @@ bash tools/manage_wechat.sh restore   # 还原官方 App
 `install` 前需完全退出微信（含菜单栏图标），并确保已安装 Xcode Command Line Tools
 （提供 `/usr/bin/python3` 与 `/usr/bin/otool`）。安装会先完整备份（约 665MB，磁盘预留 ≥2.5GB），
 App 内可在 设置 → Hook → 还原官方微信 一键还原（还原前先退出微信）。
-当前脚本默认目标是微信 4.2.0.5 (270341)；历史 4.1.15.55 / 4.1.12.53 仍在已知支持列表，
+当前脚本默认目标是微信 4.2.0.9 (270345)；历史 4.2.0.5 (270341) / 4.1.15.55 / 4.1.12.53 仍在已知支持列表，
 可直接安装（版本文件保留），其他版本可用 `WECHAT_SUPPORTED_VERSION` / `WECHAT_SUPPORTED_BUILD` 覆盖。
 修改会破坏微信官方签名，微信升级后可能失效；存在账号风控风险。
 
 ### 目录结构
 
 ```
-app/        SwiftUI App（SwiftPM）+ 325 项测试；app/Vendor/（sherpa-onnx 静态库）不入库
+app/        SwiftUI App（SwiftPM）+ 396 项测试；app/Vendor/（sherpa-onnx 静态库）不入库
 bridge/     Go OneBot 桥接（GPL-3.0 衍生，改动见 NOTICE）；silkenc/ SILK 编码，testdata/ 测试样本
 hook/       script.js（唯一事实来源）与版本地址表
 tools/      Hook 安装、备份、还原
@@ -152,16 +158,16 @@ dist/       发布产物（zip / sha256，不入库）
 ### 开发与测试
 
 ```bash
-bash scripts/check.sh               # 静态检查 + Swift 325 项
+bash scripts/check.sh               # 静态检查 + Swift 396 项
 bash scripts/build_bridge.sh        # Go 构建 + Go 测试
 bash scripts/fetch_sherpa.sh        # sherpa-onnx 静态库（build_app 会自动补）
 bash scripts/package_release.sh     # Releases 用 zip + sha256
 make release                        # 同上：构建 → 打包 → 签名校验 → sha256
 ```
 
-发布产物为 `dist/WeChat-AI-1.4.0.zip`（约 71MB）与 `.sha256`。打包脚本会自动
+发布产物为 `dist/WeChat-AI-1.5.0.zip`（约 72MB）与 `.sha256`。打包脚本会自动
 `codesign --verify --strict`；`spctl -a -vv` 对 ad-hoc 未公证包预期返回 `rejected`（属正常），
-分发前在 `dist/` 内用 `shasum -a 256 -c WeChat-AI-1.4.0.zip.sha256` 校验。
+分发前在 `dist/` 内用 `shasum -a 256 -c WeChat-AI-1.5.0.zip.sha256` 校验。
 
 改了 `hook/script.js` 记得跑 `bash scripts/sync_hook_script.sh`。接口 / 行为变更先改 `docs/` 再改代码。
 GitHub Actions 只跑 Linux 可完成的检查（文档链接、脚本语法、副本一致、无构建产物）。
@@ -232,11 +238,14 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
   brings the referenced image's description into the current reply.
 - **Voice transcription (local)**: incoming voice messages are transcribed on-device with Apple's
   Speech framework (SpeechAnalyzer) for bubbles/context/memory, each part toggleable; **voice replies
-  (local TTS)** use sherpa-onnx + Kokoro (built-in voices) or ZipVoice (zero-shot cloning), with models
-  downloaded on demand and settings for duration/probability/mirroring/per-conversation overrides.
+  (local TTS)** use sherpa-onnx + Kokoro (103 built-in voices grouped as Chinese female/male and
+  English female, with search and preview), ZipVoice (zero-shot cloning) or CosyVoice3 (optional
+  local LLM sidecar, ~8 GB extra install; **the app ships no voices** — add your own 5–30s reference
+  audio, then edit/delete/preview). Models download per engine on demand (size confirmation,
+  cancel/retry/delete) with speed, duration/probability/mirroring and per-conversation overrides.
   > Voice download/transcription and sending are verified on WeChat 4.2.0.5. Outbound uses the official SILK SDK
   > with WeChat-compatible 24k encoding. Handle capture is documented in [`docs/voice.md`](docs/voice.md).
-- **4.1.15.55 / 4.2.0.5 R3 native text sending** (toggle in Settings, auto-queues without a send handle);
+- **4.1.15.55 / 4.2.0.5 / 4.2.0.9 R3 native text sending** (toggle in Settings, auto-queues without a send handle);
   **real contact nicknames / group names** (local, read-only)
 - **Six bot sub-tabs**: General / Triggers / Interaction / Lists / Pacing / Voice, with a sticky tab bar,
   scroll-to-top on switch and per-window tab memory
@@ -249,15 +258,16 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
 
 | Component | Status |
 | --- | --- |
-| SwiftUI app / Swift core | ✅ 325 tests passing (2 model-dependent tests skip when models absent); text E2E on 4.1.15.55 / 4.2.0.5 |
+| SwiftUI app / Swift core | ✅ 396 tests passing (8 environment-gated skips: models not downloaded / network / live E2E); text E2E on 4.1.15.55 / 4.2.0.5 |
 | OneBot bridge (Go) | ✅ builds / auth / device attach / 62 top-level · 159 case tests passing |
 | First-run wizard / install | ✅ CLT detection and install guidance, WeChat version / hook preflight, ~665MB backup (needs ≥2.5GB disk) |
 | WeChat 4.1.12.53 | ✅ legacy send + receive |
 | WeChat 4.1.15.55 | ✅ Message-finalizer receive + R3 text sending (send one message in WeChat once to capture the handle) |
 | WeChat 4.2.0.5 | ✅ Real-device verified (2026-10-22/23): private-chat/self-message receive, contact directory, R3 text sending incl. bridge-restart handle recovery, **image fetch** (natural chunks first / on-demand trigger + decryption, thumbnail fallback for HEVC); group @ / pat-pat reuse existing logic and were not separately retested |
+| WeChat 4.2.0.9 | ✅ Adapted and text-verified (2026-10-27): new `hook/versions/4_2_0_9_mac.json`, version gates and script defaults updated; Gadget injection/re-sign, contact decryption, inbound events and R3 text sending passed; voice sending, media and group @ were not retested |
 
-Requirements: Apple Silicon, macOS 26+; WeChat must be exactly 4.2.0.5 (270341), 4.1.15.55 (270135)
-or 4.1.12.53 (269365), installed at `/Applications/WeChat.app` (default) and writable by the current
+Requirements: Apple Silicon, macOS 26+; WeChat must be exactly 4.2.0.9 (270345), 4.2.0.5 (270341),
+4.1.15.55 (270135) or 4.1.12.53 (269365), installed at `/Applications/WeChat.app` (default) and writable by the current
 user; **hook installation requires Xcode Command Line Tools** (`xcode-select --install`; full Xcode
 also works, no Apple Developer account needed). Building from source additionally needs Xcode 27.
 
@@ -275,8 +285,8 @@ Contracts in [`docs/architecture.md`](docs/architecture.md); document index in
 ### Quick Start
 
 - **Regular users**: download
-  [`WeChat-AI-1.4.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.4.0/WeChat-AI-1.4.0.zip)
-  (~71 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.4.0/WeChat-AI-1.4.0.zip.sha256))
+  [`WeChat-AI-1.5.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.5.0/WeChat-AI-1.5.0.zip)
+  (~72 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.5.0/WeChat-AI-1.5.0.zip.sha256))
   and follow these steps; older versions are on [Tags](https://github.com/Gusion1017/Mac-WeChat-ChatBot/tags).
 
   1. Unzip `WeChat AI.app` and drag it to `~/Applications` (current user, no admin) or
@@ -301,7 +311,7 @@ Contracts in [`docs/architecture.md`](docs/architecture.md); document index in
      required) → fully quit WeChat, then back up and install the hook (~665MB backup, 1–2 minutes,
      reserve ≥2.5GB disk) → configure AI → start. Afterwards **open and log in to WeChat manually**;
      denying the "App Data" permission breaks image/voice features and `image_path` detection.
-  5. First send (R3 native sending on 4.1.15.55 / 4.2.0.5): manually send one message in WeChat to
+  5. First send (R3 native sending on 4.1.15.55 / 4.2.0.5 / 4.2.0.9): manually send one message in WeChat to
      capture the send handle (send a voice message too for voice replies), otherwise replies queue.
      Full steps and restore instructions are in [`docs/install.md`](docs/install.md).
 
@@ -332,14 +342,14 @@ Line Tools are installed (`/usr/bin/python3` and `/usr/bin/otool`). The installe
 app first (~665MB; reserve ≥2.5GB disk), and the app offers one-click restore under
 Settings → Hook → Restore Official WeChat (quit WeChat first). Patching breaks WeChat's official
 signature and may stop working after a WeChat update; unofficial clients also carry account risk.
-The scripts target WeChat 4.2.0.5 (270341) by default; the historical 4.1.15.55 / 4.1.12.53
+The scripts target WeChat 4.2.0.9 (270345) by default; the historical 4.2.0.5 / 4.1.15.55 / 4.1.12.53
 remain in the known-supported list and install directly (their version files are kept); use
 `WECHAT_SUPPORTED_VERSION` / `WECHAT_SUPPORTED_BUILD` to override for other builds.
 
 ### Repository Layout
 
 ```
-app/        SwiftUI app (SwiftPM) + 325 tests; app/Vendor/ (sherpa-onnx static libs) is not committed
+app/        SwiftUI app (SwiftPM) + 396 tests; app/Vendor/ (sherpa-onnx static libs) is not committed
 bridge/     Go OneBot bridge (GPL-3.0 derivative, changes listed in NOTICE); silkenc/ official SILK encoder, testdata/
 hook/       script.js (single source of truth) and version address tables
 tools/      hook install, backup and restore
@@ -356,17 +366,17 @@ Rebuildable, never committed: `app/.build*`, `app/Vendor/`, `bridge/onebot`, `di
 ### Build and Test
 
 ```bash
-bash scripts/check.sh               # static checks + 325 Swift tests
+bash scripts/check.sh               # static checks + 396 Swift tests
 bash scripts/build_bridge.sh        # Go build + Go tests
 bash scripts/fetch_sherpa.sh        # sherpa-onnx static libs (build_app fetches if missing)
 bash scripts/package_release.sh     # release zip + sha256
 make release                        # same: build → package → signature check → sha256
 ```
 
-The release artifacts are `dist/WeChat-AI-1.4.0.zip` (~71MB) and `.sha256`. Packaging runs
+The release artifacts are `dist/WeChat-AI-1.5.0.zip` (~72MB) and `.sha256`. Packaging runs
 `codesign --verify --strict`; `spctl -a -vv` reports `rejected` for an ad-hoc, non-notarized bundle
 (that is expected). Verify before publishing with
-`cd dist && shasum -a 256 -c WeChat-AI-1.4.0.zip.sha256`.
+`cd dist && shasum -a 256 -c WeChat-AI-1.5.0.zip.sha256`.
 
 After editing `hook/script.js`, run `bash scripts/sync_hook_script.sh`. Change `docs/` before code
 for interface or behaviour changes. GitHub Actions only runs Linux-friendly checks (docs links,

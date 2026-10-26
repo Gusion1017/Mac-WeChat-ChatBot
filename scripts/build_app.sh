@@ -86,6 +86,30 @@ cp "$ROOT_DIR/tools/inject_load_dylib.py" "$RES/tools/inject_load_dylib.py"
 cp "$ROOT_DIR/tools/manage_wechat.sh" "$RES/tools/manage_wechat.sh"
 cp "$ROOT_DIR/tools/install_gadget.sh" "$RES/tools/install_gadget.sh"
 chmod +x "$RES/tools/manage_wechat.sh" "$RES/tools/install_gadget.sh"
+
+# CosyVoice3 本地旁路：只带脚本，不带 Python 依赖/模型（首次使用由 App 触发下载）。
+# App 通过 Contents/Resources/cosyvoice/ 定位 install/run 脚本与 server.py。
+mkdir -p "$RES/cosyvoice"
+for script in install_cosyvoice.sh run_cosyvoice.sh; do
+  if [ -f "$ROOT_DIR/scripts/$script" ]; then
+    cp "$ROOT_DIR/scripts/$script" "$RES/cosyvoice/$script"
+    chmod +x "$RES/cosyvoice/$script"
+  else
+    say "WARNING: scripts/$script missing; CosyVoice3 install/start will be unavailable in the bundle"
+  fi
+done
+# 只带运行时需要的 server/patch；**不带** 任何参考音或私有音色生成脚本，
+# 也不带 perf/bench。App 包不内置任何音色参考音/voices.json。
+for f in server.py patch_repo.py; do
+  if [ -f "$ROOT_DIR/devtools/cosyvoice/$f" ]; then
+    cp "$ROOT_DIR/devtools/cosyvoice/$f" "$RES/cosyvoice/$f"
+  fi
+done
+for f in CONTRACT.md README.md; do
+  if [ -f "$ROOT_DIR/devtools/cosyvoice/$f" ]; then
+    cp "$ROOT_DIR/devtools/cosyvoice/$f" "$RES/cosyvoice/$f"
+  fi
+done
 cp "$ROOT_DIR/LICENSE" "$RES/LICENSE" 2>/dev/null || true
 cp "$ROOT_DIR/ThirdPartyNotices.txt" "$RES/ThirdPartyNotices.txt" 2>/dev/null || true
 # 第三方许可全文：随二进制分发（Apache-2.0 / SILK SDK / Frida wxWindows 等）。

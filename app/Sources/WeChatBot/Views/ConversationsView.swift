@@ -11,6 +11,7 @@ struct ConversationsView: View {
     @State private var isSending = false
     @State private var workingHoursTarget: Conversation?
     @State private var renameTarget: Conversation?
+    @State private var deleteTarget: Conversation?
     /// Coalesces deferred programmatic scrolling (see `scheduleScrollToBottom`).
     @State private var autoScrollTask: Task<Void, Never>?
 
@@ -65,6 +66,21 @@ struct ConversationsView: View {
             ConversationRenameSheet(conversation: conversation) { name in
                 rename(conversation, to: name)
             }
+        }
+        .confirmationDialog(
+            L("删除聊天？"),
+            isPresented: Binding(
+                get: { deleteTarget != nil },
+                set: { if !$0 { deleteTarget = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(L("删除"), role: .destructive) {
+                if let conversation = deleteTarget { delete(conversation) }
+            }
+            Button(L("取消"), role: .cancel) { deleteTarget = nil }
+        } message: {
+            Text(L("将从本机删除该会话、聊天记录与相关记忆；微信端聊天记录不受影响。此操作无法撤销。"))
         }
     }
 
@@ -290,65 +306,6 @@ struct ConversationsView: View {
                         )
                     }
                 }
-                Section(L("语音")) {
-                    // 两项会话级覆盖：nil = 跟随全局，true/false = 显式开启/关闭。
-                    Menu {
-                        Button {
-                            setVoiceTranscription(nil, for: conversation)
-                        } label: {
-                            Label(
-                                L("语音转写跟随全局"),
-                                systemImage: conversation.voiceTranscriptionEnabled == nil ? "checkmark" : "arrow.uturn.backward"
-                            )
-                        }
-                        Button {
-                            setVoiceTranscription(true, for: conversation)
-                        } label: {
-                            Label(
-                                L("语音转写（已开启）"),
-                                systemImage: conversation.voiceTranscriptionEnabled == true ? "checkmark" : "waveform"
-                            )
-                        }
-                        Button {
-                            setVoiceTranscription(false, for: conversation)
-                        } label: {
-                            Label(
-                                L("语音转写（已关闭）"),
-                                systemImage: conversation.voiceTranscriptionEnabled == false ? "checkmark" : "waveform.slash"
-                            )
-                        }
-                    } label: {
-                        Label(L("接收转译语音"), systemImage: "waveform")
-                    }
-                    Menu {
-                        Button {
-                            setVoiceReply(nil, for: conversation)
-                        } label: {
-                            Label(
-                                L("语音回复跟随全局"),
-                                systemImage: conversation.voiceReplyEnabled == nil ? "checkmark" : "arrow.uturn.backward"
-                            )
-                        }
-                        Button {
-                            setVoiceReply(true, for: conversation)
-                        } label: {
-                            Label(
-                                L("语音回复（已开启）"),
-                                systemImage: conversation.voiceReplyEnabled == true ? "checkmark" : "speaker.wave.2"
-                            )
-                        }
-                        Button {
-                            setVoiceReply(false, for: conversation)
-                        } label: {
-                            Label(
-                                L("语音回复（已关闭）"),
-                                systemImage: conversation.voiceReplyEnabled == false ? "checkmark" : "speaker.slash"
-                            )
-                        }
-                    } label: {
-                        Label(L("语音回复"), systemImage: "speaker.wave.2")
-                    }
-                }
                 Section(L("会话")) {
                     Button(L(conversation.isPinned ? "取消置顶" : "置顶会话")) {
                         togglePin(conversation)
@@ -357,6 +314,11 @@ struct ConversationsView: View {
                         markRead(conversationID: conversation.id)
                     }
                     .disabled(conversation.unreadCount == 0)
+                    Button(role: .destructive) {
+                        deleteTarget = conversation
+                    } label: {
+                        Label(L("删除聊天…"), systemImage: "trash")
+                    }
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -630,37 +592,13 @@ struct ConversationsView: View {
         )
     }
 
-    /// 会话级「接收转译语音」覆盖：nil=跟随全局，true/false=显式开启/关闭。
-    private func setVoiceTranscription(_ enabled: Bool?, for conversation: Conversation) {
-        guard var updated = store.conversations.first(where: { $0.id == conversation.id }),
-              updated.voiceTranscriptionEnabled != enabled
-        else { return }
-        updated.voiceTranscriptionEnabled = enabled
-        store.saveConversation(updated)
-        switch enabled {
-        case .some(true):
-            toast.show("已开启此会话的语音转写", tone: .success, symbol: "waveform")
-        case .some(false):
-            toast.show("已关闭此会话的语音转写", tone: .success, symbol: "waveform.slash")
-        case .none:
-            toast.show("此会话已跟随全局语音转写设置", tone: .success, symbol: "arrow.uturn.backward")
-        }
-    }
-
-    /// 会话级「语音回复」覆盖：nil=跟随全局，true/false=显式开启/关闭。
-    private func setVoiceReply(_ enabled: Bool?, for conversation: Conversation) {
-        guard var updated = store.conversations.first(where: { $0.id == conversation.id }),
-              updated.voiceReplyEnabled != enabled
-        else { return }
-        updated.voiceReplyEnabled = enabled
-        store.saveConversation(updated)
-        switch enabled {
-        case .some(true):
-            toast.show("已开启此会话的语音回复", tone: .success, symbol: "speaker.wave.2")
-        case .some(false):
-            toast.show("已关闭此会话的语音回复", tone: .success, symbol: "speaker.slash")
-        case .none:
-            toast.show("此会话已跟随全局语音回复设置", tone: .success, symbol: "arrow.uturn.backward")
+    /// 删除聊天：只删除本机 App 保存的会话、聊天记录与相关记忆，不影响微信端聊天记录。
+    /// 会话被删除后如有新消息仍会重新出现。
+    private func delete(_ conversation: Conversation) {
+        deleteTarget = nil
+        Task {
+            await store.deleteConversation(id: conversation.id)
+            toast.show("已删除聊天「\(conversation.displayTitle)」", tone: .success, symbol: "trash")
         }
     }
 

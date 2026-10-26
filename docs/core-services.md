@@ -20,7 +20,11 @@
 | `Services/OneBotClient.swift` | WS 收事件、HTTP 发送/图片获取、媒体落地、事件解析、去重、重连 |
 | `Services/ImageFetcher.swift` | 入站图片获取串行队列 + `ImageFetchPolicy`（设置开关 / 去重 / 取消） |
 | `Services/VoiceTranscriptionService.swift` / `VoiceFetcher.swift` | 入站语音转写（SpeechAnalyzer）与 `/fetch_voice` 串行队列 |
-| `Services/VoiceSynthesisService.swift` / `VoiceModelStore.swift` / `VoiceCloneStore.swift` | 本地 TTS（sherpa-onnx Kokoro/ZipVoice）、模型下载、克隆音色 |
+| `Services/VoiceSynthesisService.swift` / `VoiceModelStore.swift` / `VoiceCloneStore.swift` | 本地 TTS（sherpa-onnx Kokoro/ZipVoice）、按引擎聚合模型下载、克隆音色 |
+| `Services/VoicePreviewController.swift` / `Models/KokoroVoiceCatalog.swift` | 音色试听（共享 AVAudioPlayer，复用合成服务）与 Kokoro 官方 103 音色 sid → name 目录 |
+| `Services/CosyVoiceClient.swift` | CosyVoice3 本地 HTTP 合成（health/voices/tts，24k PCM 解码，仅回环 endpoint） |
+| `Services/CosyVoiceRuntime.swift` / `CosyVoiceInstaller.swift` | 本地 sidecar 启停/健康轮询/日志；安装脚本执行、`PROGRESS` 解析、取消/删除 |
+| `Models/CosyVoiceVoice.swift` | 本机音色目录、health 快照、CosyVoice → Kokoro → 文字回退计划 |
 | `Services/VoiceReplyDecision.swift` | 语音回复决策（开关/概率/对等/短回复/模型就绪） |
 | `Services/VisionEngine.swift` | 识图支持：候选图片筛选、ImageIO 缩放/JPEG data URL、多模态请求消息、描述清洗 |
 | `Services/AIClient.swift` | OpenAI 兼容 `/chat/completions`，SSE 流式 / 非流式 / 超时 / 错误映射 |
@@ -519,12 +523,13 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 `HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（26）、`AppmsgRoutingTests.swift`（20）、
 `WakeWindowTests.swift`（6）、`ImageFetchTests.swift`（16）、`OneBotEventParserTests.swift`（5）、
 `DataRepairTrustTests.swift`（2）、`VisionTests.swift`（12）、`SystemVitalsTests.swift`（16），
-2026-10-26 实测共 325 项）：
+以及 `VoiceReadTests` / `VoiceSynthesisTests` / `VoiceRuntimeStatusTests` / `VoiceCatalogTests` 等语音测试；
+2026-10-27 实测共 396 项）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 325 tests, with 2 skipped, 0 failures（2026-10-26）
+# Executed 396 tests, with 8 skipped, 0 failures（2026-10-27）
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值

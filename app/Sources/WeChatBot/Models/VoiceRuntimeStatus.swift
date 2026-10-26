@@ -43,6 +43,15 @@ struct VoiceRuntimeStatus: Sendable, Equatable {
             && voiceReady && loginSettled && remainingWarmupSeconds(now: now) == 0
     }
 
+    /// 运行时启动后是否应自动提示「捕获发送句柄」。
+    ///
+    /// 只在 bridge 可用、R3 语音发送已配置且文本/语音句柄确实缺失时提示：
+    /// - bridge 未连接 / 版本不支持：无法通过手动发送解决，不弹窗；
+    /// - 仅登录预热中：句柄齐全，等倒计时结束即可，不弹窗。
+    var needsHandleCapturePromptOnStartup: Bool {
+        available && configured && voiceSend && (!textSeed || !voiceSeed)
+    }
+
     /// UI 展示用的简短状态。
     func summary(now: Date = Date()) -> String {
         if !available {

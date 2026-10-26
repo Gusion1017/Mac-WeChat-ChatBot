@@ -25,11 +25,11 @@ GADGET_SRC="${WECHAT_GADGET_SRC:-$ROOT_DIR/hook/gadget/FridaGadget.dylib}"
 CONFIG_SRC="${WECHAT_GADGET_CONFIG:-$ROOT_DIR/hook/gadget/FridaGadget.config}"
 INJECTOR="$ROOT_DIR/tools/inject_load_dylib.py"
 BACKUP_ROOT="${WECHAT_BACKUP_DIR:-$HOME/Library/Application Support/WeChatAI/backups}"
-SUPPORTED_VERSION="${WECHAT_SUPPORTED_VERSION:-4.2.0.5}"
-SUPPORTED_BUILD="${WECHAT_SUPPORTED_BUILD:-270341}"
-# 已知可用版本（version:build）。未显式设置 WECHAT_SUPPORTED_VERSION/BUILD 时，
+SUPPORTED_VERSION="${WECHAT_SUPPORTED_VERSION:-4.2.0.9}"
+SUPPORTED_BUILD="${WECHAT_SUPPORTED_BUILD:-270345}"
+# 已知可用版本（version:build），首个为默认目标。未显式设置 WECHAT_SUPPORTED_VERSION/BUILD 时，
 # 历史版本仍可安装，避免新增默认版本后旧版向导/Hook 安装被误拒。
-KNOWN_VERSION_PAIRS="4.2.0.5:270341 4.1.15.55:270135 4.1.12.53:269365"
+KNOWN_VERSION_PAIRS="4.2.0.9:270345 4.2.0.5:270341 4.1.15.55:270135 4.1.12.53:269365"
 LOAD_PATH="@executable_path/../Frameworks/FridaGadget.dylib"
 
 ACTION="${1:-status}"

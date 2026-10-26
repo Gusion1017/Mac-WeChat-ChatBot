@@ -83,7 +83,6 @@ enum L10n {
         ("^(.*) 连接失败$", "$1 connection failed"),
         ("^已重命名为「(.*)」$", "Renamed to “$1”"),
         ("^已恢复自动名称「(.*)」$", "Restored automatic name “$1”"),
-        ("^此会话语音回复概率已设为 (\\d+)%$", "Voice reply probability for this conversation set to $1%"),
         ("^已从 Keychain 删除 (.*) 的密钥$", "Deleted the key for $1 from Keychain"),
         ("^已删除通道 (.*)$", "Deleted channel $1"),
         ("^已将 (.*) 设为默认人格$", "Set $1 as the default persona"),

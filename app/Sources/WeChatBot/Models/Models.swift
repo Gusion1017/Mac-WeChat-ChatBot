@@ -133,15 +133,6 @@ struct Conversation: Identifiable, Codable, Hashable {
     /// 用户在该会话菜单里切换后写入 true/false；照片下载成功后据此决定是否自动显示。
     var imageFetchEnabled: Bool?
 
-    // MARK: 语音（2026-10-26，全部可选以兼容旧库）
-
-    /// 此会话是否启用语音转写：nil 表示跟随全局 `BotSettings.voice.transcriptionEnabled`。
-    var voiceTranscriptionEnabled: Bool?
-    /// 此会话是否允许语音回复：nil 表示跟随全局 `BotSettings.voice.replyEnabled`。
-    var voiceReplyEnabled: Bool?
-    /// 此会话语音回复概率（0...1）：nil 表示跟随全局 `replyProbability`。
-    var voiceReplyProbability: Double?
-
     /// 用户重命名或微信下发的真实昵称；nil 表示当前只有自动兜底名称。
     var customTitle: String? {
         ConversationName.customTitle(title, conversationID: id, kind: kind)
@@ -164,26 +155,11 @@ struct Conversation: Identifiable, Codable, Hashable {
     func effectiveImageFetchEnabled(global: Bool) -> Bool {
         imageFetchEnabled ?? global
     }
-
-    /// 生效的语音转写开关：会话覆盖 → 全局设置（默认开启）。
-    func effectiveVoiceTranscriptionEnabled(global: Bool) -> Bool {
-        voiceTranscriptionEnabled ?? global
-    }
-
-    /// 生效的语音回复开关：会话覆盖 → 全局设置（默认关闭）。
-    func effectiveVoiceReplyEnabled(global: Bool) -> Bool {
-        voiceReplyEnabled ?? global
-    }
-
-    /// 生效的语音回复概率（0...1）：会话覆盖 → 全局设置。
-    func effectiveVoiceReplyProbability(global: Double) -> Double {
-        min(max(voiceReplyProbability ?? global, 0), 1)
-    }
 }
 
 /// 会话展示名解析。
 ///
-/// 微信 4.1.15.55 / 4.2.0.5 的入站事件只有 wxid（Message 对象不含昵称，通讯录是加密 SQLite），
+/// 微信 4.1.15.55 / 4.2.0.x 的入站事件只有 wxid（Message 对象不含昵称，通讯录是加密 SQLite），
 /// 所以「取不到真实名称」是常态。这里集中处理三件事，避免裸 wxid 渗透到列表、AI 提示词和日志：
 /// 1. 判断标题是否真实可读（用户重命名 / 微信昵称）还是占位值；
 /// 2. 决定某个 `sender.nickname` 能不能作为会话标题学习；
@@ -468,7 +444,7 @@ enum VoiceTranscriptState: String, Codable, Hashable, Sendable {
     case done
     /// 获取或转写失败，可手动重试。
     case failed
-    /// 用户关闭了语音转写（或该会话关闭），不下载、不转写。
+    /// 用户关闭了语音转写（全局开关），不下载、不转写。
     case disabled
 }
 
@@ -892,7 +868,7 @@ struct HookStatus: Codable, Hashable {
     var gatewayConnected: Bool = false
     var versionConfigFile: String = ""
     var matchedVersion: Bool = false
-    /// 4.1.15.55 / 4.2.0.5 R3 原生发送是否启用/已拿到发送句柄（种子闭包）。
+    /// 4.1.15.55 / 4.2.0.x R3 原生发送是否启用/已拿到发送句柄（种子闭包）。
     var r3Active: Bool = false
     var r3Seeded: Bool = false
     var r3Queued: Int = 0
@@ -1073,12 +1049,24 @@ struct VoiceSettings: Codable, Hashable {
     var engine: VoiceEngineKind = .kokoro
     /// Kokoro 音色编号。
     var kokoroSpeakerID: Int = 0
-    /// Kokoro 语速（0.5–2.0）。
-    var kokoroSpeed: Double = 1.0
+    /// Kokoro 语速（0.5–2.0，默认 1.25：三档快捷里的「自然」档）。
+    var kokoroSpeed: Double = 1.25
     /// 克隆音色档案 ID（engine == .zipvoiceClone 时使用）。
     var cloneID: String?
     /// 是否已同意按需下载语音模型（默认关闭，下载前必须为 true）。
     var modelDownloadConsent: Bool = false
+
+    // MARK: CosyVoice3 本地服务（2026-10-27，全部可选以兼容旧配置）
+
+    /// CosyVoice3 音色 ID（来自本机 voices.json / 服务端 `/voices`）。
+    /// **不设默认音色**：App 不内置任何音色，空字符串表示「未选择音色」。
+    var cosyVoiceVoiceID: String = ""
+    /// 本地服务地址（默认 `http://127.0.0.1:5051`；改端口时同步改这里）。
+    var cosyVoiceEndpoint: String = "http://127.0.0.1:5051"
+    /// 启动 App / 切换到 CosyVoice3 时自动拉起本地服务（默认开启）。
+    var cosyVoiceAutoStart: Bool = true
+    /// CosyVoice3 语速（0.5–2.0，默认 1.0；与 Kokoro 语速互相独立）。
+    var cosyVoiceSpeed: Double = 1.0
 
     // MARK: 生效值
 
@@ -1098,10 +1086,42 @@ struct VoiceSettings: Codable, Hashable {
         return min(max(replyProbability, 0), 1)
     }
 
-    /// 生效的 Kokoro 语速（0.5...2.0）。
+    /// 生效的 Kokoro 语速（0.5...2.0，默认 1.25）。
     var effectiveKokoroSpeed: Double {
-        guard kokoroSpeed.isFinite else { return 1.0 }
+        guard kokoroSpeed.isFinite else { return 1.25 }
         return min(max(kokoroSpeed, 0.5), 2.0)
+    }
+
+    /// 生效的 CosyVoice3 音色 ID：空白保持空（未选择音色），不自动回退到 girl。
+    var effectiveCosyVoiceVoiceID: String {
+        CosyVoiceVoiceCatalog.resolvedVoiceID(cosyVoiceVoiceID)
+    }
+
+    /// 是否已经选择了可用的 CosyVoice3 音色。
+    var hasCosyVoiceVoice: Bool { !effectiveCosyVoiceVoiceID.isEmpty }
+
+    /// 生效的 CosyVoice3 语速（0.5...2.0，默认 1.0）。
+    var effectiveCosyVoiceSpeed: Double {
+        guard cosyVoiceSpeed.isFinite else { return 1.0 }
+        return min(max(cosyVoiceSpeed, 0.5), 2.0)
+    }
+
+    /// 是否启用 CosyVoice3 引擎。
+    var usesCosyVoice: Bool { engine == .cosyVoice }
+
+    /// 用户填写的服务地址是否可解析（http/https + host）。
+    var hasValidCosyVoiceEndpoint: Bool {
+        CosyVoiceClient.normalizedEndpoint(cosyVoiceEndpoint) != nil
+    }
+
+    /// 生效的 CosyVoice3 服务地址：非法/空白回退默认 `127.0.0.1:5051`。
+    var effectiveCosyVoiceEndpoint: URL {
+        CosyVoiceClient.normalizedEndpoint(cosyVoiceEndpoint) ?? CosyVoiceClient.defaultEndpoint
+    }
+
+    /// 生效的 Kokoro 音色编号（收敛到模型内置的 103 个音色）。
+    var effectiveKokoroSpeakerID: Int {
+        KokoroVoiceCatalog.clampedSpeakerID(kokoroSpeakerID)
     }
 
     /// 是否启用克隆引擎且填写了档案 ID。
@@ -1129,6 +1149,10 @@ extension VoiceSettings {
         case kokoroSpeed
         case cloneID
         case modelDownloadConsent
+        case cosyVoiceVoiceID
+        case cosyVoiceEndpoint
+        case cosyVoiceAutoStart
+        case cosyVoiceSpeed
     }
 
     init(from decoder: Decoder) throws {
@@ -1164,12 +1188,24 @@ extension VoiceSettings {
         cloneID = try container.decodeIfPresent(String.self, forKey: .cloneID)
         modelDownloadConsent = try container.decodeIfPresent(Bool.self, forKey: .modelDownloadConsent)
             ?? defaults.modelDownloadConsent
+        // CosyVoice3：旧配置没有这些键时全部走默认值（girl / 127.0.0.1:5051 / 自动启动 / 1.0）。
+        cosyVoiceVoiceID = try container.decodeIfPresent(String.self, forKey: .cosyVoiceVoiceID)
+            ?? defaults.cosyVoiceVoiceID
+        cosyVoiceEndpoint = try container.decodeIfPresent(String.self, forKey: .cosyVoiceEndpoint)
+            ?? defaults.cosyVoiceEndpoint
+        cosyVoiceAutoStart = try container.decodeIfPresent(Bool.self, forKey: .cosyVoiceAutoStart)
+            ?? defaults.cosyVoiceAutoStart
+        cosyVoiceSpeed = try container.decodeIfPresent(Double.self, forKey: .cosyVoiceSpeed)
+            ?? defaults.cosyVoiceSpeed
 
         // 解码后收敛数值范围（手改配置/历史异常值）。
         maxVoiceSeconds = effectiveMaxVoiceSeconds
         shortReplyMaxChars = effectiveShortReplyMaxChars
         replyProbability = effectiveReplyProbability
         kokoroSpeed = effectiveKokoroSpeed
+        kokoroSpeakerID = effectiveKokoroSpeakerID
+        cosyVoiceVoiceID = effectiveCosyVoiceVoiceID
+        cosyVoiceSpeed = effectiveCosyVoiceSpeed
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1185,10 +1221,15 @@ extension VoiceSettings {
         try container.encode(effectiveMaxVoiceSeconds, forKey: .maxVoiceSeconds)
         try container.encode(overLimit.rawValue, forKey: .overLimit)
         try container.encode(engine.rawValue, forKey: .engine)
-        try container.encode(kokoroSpeakerID, forKey: .kokoroSpeakerID)
+        try container.encode(effectiveKokoroSpeakerID, forKey: .kokoroSpeakerID)
         try container.encode(effectiveKokoroSpeed, forKey: .kokoroSpeed)
         try container.encodeIfPresent(cloneID, forKey: .cloneID)
         try container.encode(modelDownloadConsent, forKey: .modelDownloadConsent)
+        try container.encode(effectiveCosyVoiceVoiceID, forKey: .cosyVoiceVoiceID)
+        try container.encode(CosyVoiceClient.normalizedEndpoint(cosyVoiceEndpoint)?.absoluteString
+            ?? cosyVoiceEndpoint, forKey: .cosyVoiceEndpoint)
+        try container.encode(cosyVoiceAutoStart, forKey: .cosyVoiceAutoStart)
+        try container.encode(effectiveCosyVoiceSpeed, forKey: .cosyVoiceSpeed)
     }
 }
 

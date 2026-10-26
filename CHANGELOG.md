@@ -6,6 +6,96 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-10-27
+
+### 新增
+
+- **CosyVoice3 可选高保真引擎（2026-10-27）**：新增 `.cosyVoice` 引擎与本地 Python sidecar
+  （`devtools/cosyvoice/`，`Fun-CosyVoice3-0.5B-2512`，Apache-2.0，24 kHz）；设置页可安装/下载
+  （运行环境约 2–3 GB + 模型约 5–7 GB，可取消/重试/删除）、启动/停止、查看日志与试听；
+  本机音色由用户自行导入；Kokoro 仍为
+  默认，CosyVoice 未安装/服务未启动/合成失败时自动回退 Kokoro，再失败才改发文字。新增
+  `CosyVoiceTests`、`docs/cosyvoice.md`；打包时把安装/启动脚本复制到 `Contents/Resources/cosyvoice/`。
+  实测 CPU 热态 RTF≈1.5（4 步）/1.83（6 步），启动到 ready≈22s、RSS≈8.65GB，**不承诺实时**；
+  默认 Kokoro，CosyVoice 仅作高质量/离线可选。Swift 396 项测试通过（8 跳过）。
+- **Kokoro 语速 1.0/1.25/1.5 三档快捷（2026-10-27）**：默认 1.25×，仍可用滑杆 0.5×–2.0× 微调；
+  整段合成下 1.5× 会偏快，1.25× 是自然度优先的默认值。
+- **会话页删除聊天（2026-10-27）**：会话详情「会话设置 → 会话 → 删除聊天…」可删除本机保存的聊天
+  （会话列表不提供右键删除）；二次确认明确「删除会话、聊天记录与相关记忆，不影响微信端聊天记录」，
+  删除后自动回到空状态；若之后收到新消息，会话会重新出现。
+
+### 变更
+
+- **移除会话级语音设置（2026-10-27）**：会话详情「会话设置 → 语音」整体移除，语音转写与语音回复
+  只保留「机器人 → 语音」全局开关。运行时不再读取旧库里的会话级覆盖字段，`Conversation` 的
+  `voiceTranscriptionEnabled` / `voiceReplyEnabled` / `voiceReplyProbability`、数据库映射与相关单测同步删除。
+- **语音回复首次开启/启动时检测发送句柄（2026-10-27）**：开启「允许语音回复」后立即向 bridge 检测
+  文本/语音句柄并弹出捕获引导（不再要求 bridge 已配置/已运行）；bridge 启动后若已开启语音回复但
+  句柄缺失，也会自动提示一次（同一 App 会话最多一次）。引导弹窗新增当前状态与原因说明
+  （bridge 未连接、R3 原生发送未开启、微信版本不支持、登录预热中），避免步骤一直「待完成」却不知道原因。
+
+### 新增（音色管理）
+
+- **CosyVoice3 音色管理与个人使用声明（2026-10-27）**：所有用户新增音色标记
+  `personal_use_only=true`（内部元数据），UI 不再显示个人使用徽标/提醒，新增/编辑无需勾选；新增「管理音色…」sheet：可导入 5–30s 的 wav/m4a/aiff 参考音、自动转写或手填参考文本、
+  命名/简介、试听、编辑、删除（内置不可删）；音频统一转 24k mono 16-bit 并峰值归一；写入
+  `voices.json` + `<id>/prompt.wav|txt|meta.json`，服务运行中调用 `POST /voices/reload` 即时生效，
+  未运行则下次启动生效。服务端 `GET /voices` 返回 `personal_use_only`/`builtin`。
+  **App 包不内置任何音色/参考音频/`voices.json`**；普通用户安装后音色列表为空，需自行添加。
+  自定义音色支持导出 `.zip` 备份（内置不可导出，导出物为音色文件 + 中性备份说明，不提供网络上传/分享）。
+
+- **语音合成管线（2026-10-27）**：Kokoro 传入 `date-zh/phone-zh/number-zh` 三个 `rule_fsts`
+  （`phone` 在 `number` 前，避免手机号被读成基数）；关闭 Kokoro/ZipVoice 内部按标点切分
+  （`min/max_words_in_sentence` 整段合成）；`silence_scale` 0.2 → 0.8；App 直接输出引擎原生
+  24 kHz WAV（不再强制 16k），bridge 按 WAV 头识别 16k/24k（16k 才重采样）；合成后加 5 ms
+  淡入淡出；ZipVoice 的旧 `min_char_in_sentence` 改为 v2.0.0 有效的 `min/max_words_in_sentence`。
+- **朗读稿清洗（2026-10-27）**：去掉开头的 `@昵称`，`——/—` 转逗号，`85%` 转「百分之85」，
+  `¥120` / `$20` 转「120元」/「20美元」；数字仍交给 FST。
+- **微信 4.2.0.9 (270345) 适配（2026-10-27）**：新增 `hook/versions/4_2_0_9_mac.json`；App 的
+  R3 发送版本门禁（`NativeSendVersionSupport`）与 `tools/install_gadget.sh` / `tools/manage_wechat.sh`
+  的默认目标、已知版本对同步更新为 4.2.0.9 (270345)，历史 4.2.0.5 / 4.1.15.55 / 4.1.12.53 继续可安装；
+  arm64 偏移按 4.2.0.5 → 4.2.0.9 的差异重新定位（函数为字节级同构，虚表/全局按 chained fixups
+  与代码交叉引用定位）。`README` 与 `docs/install.md` / `docs/architecture.md` / `docs/bridge.md` /
+  `docs/voice.md` / `docs/ui-design.md` 同步更新。2026-10-27 在 4.2.0.9 (270345) 完成真机验证：Gadget 注入 + ad-hoc 重签（保留 sandbox entitlements）、WeChat 正常启动且 gadget 27042 监听；hook 基址解析与 classA/service vptr 校验通过；通讯录解密读取（29 联系人 / 1 群 / 10 群成员，DB key 回灌）；入站自消息事件正确；手动发一条文本捕获并持久化 R3 发送句柄后，R3 文本发送到文件传输助手 slot13 返回 0、worker result=1。语音发送沿用同一链路但本轮未复测（需手动发一条语音捕获 voice seed/header）；群聊 @ / 拍一拍与媒体下载未复测。
+
+### 修复
+
+- **语音吞数字（2026-10-27）**：不传 `rule_fsts` 时 `3`/`2026`/`13800138000`/`85%` 被 sherpa
+  当 OOV 静默跳过（不是读错，是没读）；现在数字/日期/电话按中文读法输出，手机号按位读。
+- **语音按逗号断句（2026-10-27）**：49 字回复原先被切成 4 段独立合成再硬拼接；现在整段一次
+  合成，句内语气连续、停顿自然（实测 4 碎片 7.17s ≈ 拼接 7.18s；整段后 6–8s 且停顿 200–500ms）。
+- **24k 语音被降 16k 再插值回 24k（2026-10-27）**：改为 24k 直通；`/send_voice` 兼容旧 16k
+  WAV/裸 PCM，新增 24k WAV 单测。
+
+### 文档
+
+- 新增 [`docs/cosyvoice.md`](docs/cosyvoice.md)；更新 `docs/voice.md`（FST/整段/24k/性能/质量修复）、
+  `docs/ui-design.md`（CosyVoice 设置区/语速三档）、`docs/core-services.md`（CosyVoice 文件）。
+
+- **语音音色选择与试听（2026-10-27）**：Kokoro 内置 103 个音色按官方 sid → name 固化
+  （中文女声 55 / 中文男声 45 / 英文女声 3），机器人 → 语音新增音色选择 sheet（搜索、分组、
+  逐行试听）；主面板也可直接试听当前音色。试听与真实回复共用 `VoiceSynthesisService`，
+  合成后在本地用 `AVAudioPlayer` 播放，不发往微信；全局只保留一个播放器，切换音色/语速自动停止。
+  新增 8 项 `VoiceCatalogTests`；Swift 335 项测试通过（2 项模型依赖测试跳过）。
+
+### 变更
+
+- **机器人语音设置精简（2026-10-27）**：把「语音引擎（TTS）」与「语音模型与克隆音色」合并为
+  「语音引擎与音色」；Kokoro 音色不再用 0–200 裸编号 Stepper，克隆音色不再手填档案 ID；
+  模型只展示当前引擎需要的文件（Kokoro 365MB；ZipVoice 主模型 + 声码器 163MB），
+  行内下载/取消/重试，删除收进菜单，去掉「下载全部」、三个模型行与「允许下载语音模型」开关
+  （首次下载改为体积确认框）；「语音回复」未开启时收起策略项，「语音发送状态」仅在开启后显示，
+  去掉重复的两行句柄明细；发送状态轮询从每秒请求 bridge 改为每 5 秒一次（倒计时仍按本地 tick 更新）；
+  删除 `SettingsView` 中已废弃的整份语音设置副本（约 600 行）。
+
+### 修复
+
+- **已下载语音模型被半截目录误判为就绪（2026-10-27）**：`VoiceModelStore.isModelReady` 原先只看
+  解包目录是否存在，tar 中途失败会留下半截目录，导致下载按钮跳过、合成时才报模型不完整；
+  现在按实际文件校验（Kokoro 的 model/voices/tokens、ZipVoice 的 tokens/encoder/decoder）。
+- **手改配置的超界音色编号（2026-10-27）**：`kokoroSpeakerID` 在解码/保存与合成前统一收敛到
+  0–102，避免 UI 显示越界编号或引擎侧静默落到别的音色。
+
 ## [1.4.0] — 2026-10-26
 
 ### 新增
@@ -420,9 +510,10 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.5.0...HEAD
 [1.3.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.3.0
 [1.4.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.4.0
+[1.5.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.5.0
 [1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.0

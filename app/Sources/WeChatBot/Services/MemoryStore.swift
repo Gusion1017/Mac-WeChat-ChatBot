@@ -155,10 +155,7 @@ actor MemoryStore {
             is_muted INTEGER NOT NULL DEFAULT 0,
             note TEXT NOT NULL DEFAULT '',
             working_hours TEXT,
-            image_fetch_enabled INTEGER,
-            voice_transcription_enabled INTEGER,
-            voice_reply_enabled INTEGER,
-            voice_reply_probability REAL
+            image_fetch_enabled INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_conversations_last_message
             ON conversations (is_pinned DESC, last_message_at DESC);
@@ -270,17 +267,7 @@ actor MemoryStore {
             try execute("ALTER TABLE messages ADD COLUMN image_description TEXT;")
         }
 
-        // v7: 入站语音（2026-10-26）。
-        // conversations：会话级语音覆盖（NULL = 跟随全局设置）。
-        if try !columnExists(in: "conversations", column: "voice_transcription_enabled") {
-            try execute("ALTER TABLE conversations ADD COLUMN voice_transcription_enabled INTEGER;")
-        }
-        if try !columnExists(in: "conversations", column: "voice_reply_enabled") {
-            try execute("ALTER TABLE conversations ADD COLUMN voice_reply_enabled INTEGER;")
-        }
-        if try !columnExists(in: "conversations", column: "voice_reply_probability") {
-            try execute("ALTER TABLE conversations ADD COLUMN voice_reply_probability REAL;")
-        }
+        // v7: 入站语音（2026-10-26）。会话级语音覆盖已移除，不再新增 conversations 列。
         // messages：语音本地路径/时长/转写/置信度/状态（全部 NULL = 旧数据）。
         if try !columnExists(in: "messages", column: "voice_media_path") {
             try execute("ALTER TABLE messages ADD COLUMN voice_media_path TEXT;")
@@ -341,8 +328,7 @@ actor MemoryStore {
         let sql = """
         SELECT id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
                ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours,
-               image_fetch_enabled, voice_transcription_enabled, voice_reply_enabled,
-               voice_reply_probability
+               image_fetch_enabled
         FROM conversations
         ORDER BY is_pinned DESC, COALESCE(last_message_at, 0) DESC
         LIMIT ? OFFSET ?;
@@ -363,8 +349,7 @@ actor MemoryStore {
         let statement = try prepare("""
         SELECT id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
                ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours,
-               image_fetch_enabled, voice_transcription_enabled, voice_reply_enabled,
-               voice_reply_probability
+               image_fetch_enabled
         FROM conversations WHERE id = ? LIMIT 1;
         """)
         defer { sqlite3_finalize(statement) }
@@ -1174,9 +1159,8 @@ actor MemoryStore {
         INSERT INTO conversations (
             id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
             ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours,
-            image_fetch_enabled, voice_transcription_enabled, voice_reply_enabled,
-            voice_reply_probability
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            image_fetch_enabled
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             kind = excluded.kind,
             title = excluded.title,
@@ -1192,10 +1176,7 @@ actor MemoryStore {
             is_muted = excluded.is_muted,
             note = excluded.note,
             working_hours = excluded.working_hours,
-            image_fetch_enabled = excluded.image_fetch_enabled,
-            voice_transcription_enabled = excluded.voice_transcription_enabled,
-            voice_reply_enabled = excluded.voice_reply_enabled,
-            voice_reply_probability = excluded.voice_reply_probability;
+            image_fetch_enabled = excluded.image_fetch_enabled;
         """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -1218,9 +1199,6 @@ actor MemoryStore {
             try bind(statement, 14, conversation.note)
             try bind(statement, 15, encodeWorkingHours(conversation.workingHours))
             try bind(statement, 16, conversation.imageFetchEnabled.map { Int32($0 ? 1 : 0) })
-            try bind(statement, 17, conversation.voiceTranscriptionEnabled.map { Int32($0 ? 1 : 0) })
-            try bind(statement, 18, conversation.voiceReplyEnabled.map { Int32($0 ? 1 : 0) })
-            try bind(statement, 19, conversation.voiceReplyProbability)
             try stepDone(statement)
         }
     }
@@ -1242,10 +1220,7 @@ actor MemoryStore {
             isMuted: int(statement, 12) != 0,
             note: try text(statement, 13),
             workingHours: decodeWorkingHours(optionalText(statement, 14)),
-            imageFetchEnabled: optionalInt(statement, 15).map { $0 != 0 },
-            voiceTranscriptionEnabled: optionalInt(statement, 16).map { $0 != 0 },
-            voiceReplyEnabled: optionalInt(statement, 17).map { $0 != 0 },
-            voiceReplyProbability: optionalDouble(statement, 18)
+            imageFetchEnabled: optionalInt(statement, 15).map { $0 != 0 }
         )
     }
 

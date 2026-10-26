@@ -7,7 +7,6 @@ import Foundation
 /// 注入 `Double.random(in: 0..<1)`，测试里可固定。
 struct VoiceReplyContext: Sendable, Equatable {
     var global: VoiceSettings
-    var conversation: Conversation
     var incomingWasVoice: Bool
     var replyText: String
     var modelsReady: Bool
@@ -38,7 +37,7 @@ enum VoiceReplyDecision: Equatable, Sendable {
 /// 语音回复决策纯函数（spec §3.2）。
 ///
 /// 判定顺序（命中即返回，保证行为可解释、可单测）：
-/// 1. **开关**：会话覆盖 → 全局 `replyEnabled`；关闭时发文字；
+/// 1. **开关**：全局 `replyEnabled`；关闭时发文字；
 /// 2. **模型就绪**：TTS 引擎/模型未就绪时发文字（不阻塞文字回复）；
 /// 3. **对等**：`mirrorIncomingVoice` 时只有本轮收到语音才考虑回语音；
 /// 4. **短回复**：`shortReplyOnly` 且回复字符数超过阈值时发文字；
@@ -46,9 +45,8 @@ enum VoiceReplyDecision: Equatable, Sendable {
 /// 6. 兜底：文字。
 func decideVoiceReply(_ ctx: VoiceReplyContext) -> VoiceReplyDecision {
     let settings = ctx.global
-    let enabled = ctx.conversation.effectiveVoiceReplyEnabled(global: settings.replyEnabled)
-    guard enabled else {
-        return .text(reason: "语音回复已关闭（会话/全局开关）")
+    guard settings.replyEnabled else {
+        return .text(reason: "语音回复已关闭")
     }
     guard ctx.modelsReady else {
         return .text(reason: "语音模型未就绪")
@@ -63,8 +61,7 @@ func decideVoiceReply(_ ctx: VoiceReplyContext) -> VoiceReplyDecision {
     if settings.shortReplyOnly, text.count > settings.effectiveShortReplyMaxChars {
         return .text(reason: "仅短回复：\(text.count) 字 > \(settings.effectiveShortReplyMaxChars) 字")
     }
-    // 概率仍由全局设置控制（会话只覆盖总开关），避免旧库里的概率覆盖让「已开启」
-    // 的会话被静默拦住不发语音。
+    // 概率由全局设置控制（旧库里的会话级概率覆盖已不再读取）。
     let probability = settings.effectiveReplyProbability
     guard probability > 0 else {
         return .text(reason: "语音回复概率为 0")

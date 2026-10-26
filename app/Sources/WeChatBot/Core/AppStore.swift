@@ -36,6 +36,10 @@ final class AppStore {
     /// 由 Runtime 刷新；设置页只读展示，语音回复决策用它拦截未就绪状态。
     var voiceRuntimeStatus: VoiceRuntimeStatus = .unavailable
 
+    /// 首次启用语音回复 / 运行时启动后检测到发送句柄缺失时，由 RootView 弹出的捕获引导。
+    /// 与语音设置面板内的局部弹窗相互独立：面板负责「用户刚开启开关」，这里负责「启动时检测」。
+    var isVoiceSetupPromptPresented = false
+
     /// 本机电池快照。Runtime 每 30 秒刷新一次；台式机保持 `.unavailable`。
     var batteryStatus: BatteryStatus = .unavailable
 
@@ -62,9 +66,15 @@ final class AppStore {
     let voiceTranscription = VoiceTranscriptionService()
 
     /// 本地语音合成（sherpa-onnx actor）；回复投递时按设置决定是否改用语音。
-    let voiceSynthesis = VoiceSynthesisService()
+    let voiceSynthesis: VoiceSynthesisService
+
+    /// 音色试听：与合成服务共用引擎；两个设置入口共用一个播放器，避免同时出声。
+    let voicePreview: VoicePreviewController
 
     init(settings: AppSettings = SettingsStore.load()) {
+        let synthesis = VoiceSynthesisService()
+        self.voiceSynthesis = synthesis
+        self.voicePreview = VoicePreviewController(synthesis: synthesis)
         self.settings = settings
         self.providers = settings.providers
         self.personas = settings.personas
