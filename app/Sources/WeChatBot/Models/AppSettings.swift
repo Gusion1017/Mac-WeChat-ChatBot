@@ -224,8 +224,9 @@ struct VisionSettings: Codable, Hashable {
 
 struct AISettings: Codable, Hashable {
     var defaultProviderID: String?
+    /// 流式总开关：关闭时所有通道都等待完整回复；开启时由各通道自己的 `stream` 决定。
     var streamReplies: Bool = true
-    var requestTimeoutSeconds: Double = 60
+    /// 失败后的**额外**重试次数（0 = 不重试），实际最多请求 `retryCount + 1` 次。
     var retryCount: Int = 1
     /// 按模型名（如 `deepseek-chat`）单独配置的温度。
     /// `nil` 表示尚未迁移；字典中缺失某个模型时，请求不发送 temperature，

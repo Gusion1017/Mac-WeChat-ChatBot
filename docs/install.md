@@ -4,7 +4,7 @@
 > GitHub 的「Download ZIP」默认只给**源码**，不含已编译的 App、bridge 二进制和 Frida Gadget。
 > 非开发者请让发布者提供 **Releases 里的 App 压缩包**；只有源码时按「源码构建」操作。
 >
-> 当前发布版本：**1.3.0（build 11，2026-10-26）**，Releases 压缩包约 71MB。
+> 当前发布版本：**1.4.0（build 12，2026-10-26）**，Releases 压缩包约 71MB。
 
 ## 1. 先确认环境
 
@@ -30,13 +30,13 @@
 
 ## 2. 方式 A：Releases 里的 App 压缩包（推荐给普通用户）
 
-发布者在本地构建后，把 `WeChat AI.app` 压缩上传到 GitHub Releases。当前版本 **1.3.0（约 71MB）**。
+发布者在本地构建后，把 `WeChat AI.app` 压缩上传到 GitHub Releases。当前版本 **1.4.0（约 71MB）**。
 
-1. 下载 `WeChat-AI-1.3.0.zip`（建议同时下载 `.sha256`），解压 zip，得到 `WeChat AI.app`。
+1. 下载 `WeChat-AI-1.4.0.zip`（建议同时下载 `.sha256`），解压 zip，得到 `WeChat AI.app`。
    可选校验（在下载目录执行）：
 
    ```bash
-   shasum -a 256 -c WeChat-AI-1.3.0.zip.sha256
+   shasum -a 256 -c WeChat-AI-1.4.0.zip.sha256
    ```
 
 2. 把 `WeChat AI.app` 拖到 `~/Applications`（当前用户，无需管理员）或 `/Applications`（所有用户）。
@@ -129,7 +129,7 @@ Xcode 自带 Command Line Tools，满足 Hook 的 `python3` / `otool` 依赖。
 
 ## 4. 发布者：如何制作可下载的 App 压缩包
 
-当前发布版本 **1.3.0（build 11，2026-10-26）**，zip 约 **71MB**。在已具备 Xcode 27 / CLT 的机器上，
+当前发布版本 **1.4.0（build 12，2026-10-26）**，zip 约 **71MB**。在已具备 Xcode 27 / CLT 的机器上，
 按下面顺序构建（`build_app.sh` 会在缺库时自动下载 sherpa-onnx，但显式执行更便于定位失败）：
 
 ```bash
@@ -142,15 +142,15 @@ bash scripts/package_release.sh      # 或 make release
 
 脚本会校验必需资源、检查签名、打包并生成 SHA256，产物：
 
-- `dist/WeChat-AI-1.3.0.zip`
-- `dist/WeChat-AI-1.3.0.zip.sha256`
+- `dist/WeChat-AI-1.4.0.zip`
+- `dist/WeChat-AI-1.4.0.zip.sha256`
 
 `package_release.sh --skip-build` 可复用 `dist/WeChat AI.app` 重新打包。也可以手动执行：
 
 ```bash
 bash scripts/build_app.sh
-/usr/bin/ditto -c -k --norsrc --keepParent "dist/WeChat AI.app" "dist/WeChat-AI-1.3.0.zip"
-( cd dist && shasum -a 256 "WeChat-AI-1.3.0.zip" > "WeChat-AI-1.3.0.zip.sha256" )
+/usr/bin/ditto -c -k --norsrc --keepParent "dist/WeChat AI.app" "dist/WeChat-AI-1.4.0.zip"
+( cd dist && shasum -a 256 "WeChat-AI-1.4.0.zip" > "WeChat-AI-1.4.0.zip.sha256" )
 ```
 
 签名与公证的预期：
@@ -166,10 +166,10 @@ bash scripts/build_app.sh
 
 ```bash
 cd dist
-shasum -a 256 -c WeChat-AI-1.3.0.zip.sha256
+shasum -a 256 -c WeChat-AI-1.4.0.zip.sha256
 ```
 
-把 zip 与 `.sha256` 上传到 GitHub **Releases**（tag 建议 `v1.3.0`），在说明里写清：
+把 zip 与 `.sha256` 上传到 GitHub **Releases**（tag 建议 `v1.4.0`），在说明里写清：
 
 - 支持 Apple Silicon / macOS 26+ / 微信 4.2.0.5、4.1.15.55 或 4.1.12.53；
 - **安装 Hook 需要 Xcode Command Line Tools**（`xcode-select --install`，无需开发者账号），

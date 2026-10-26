@@ -46,7 +46,7 @@ enum VoiceReplyDecision: Equatable, Sendable {
 /// 6. 兜底：文字。
 func decideVoiceReply(_ ctx: VoiceReplyContext) -> VoiceReplyDecision {
     let settings = ctx.global
-    let enabled = settings.replyEnabled
+    let enabled = ctx.conversation.effectiveVoiceReplyEnabled(global: settings.replyEnabled)
     guard enabled else {
         return .text(reason: "语音回复已关闭（会话/全局开关）")
     }
@@ -63,6 +63,8 @@ func decideVoiceReply(_ ctx: VoiceReplyContext) -> VoiceReplyDecision {
     if settings.shortReplyOnly, text.count > settings.effectiveShortReplyMaxChars {
         return .text(reason: "仅短回复：\(text.count) 字 > \(settings.effectiveShortReplyMaxChars) 字")
     }
+    // 概率仍由全局设置控制（会话只覆盖总开关），避免旧库里的概率覆盖让「已开启」
+    // 的会话被静默拦住不发语音。
     let probability = settings.effectiveReplyProbability
     guard probability > 0 else {
         return .text(reason: "语音回复概率为 0")

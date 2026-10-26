@@ -36,6 +36,16 @@ final class AppStore {
     /// 由 Runtime 刷新；设置页只读展示，语音回复决策用它拦截未就绪状态。
     var voiceRuntimeStatus: VoiceRuntimeStatus = .unavailable
 
+    /// 本机电池快照。Runtime 每 30 秒刷新一次；台式机保持 `.unavailable`。
+    var batteryStatus: BatteryStatus = .unavailable
+
+    /// DeepSeek 账户余额状态。Runtime 启动后查询一次、之后每 5 分钟刷新，
+    /// 也可由总览「设备与账户」卡手动刷新；不持久化。
+    var deepSeekBalance: DeepSeekBalanceState = .idle
+
+    /// 余额后台刷新中（已有历史值时保持展示旧值，只在卡片上显示小菊花）。
+    var isBalanceRefreshing = false
+
     /// 自动回复流水线的实时阶段快照，按会话 ID 索引（不持久化）。
     /// 由 `RuntimeCoordinator` 在收到消息后写入，供会话页头、输入区状态条与会话列表实时展示。
     var replyProgress: [String: ReplyProgress] = [:]

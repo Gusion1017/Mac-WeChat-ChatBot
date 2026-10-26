@@ -79,6 +79,18 @@ struct MenuBarView: View {
                 value: store.defaultProvider?.name ?? "未配置",
                 color: store.defaultProvider?.enabled == true ? Theme.success : .secondary
             )
+            statusRow(
+                symbol: batteryMenuSymbol,
+                label: "电量",
+                value: batteryMenuValue,
+                color: batteryMenuColor
+            )
+            statusRow(
+                symbol: "creditcard",
+                label: "余额",
+                value: balanceMenuValue,
+                color: balanceMenuColor
+            )
             HStack(spacing: 8) {
                 statPill(icon: "arrow.down.message", value: "\(store.stats.receivedToday)", label: "收到")
                 statPill(icon: "arrow.up.message", value: "\(store.stats.repliedToday)", label: "回复")
@@ -124,6 +136,61 @@ struct MenuBarView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 4)
         .background(Color.primary.opacity(0.04), in: Capsule())
+    }
+
+    // MARK: System vitals
+
+    private var batteryMenuSymbol: String {
+        let status = store.batteryStatus
+        guard status.isPresent else { return "desktopcomputer" }
+        switch status.percentage {
+        case 88...: return "battery.100percent"
+        case 63...: return "battery.75percent"
+        case 38...: return "battery.50percent"
+        case 13...: return "battery.25percent"
+        default: return "battery.0percent"
+        }
+    }
+
+    private var batteryMenuValue: String {
+        let status = store.batteryStatus
+        guard status.isPresent else { return L("未检测到") }
+        let stateText: String
+        if status.isCharging {
+            stateText = L("充电中")
+        } else if status.isFullyCharged {
+            stateText = L("已充满")
+        } else if status.isOnExternalPower {
+            stateText = L("已接电源")
+        } else {
+            stateText = L("电池供电")
+        }
+        return "\(status.percentage)% · \(stateText)"
+    }
+
+    private var batteryMenuColor: Color {
+        let status = store.batteryStatus
+        guard status.isPresent else { return .secondary }
+        if status.percentage < 20 { return Theme.danger }
+        if status.isCharging || status.isOnExternalPower { return Theme.accent }
+        return status.percentage < 50 ? Theme.warning : Theme.success
+    }
+
+    private var balanceMenuValue: String {
+        switch store.deepSeekBalance {
+        case .idle, .loading: return L("查询中…")
+        case .unavailable: return L("未配置")
+        case .failed: return L("查询失败")
+        case .loaded(let snapshot): return snapshot.primary?.displayTotal ?? L("无余额数据")
+        }
+    }
+
+    private var balanceMenuColor: Color {
+        switch store.deepSeekBalance {
+        case .loaded(let snapshot): return snapshot.isAvailable ? Theme.success : Theme.danger
+        case .failed: return Theme.warning
+        case .idle, .loading, .unavailable: return .secondary
+        }
     }
 
     // MARK: Actions

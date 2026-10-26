@@ -665,6 +665,43 @@ final class VoiceReadTests: XCTestCase {
         )
     }
 
+    func testPromptTextKeepsOutgoingVoiceUnlabelled() {
+        // AI 自己的 TTS 语音回复也会进短期历史。如果它也带「[语音 Ns]」标注，
+        // 模型会误以为这是自己的回复格式并照抄（真机复现：文字回复以「[语音 8s]」开头）。
+        var spoken = voiceMessage(transcript: nil, state: .disabled, durationMs: 9_680, text: "@老大爷 我在呢")
+        spoken.direction = .outgoing
+        spoken.senderID = "self"
+        spoken.senderName = "我"
+        XCTAssertEqual(ChatEngine.promptText(for: spoken), "@老大爷 我在呢")
+
+        // 自消息回显只有桥接占位「[语音]」：整条跳过，不能变成只有标注的 assistant 轮次。
+        var echo = voiceMessage(transcript: nil, state: .disabled, durationMs: 9_680, text: "[语音]")
+        echo.direction = .outgoing
+        XCTAssertEqual(ChatEngine.promptText(for: echo), "")
+    }
+
+    func testTranscriptKeepsOutgoingVoiceTextWithoutLabel() {
+        var spoken = voiceMessage(transcript: nil, state: .disabled, durationMs: 9_680, text: "我在呢")
+        spoken.direction = .outgoing
+        spoken.senderName = "我"
+        let transcript = ChatEngine.transcript(for: [spoken], includeVoiceTranscripts: false)
+        XCTAssertEqual(transcript, "我：我在呢", "AI 自己的语音回复不该以「[语音 Ns]」形式写进记忆")
+        XCTAssertFalse(transcript.contains("[语音"))
+    }
+
+    func testStrippingVoiceAnnotationsFromReplyText() {
+        XCTAssertEqual(ChatEngine.strippingVoiceAnnotations("[语音 8s] 好呀"), "好呀")
+        XCTAssertEqual(ChatEngine.strippingVoiceAnnotations("[语音 8s]@AAA 好呀"), "@AAA 好呀")
+        XCTAssertEqual(ChatEngine.strippingVoiceAnnotations("[语音] 好呀"), "好呀")
+        XCTAssertEqual(ChatEngine.strippingVoiceAnnotations("[语音，转写失败] 好呀"), "好呀")
+        XCTAssertEqual(ChatEngine.strippingVoiceAnnotations("［语音 8s］好呀"), "好呀")
+        XCTAssertEqual(ChatEngine.strippingVoiceAnnotations("好呀[语音 12s]你在吗"), "好呀你在吗")
+        XCTAssertEqual(ChatEngine.strippingVoiceAnnotations("[语音 8s]"), "")
+        // 正常聊到「语音」或「8s」时不能被误删。
+        XCTAssertEqual(ChatEngine.strippingVoiceAnnotations("我们聊聊语音吧"), "我们聊聊语音吧")
+        XCTAssertEqual(ChatEngine.strippingVoiceAnnotations("语音 8s 也挺快的"), "语音 8s 也挺快的")
+    }
+
     func testTranscriptExcludesVoiceTranscriptsWhenMemorySavingDisabled() {
         let message = voiceMessage(transcript: "这是一段不该进入长期记忆的转写", durationMs: 3_000)
         XCTAssertTrue(ChatEngine.transcript(for: [message]).contains("这是一段不该进入长期记忆的转写"))
@@ -705,10 +742,23 @@ final class VoiceReadTests: XCTestCase {
         var on = VoiceSettings()
         on.replyEnabled = true
         XCTAssertTrue(decideVoiceReply(replyContext(global: on, rng: 0.1)).isVoice)
-        // 会话级覆盖已移除：旧字段即使为 false 也不再影响全局开关。
+    }
+
+    func testDecideVoiceReplyConversationSwitchOverride() {
+        // 全局关闭 + 会话显式开启：会话覆盖生效。
         var conversation = Conversation(id: "c", kind: .direct, title: "测试")
+        conversation.voiceReplyEnabled = true
+        XCTAssertTrue(decideVoiceReply(replyContext(conversation: conversation, rng: 0)).isVoice)
+
+        // 全局开启 + 会话显式关闭：只发文字。
+        var on = VoiceSettings()
+        on.replyEnabled = true
         conversation.voiceReplyEnabled = false
-        XCTAssertTrue(decideVoiceReply(replyContext(global: on, conversation: conversation, rng: 0.1)).isVoice)
+        XCTAssertFalse(decideVoiceReply(replyContext(global: on, conversation: conversation, rng: 0)).isVoice)
+
+        // nil = 跟随全局。
+        conversation.voiceReplyEnabled = nil
+        XCTAssertTrue(decideVoiceReply(replyContext(global: on, conversation: conversation, rng: 0)).isVoice)
     }
 
     func testDecideVoiceReplyModelsNotReady() {
@@ -768,19 +818,26 @@ final class VoiceReadTests: XCTestCase {
         XCTAssertFalse(decideVoiceReply(replyContext(global: settings, rng: .nan)).isVoice)
     }
 
-    func testConversationVoiceOverridesAreIgnored() {
+    func testConversationVoiceProbabilityStaysGlobal() {
         var settings = VoiceSettings()
         settings.replyEnabled = true
         settings.replyProbability = 0.2
         var conversation = Conversation(id: "c", kind: .direct, title: "测试")
         conversation.voiceReplyProbability = 0.9
-        // 会话级概率覆盖已移除：始终使用全局 20%，rng=0.8 不命中。
+        // 会话只覆盖总开关；概率仍用全局 20%，rng=0.8 不命中，避免旧的概率覆盖遗留。
         XCTAssertFalse(decideVoiceReply(replyContext(
             global: settings,
             conversation: conversation,
             rng: 0.8
         )).isVoice)
-        XCTAssertFalse(decideVoiceReply(replyContext(global: settings, rng: 0.8)).isVoice)
+
+        conversation.voiceReplyProbability = 0
+        settings.replyProbability = 1
+        XCTAssertTrue(decideVoiceReply(replyContext(
+            global: settings,
+            conversation: conversation,
+            rng: 0
+        )).isVoice)
     }
 }
 

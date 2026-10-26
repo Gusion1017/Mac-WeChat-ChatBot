@@ -290,6 +290,65 @@ struct ConversationsView: View {
                         )
                     }
                 }
+                Section(L("语音")) {
+                    // 两项会话级覆盖：nil = 跟随全局，true/false = 显式开启/关闭。
+                    Menu {
+                        Button {
+                            setVoiceTranscription(nil, for: conversation)
+                        } label: {
+                            Label(
+                                L("语音转写跟随全局"),
+                                systemImage: conversation.voiceTranscriptionEnabled == nil ? "checkmark" : "arrow.uturn.backward"
+                            )
+                        }
+                        Button {
+                            setVoiceTranscription(true, for: conversation)
+                        } label: {
+                            Label(
+                                L("语音转写（已开启）"),
+                                systemImage: conversation.voiceTranscriptionEnabled == true ? "checkmark" : "waveform"
+                            )
+                        }
+                        Button {
+                            setVoiceTranscription(false, for: conversation)
+                        } label: {
+                            Label(
+                                L("语音转写（已关闭）"),
+                                systemImage: conversation.voiceTranscriptionEnabled == false ? "checkmark" : "waveform.slash"
+                            )
+                        }
+                    } label: {
+                        Label(L("接收转译语音"), systemImage: "waveform")
+                    }
+                    Menu {
+                        Button {
+                            setVoiceReply(nil, for: conversation)
+                        } label: {
+                            Label(
+                                L("语音回复跟随全局"),
+                                systemImage: conversation.voiceReplyEnabled == nil ? "checkmark" : "arrow.uturn.backward"
+                            )
+                        }
+                        Button {
+                            setVoiceReply(true, for: conversation)
+                        } label: {
+                            Label(
+                                L("语音回复（已开启）"),
+                                systemImage: conversation.voiceReplyEnabled == true ? "checkmark" : "speaker.wave.2"
+                            )
+                        }
+                        Button {
+                            setVoiceReply(false, for: conversation)
+                        } label: {
+                            Label(
+                                L("语音回复（已关闭）"),
+                                systemImage: conversation.voiceReplyEnabled == false ? "checkmark" : "speaker.slash"
+                            )
+                        }
+                    } label: {
+                        Label(L("语音回复"), systemImage: "speaker.wave.2")
+                    }
+                }
                 Section(L("会话")) {
                     Button(L(conversation.isPinned ? "取消置顶" : "置顶会话")) {
                         togglePin(conversation)
@@ -569,6 +628,40 @@ struct ConversationsView: View {
             tone: .success,
             symbol: enabled ? "photo.badge.checkmark" : "photo.badge.minus"
         )
+    }
+
+    /// 会话级「接收转译语音」覆盖：nil=跟随全局，true/false=显式开启/关闭。
+    private func setVoiceTranscription(_ enabled: Bool?, for conversation: Conversation) {
+        guard var updated = store.conversations.first(where: { $0.id == conversation.id }),
+              updated.voiceTranscriptionEnabled != enabled
+        else { return }
+        updated.voiceTranscriptionEnabled = enabled
+        store.saveConversation(updated)
+        switch enabled {
+        case .some(true):
+            toast.show("已开启此会话的语音转写", tone: .success, symbol: "waveform")
+        case .some(false):
+            toast.show("已关闭此会话的语音转写", tone: .success, symbol: "waveform.slash")
+        case .none:
+            toast.show("此会话已跟随全局语音转写设置", tone: .success, symbol: "arrow.uturn.backward")
+        }
+    }
+
+    /// 会话级「语音回复」覆盖：nil=跟随全局，true/false=显式开启/关闭。
+    private func setVoiceReply(_ enabled: Bool?, for conversation: Conversation) {
+        guard var updated = store.conversations.first(where: { $0.id == conversation.id }),
+              updated.voiceReplyEnabled != enabled
+        else { return }
+        updated.voiceReplyEnabled = enabled
+        store.saveConversation(updated)
+        switch enabled {
+        case .some(true):
+            toast.show("已开启此会话的语音回复", tone: .success, symbol: "speaker.wave.2")
+        case .some(false):
+            toast.show("已关闭此会话的语音回复", tone: .success, symbol: "speaker.slash")
+        case .none:
+            toast.show("此会话已跟随全局语音回复设置", tone: .success, symbol: "arrow.uturn.backward")
+        }
     }
 
     /// 保存用户起的会话名；空字符串表示恢复自动名称（见 `ConversationName`）。

@@ -183,6 +183,14 @@ enum L10n {
         ("^AI 服务返回错误：(.*)$", "AI service error: $1"),
         ("^命令执行失败：(.*)$", "Command failed: $1"),
         ("^手动发送失败：(.*)$", "Manual send failed: $1"),
+        // System vitals: battery + DeepSeek balance (2026-10-26).
+        ("^「(.*)」尚未填写 API Key$", "No API key for “$1”"),
+        ("^读取钥匙串失败：(.*)$", "Failed to read Keychain: $1"),
+        ("^余额接口地址无效：(.*)$", "Invalid balance endpoint: $1"),
+        ("^余额查询失败（HTTP (\\d+)）$", "Balance query failed (HTTP $1)"),
+        ("^余额查询失败（HTTP (\\d+)）：(.*)$", "Balance query failed (HTTP $1): $2"),
+        ("^余额响应解析失败：(.*)$", "Failed to parse balance response: $1"),
+        ("^网络错误：(.*)$", "Network error: $1"),
         // Status words inside composed subtitles/tooltips.
         ("机器人运行中", "Bot running"),
         ("机器人已停止", "Bot stopped"),

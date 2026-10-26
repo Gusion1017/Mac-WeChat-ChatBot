@@ -74,6 +74,8 @@ final class RuntimeCoordinator {
     let ruleEngine = RuleEngine()
     let chatEngine: ChatEngine
     let scheduler = SchedulerService()
+    /// DeepSeek 余额查询客户端（电量读取是 IOKit 同步调用，不需要长驻对象）。
+    let deepSeekBalanceClient = DeepSeekBalanceClient()
 
     private(set) var bootstrapped = false
     private var bootstrapping = false
@@ -126,6 +128,12 @@ final class RuntimeCoordinator {
     private var statsDay: String = RuntimeCoordinator.dayKey()
     private var terminationObserver: NSObjectProtocol?
 
+    /// 电量 / DeepSeek 余额的后台刷新任务与去重标记。
+    private var systemVitalsTask: Task<Void, Never>?
+    private var balanceRefreshInFlight = false
+    /// 通道配置指纹：AI 模型页新增通道、填写 Key 或改 baseURL 后立即重查余额。
+    private var lastProviderFingerprint: String?
+
     init(store: AppStore) {
         self.store = store
         self.hookManager = HookManager(wechatPath: store.settings.hook.wechatPath)
@@ -158,9 +166,12 @@ final class RuntimeCoordinator {
                 self?.shutdownImmediately()
             }
         }
+
+        startSystemVitalsMonitoring()
     }
 
     deinit {
+        systemVitalsTask?.cancel()
         if let terminationObserver {
             NotificationCenter.default.removeObserver(terminationObserver)
         }
@@ -626,6 +637,105 @@ final class RuntimeCoordinator {
         log(.debug, "Hook", "状态 \(status.state.label)：\(status.detail)")
     }
 
+    // MARK: System vitals (battery + DeepSeek balance)
+
+    /// 启动电量轮询与余额刷新。电量 30 秒一次（IOKit 同步读取，成本极低），
+    /// 余额启动时查一次、之后每 5 分钟一次；手动刷新走 `refreshSystemVitals()`。
+    private func startSystemVitalsMonitoring() {
+        refreshBatteryStatus()
+        systemVitalsTask = Task { [weak self] in
+            await self?.refreshDeepSeekBalance()
+            var ticks = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled, let self else { return }
+                self.refreshBatteryStatus()
+                ticks += 1
+                if ticks >= 10 {
+                    ticks = 0
+                    await self.refreshDeepSeekBalance()
+                }
+            }
+        }
+    }
+
+    private func refreshBatteryStatus() {
+        let status = BatteryReader.current()
+        // 相等也赋值会无谓地让总览卡片失效（@Observable 不比较新旧值）。
+        if store.batteryStatus != status { store.batteryStatus = status }
+    }
+
+    /// 总览「设备与账户」卡的手动刷新：电量立即重读，余额立即重查。
+    func refreshSystemVitals() async {
+        refreshBatteryStatus()
+        await refreshDeepSeekBalance()
+    }
+
+    private func refreshDeepSeekBalance() async {
+        guard !balanceRefreshInFlight else { return }
+        guard let provider = DeepSeekProviderResolver.resolve(
+            providers: store.providers,
+            defaultProvider: store.defaultProvider
+        ) else {
+            setBalanceState(.unavailable("未配置 DeepSeek 通道"))
+            return
+        }
+        guard provider.hasAPIKey else {
+            setBalanceState(.unavailable("「\(provider.name)」尚未填写 API Key"))
+            return
+        }
+
+        balanceRefreshInFlight = true
+        store.isBalanceRefreshing = true
+        defer {
+            balanceRefreshInFlight = false
+            store.isBalanceRefreshing = false
+        }
+        // 自动刷新时保留上一次金额，避免每 5 分钟闪一下加载态；首次查询才显示加载。
+        if case .loaded = store.deepSeekBalance {
+            // Keep the previous snapshot visible while refreshing.
+        } else {
+            setBalanceState(.loading)
+        }
+
+        // Keychain 读取放到后台线程：ad-hoc 重签后授权失效时，系统弹窗可能阻塞
+        // 主线程数秒（见 AIClient.credentialState 的注释）。
+        let reference = provider.apiKeyReference
+        let keychainRead: (key: String?, error: String?) = await Task.detached(priority: .utility) {
+            do {
+                return (try KeychainStore.shared.apiKey(for: reference) ?? "", nil)
+            } catch {
+                return (nil, error.localizedDescription)
+            }
+        }.value
+
+        if let readError = keychainRead.error {
+            setBalanceState(.failed("读取钥匙串失败：\(readError)"))
+            log(.warning, "System", "读取「\(provider.name)」API Key 失败：\(readError)")
+            return
+        }
+        let key = (keychainRead.key ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            setBalanceState(.unavailable("「\(provider.name)」尚未填写 API Key"))
+            return
+        }
+
+        do {
+            let snapshot = try await deepSeekBalanceClient.fetch(apiKey: key, baseURL: provider.baseURL)
+            setBalanceState(.loaded(snapshot))
+            log(.debug, "System", "DeepSeek 余额已刷新：\(snapshot.primary?.displayTotal ?? "—")")
+        } catch is CancellationError {
+            // 退出/任务取消：保留当前展示，不标记为失败。
+        } catch {
+            setBalanceState(.failed(error.localizedDescription))
+            log(.debug, "System", "DeepSeek 余额刷新失败：\(error.localizedDescription)")
+        }
+    }
+
+    private func setBalanceState(_ state: DeepSeekBalanceState) {
+        if store.deepSeekBalance != state { store.deepSeekBalance = state }
+    }
+
     // MARK: Start / stop
 
     /// 4.1.15.55 / 4.2.0.5 使用 R3 原生文本发送（由 App 设置开启）；
@@ -1032,7 +1142,7 @@ final class RuntimeCoordinator {
         // 语音消息：自动回复必须等转写完成（≤15s）；超时按「转写失败」继续回复，
         // 不丢消息。用最新消息副本做规则判定，关键词触发才能看到转写文本。
         var replyMessage = chatMessage
-        if chatMessage.kind == .voice, store.settings.bot.voiceTranscriptionEnabled {
+        if chatMessage.kind == .voice, voiceTranscriptionEnabled(for: conversation) {
             replyMessage = await waitForVoiceReplyMessage(
                 conversationID: conversationID,
                 messageID: chatMessage.id,
@@ -1158,7 +1268,7 @@ final class RuntimeCoordinator {
             // 语音时长来自 bridge 段（可能为空）；转写状态先置 pending，
             // 关闭转写时直接 disabled，气泡不显示「转写中」。
             message.voiceDurationMs = event.voiceDurationMs
-            let enabled = store.settings.bot.voiceTranscriptionEnabled
+            let enabled = voiceTranscriptionEnabled(for: conversation)
             // 自己发出的语音不转写（不触发自动回复，也没有上下文价值）；
             // 历史回放的语音不自动下载，标失败让用户可在气泡里手动重试。
             if !event.isSelf, enabled, !isStaleReplay {
@@ -1241,6 +1351,21 @@ final class RuntimeCoordinator {
     /// 自动回复等待语音转写完成的预算（spec §2.3：≤15s，超时按转写失败继续）。
     private static let voiceTranscriptionWait: TimeInterval = 15
 
+    /// 该会话生效的语音转写开关：会话覆盖 → 全局设置。
+    private func voiceTranscriptionEnabled(for conversation: Conversation) -> Bool {
+        conversation.effectiveVoiceTranscriptionEnabled(
+            global: store.settings.bot.voiceTranscriptionEnabled
+        )
+    }
+
+    /// 按会话 ID 取生效的语音转写开关；会话已删除/未加载时退回全局设置。
+    private func voiceTranscriptionEnabled(conversationID: String) -> Bool {
+        guard let conversation = store.conversations.first(where: { $0.id == conversationID }) else {
+            return store.settings.bot.voiceTranscriptionEnabled
+        }
+        return voiceTranscriptionEnabled(for: conversation)
+    }
+
     /// 消息入库后决定是否向 bridge 请求语音音频。门槛见 `VoiceFetchPolicy`：
     /// 该会话生效的转写开关、非自消息、kind=voice、无本地音频、message_id 非空；
     /// 另加与自动回复相同的历史回放门禁（打开旧会话重放历史不触发批量下载）。
@@ -1251,7 +1376,7 @@ final class RuntimeCoordinator {
         receivedAt: Date
     ) {
         guard receivedAt.timeIntervalSince(event.timestamp) <= Self.staleReplyWindow else { return }
-        let enabled = store.settings.bot.voiceTranscriptionEnabled
+        let enabled = voiceTranscriptionEnabled(for: conversation)
         guard VoiceFetchPolicy.shouldFetch(
             kind: message.kind,
             enabled: enabled,
@@ -1354,7 +1479,9 @@ final class RuntimeCoordinator {
             return
         }
         let conversation = store.conversations.first(where: { $0.id == conversationID })
-        let enabled = store.settings.bot.voiceTranscriptionEnabled
+        let enabled = conversation?.effectiveVoiceTranscriptionEnabled(
+            global: store.settings.bot.voiceTranscriptionEnabled
+        ) ?? store.settings.bot.voiceTranscriptionEnabled
         guard enabled else {
             pendingVoiceTranscriptionIDs.remove(messageID)
             _ = await updateVoiceMessage(conversationID: conversationID, messageID: messageID) {
@@ -1508,7 +1635,7 @@ final class RuntimeCoordinator {
             transcript = refreshed.flatMap(ChatEngine.normalizedVoiceTranscript)
         }
 
-        let enabled = store.settings.bot.voiceTranscriptionEnabled
+        let enabled = voiceTranscriptionEnabled(for: conversation)
         guard enabled || transcript != nil else { return nil }
         return VoiceQuoteText.quotedVoiceNote(transcript: transcript)
     }
@@ -1598,7 +1725,7 @@ final class RuntimeCoordinator {
             await transcribeVoiceMessage(conversationID: conversationID, messageID: messageID, force: true)
             return
         }
-        let enabled = store.settings.bot.voiceTranscriptionEnabled
+        let enabled = voiceTranscriptionEnabled(conversationID: conversationID)
         guard enabled else {
             log(.debug, "Voice", "重试跳过：该会话已关闭语音转写（\(conversationID)）")
             return
@@ -2267,7 +2394,8 @@ final class RuntimeCoordinator {
 
         // 语音回复决策：只在「单段 + 无 @ 提及」时尝试，避免多段语音刷屏或丢失群 @。
         let voiceSettings = store.settings.bot.voice ?? VoiceSettings()
-        let voiceConfigured = voiceSettings.replyEnabled
+        // 会话级覆盖优先：全局关闭但该会话显式开启时仍要尝试语音回复。
+        let voiceConfigured = conversation.effectiveVoiceReplyEnabled(global: voiceSettings.replyEnabled)
         var runtimeReady = false
         if voiceConfigured {
             await refreshVoiceStatus()
@@ -2507,14 +2635,17 @@ final class RuntimeCoordinator {
     /// 返回 `false` 时调用方必须降级为文字（spec §3.3）：模型未就绪、合成失败、
     /// bridge 返回 `voice_send_unsupported`（4.2 Hook 尚未支持）都走这一条。
     /// 只有真正发送成功才落一条 outgoing 语音消息，避免出现「本地已发、微信没收到」。
+    ///
+    /// `modelDownloadConsent` 只约束**下载**入口（`VoiceModelStore.download`），
+    /// 不是使用门槛：模型已就绪时必须能直接合成，否则已下载模型的用户会永远只发文字。
     @discardableResult
     private func sendOutgoingVoice(
         _ text: String,
         conversation: Conversation,
         settings: VoiceSettings
     ) async -> Bool {
-        guard settings.modelDownloadConsent else {
-            log(.debug, "Voice", "跳过语音回复：尚未同意下载语音模型")
+        guard VoiceSynthesisService.isReady(settings.engine) else {
+            log(.debug, "Voice", "跳过语音回复：语音模型未就绪（\(settings.engine.rawValue)）")
             return false
         }
         if !store.voiceRuntimeStatus.canSendVoice() {
@@ -2785,6 +2916,18 @@ final class RuntimeCoordinator {
                     || started.token != store.settings.onebot.token {
                     log(.warning, "OneBot", "连接配置已修改，重启机器人后生效")
                 }
+            }
+        }
+
+        // AI 模型页保存通道/Key 后立即重查余额（不必等 5 分钟轮询）。
+        let fingerprint = store.providers
+            .map { "\($0.id)|\($0.kind.rawValue)|\($0.enabled)|\($0.apiKeyReference)|\($0.baseURL)" }
+            .joined(separator: ";")
+        if fingerprint != lastProviderFingerprint {
+            lastProviderFingerprint = fingerprint
+            Task { [weak self] in
+                guard let self else { return }
+                await self.refreshDeepSeekBalance()
             }
         }
     }
@@ -3183,6 +3326,12 @@ extension AppStore {
         let coordinator = RuntimeRegistry.coordinator(for: self)
         await coordinator.bootstrapIfNeeded()
         await coordinator.refreshStatus()
+    }
+
+    /// 总览「设备与账户」卡：立即重读电量并重查 DeepSeek 余额。
+    func refreshSystemVitals() async {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.refreshSystemVitals()
     }
 
     func installHook(onProgress: ((Double, String) -> Void)? = nil) async throws {

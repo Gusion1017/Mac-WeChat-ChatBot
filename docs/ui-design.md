@@ -23,7 +23,7 @@
 | 常用 | 总览 `dashboard` | 健康状态、今日统计、快捷操作、最近活动/会话 |
 | 常用 | 会话 `conversations` | 会话列表 + 聊天详情 + 手动发送 |
 | 自动化 | 机器人 `bot` | 6 个子栏目：常规（状态/基础开关/默认人格）、触发（群聊触发/关键词）、互动（唤醒窗口/拍一拍）、名单（白/黑名单）、节奏（频率/工作时间/拟人化）、语音 |
-| 自动化 | AI 模型 `ai` | 多通道增删改、Keychain 密钥、连接测试、全局请求参数 |
+| 自动化 | AI 模型 `ai` | 多通道增删改、Keychain 密钥、连接测试、默认通道与请求策略 |
 | 自动化 | 人格设定 `personas` | 人格卡片网格 + 编辑 sheet |
 | 自动化 | 定时任务 `schedules` | 任务列表、下次执行时间、新建/编辑 |
 | 系统 | 记忆库 `memory` | 长期记忆文件夹、搜索、编辑/核心记忆、聊天记录浏览与清理 |
@@ -118,6 +118,10 @@ Window("WeChat AI", id: "main")
 
 - `GlassToolbar`：问候语 + 日期；刷新、启动/停止机器人（本页唯一的启停入口）。
 - 三张 `StatusCard`：微信（版本/进程）、Hook（状态/版本匹配/桥接）、AI（默认通道/模型/密钥状态）。
+- `DashboardSystemVitalsCard`「设备与账户」：左栏本机电池（电量百分比、电量条、充电/已接电源状态、
+  剩余或充满时间，30 秒刷新）；右栏 DeepSeek 余额（总额、赠送/充值、可用状态与更新时间；
+  启动查询后每 5 分钟刷新，可手动刷新）。未配置 DeepSeek 通道/Key 时给出去「AI 模型」的入口，
+  请求失败显示原因与「重试」，不伪造金额；台式机无电池时显示「未检测到电池」。
 - 四张 `MetricTile`：今日收到、今日回复、失败、AI 平均延迟（`contentTransition(.numericText())`）。
 - `SectionCard` 快捷操作（3 列）：安装 Hook、测试 AI、设置、首次向导、日志、记忆库；
   启动/停止与刷新只保留在工具栏，避免同页重复入口；位于最近活动/最近会话双栏之上。
@@ -187,7 +191,7 @@ Window("WeChat AI", id: "main")
   - 状态卡：大圆角渐变图标、运行状态、真实/演练模式、配置停用提示、OneBot/Hook 连接状态。
   - 「基础开关」：演练模式（全页唯一入口）、私聊自动回复、忽略自己、忽略公众号。
   - 「默认人格」：默认人格 Picker；系统提示词只在「人格设定」页维护，Bot 页不再提供全局提示词；
-    默认 AI 通道只在「AI 模型 → 全局请求」设置一处（Bot 页不重复提供 Picker）。
+    默认 AI 通道只在「AI 模型 → 默认通道」设置一处（Bot 页不重复提供 Picker）。
 - 「触发」：群聊触发方式多选 chips（@ / 关键词 / 拍一拍 / 引用机器人 可组合，「所有消息」与其它方式互斥）、
   群聊关键词 chips 编辑器（勾选「关键词」后生效）；命令前缀仅保留给历史配置。
   - 「引用机器人」（2026-10-22 新增，默认关闭）：别人引用机器人发过的消息时唤醒，正文无需 @/关键词；
@@ -229,22 +233,32 @@ Window("WeChat AI", id: "main")
 
 - 顶部：通道数量/默认通道摘要、添加通道。
 - `ProviderRow`：类型图标、名称、类型/默认/停用徽标、baseURL host、模型、Keychain 状态、
-  token、流式标记、测试按钮（idle/testing/success/failure）、启用开关、编辑、更多菜单
-  （编辑/测试/删除；**默认通道只通过「全局请求」Picker 设置**，行内不重复提供入口）。
-- `ProviderEditorSheet`：名称、类型、Base URL、模型、API Key（SecureField + 显示切换 + Keychain 说明）、
-  最大 token/超时 Stepper、通道级流式开关；温度不在此设置。
-  **启用/停用只在通道列表行操作**，编辑 sheet 不重复提供开关。保存前校验 URL/名称/模型。
-  已保存密钥可在此清除。
-- 「模型温度」：按模型名列出所有实际使用的模型（通道/人格覆盖），每个模型可单独设置
-  0–2 的温度或恢复模型默认；未配置时请求不发送 `temperature`。
+  输出上限/超时/有效流式状态、测试按钮（idle/testing/success/failure，成功耗时与失败原因直接展开）、
+  启用开关、编辑、删除（确认；至少保留一个）。
+  有 Key 的官方通道显示「密钥已登记」，缺少 Key 的 DeepSeek/OpenAI 显示「缺少 API Key」，
+  Ollama 显示「无需密钥」，自定义端点显示「密钥可选」；全局流式关闭时显示「流式已暂停」。
+  行内不再重复提供「编辑/测试」菜单项。
+- `ProviderEditorSheet`（600×660）：名称、类型（切换时自动填入该类型的默认地址与模型，
+  不覆盖用户手改的值）、Base URL（按类型给示例）、模型；
+  API Key（SecureField + 显示切换）按类型区分「需密钥 / 可选」，已有密钥时提示「留空保持不变」，
+  可清除已保存密钥（二次确认）；「生成参数」默认折叠为「高级参数」摘要，
+  内含回复最大长度、请求超时与通道级流式开关，全局流式关闭时明确提示该开关当前不生效。
+  字段级校验（名称 / URL / 模型）显示在对应输入框下，错误提示固定在 footer 上方，不会滚出视野。
+  **启用/停用只在通道列表行操作**，编辑 sheet 不重复提供开关；默认通道只在「默认通道」卡设置。
+- 「默认通道」：Picker 始终选中一个具体通道，不再提供会静默回退到第一个通道的「无」选项；
+  默认通道停用或缺少 API Key 时显示 warning 和可行动说明。
+- 「请求策略」：流式总开关（关闭后所有通道非流式；开启时跟随各通道的流式设置）、
+  失败重试（额外重试次数，0 = 不重试）。**已移除从未生效的全局请求超时**，真实超时按通道配置。
+- 「模型温度」：按模型名列出通道/人格中实际使用的模型，以及已保存自定义温度的历史模型
+  （避免旧模型的自定义温度不可见），每个模型可单独设置 0–2 的温度或恢复模型默认；
+  未配置时请求不发送 `temperature`；有自定义温度时提供「全部恢复默认」。
 - 「识图模型」（2026-10-23）：启用开关、识图通道 Picker（「跟随默认通道」+ 全部通道）、
   识图模型覆盖（留空跟随通道模型，需支持 OpenAI 兼容 `image_url` 输入）。
   行内说明识图结果仅保存在本机、会作为后续回复的上下文；关闭时通道/模型行禁用；
   无通道时提示先添加通道并填写模型名称。
-- 「全局请求」：默认通道 Picker（全页唯一默认通道入口）、流式总开关（关闭后所有通道非流式；
-  开启时跟随各通道的流式设置）、超时、失败重试。
-- 「密钥与安全」：Keychain 策略说明、测试行为说明、Ollama 说明、配置文件路径（可复制）。
-- 删除通道需确认；删除默认通道自动回退到第一个通道。
+- 「密钥与安全」：Keychain 策略说明、测试行为说明、Ollama 说明、删除通道同时删除其 Keychain 条目、
+  配置文件路径（可复制）。
+- 删除通道需确认；删除后同时删除该通道在 Keychain 中的密钥，默认通道自动回退到第一个通道。
 
 ### 5.5 人格设定
 
@@ -350,6 +364,17 @@ Window("WeChat AI", id: "main")
 - 识图（视觉模型）在「AI 模型 → 识图模型」单独配置；会话级开关只控制是否获取图片，
   未获取或获取失败时没有图片可识别，气泡继续显示占位。
 
+「语音」交互（会话级）：
+
+- 会话详情头部 `Menu` 新增「语音」Section，两个子菜单：
+  - 「接收转译语音」：跟随全局 / 开启 / 关闭；
+  - 「语音回复」：跟随全局 / 开启 / 关闭。
+- 勾选项表示当前覆盖来源；选择后立即写库（`Conversation.voiceTranscriptionEnabled` /
+  `voiceReplyEnabled`，NULL = 跟随全局）并 toast 提示。
+- 生效值 = 会话覆盖 → 全局 `bot.voice.transcriptionEnabled` / `replyEnabled`。关闭转写后该会话
+  不再入队新的语音下载/转写，已有转写仍显示；关闭语音回复后该会话只发文字。
+- 概率、对等、仅短回复、TTS 引擎与音色仍由「机器人 → 语音」全局设置控制，不在会话菜单重复暴露。
+
 ### 5.10 首次启动向导
 
 4 步 sheet（720×620），顶部步骤指示器 + 跳过；右上角「语言 / Language」选择
@@ -371,7 +396,7 @@ Window("WeChat AI", id: "main")
 `MenuBarExtra` window 风格（304pt）：
 
 - 头部：品牌、运行状态、状态点。
-- 状态：微信、Hook、AI、今日收到/回复/延迟。
+- 状态：微信、Hook、AI、电量、DeepSeek 余额、今日收到/回复/延迟。
 - 操作：启动/停止、打开主窗口、总览/会话/AI 模型/设置、退出（⌥⌘Q）。
 - `isInserted` 由 `store.settings.general.showInMenuBar` 驱动；写回加相等性 guard，
   避免 MenuBarExtra 场景循环（实测会导致 100% CPU）。
@@ -398,6 +423,7 @@ Window("WeChat AI", id: "main")
 | 组件 | 用途 |
 | --- | --- |
 | `StatusCard` / `QuickActionButton` | 总览健康状态、快捷动作 |
+| `DashboardSystemVitalsCard` | 总览「设备与账户」：本机电量 + DeepSeek 余额（独立刷新状态，避免电量轮询重绘整页） |
 | `SessionRow` | 会话列表行（AI 关闭时显示状态标记，开关在详情头部；回复处理中显示阶段计时） |
 | `WorkingHoursBadge` | 会话详情头部实时工作时间状态（工作时段 / 非工作时段 / 不限时段，悬停看来源与摘要） |
 | `ReplyProgressBar` / `ReplyStatusBadge` / `ReplyMiniStatus` | 回复流水线状态条、详情头部徽标、会话行计时（AI 生成 / 拟人化发送倒计时 / 发送回执 / 失败） |
@@ -475,7 +501,7 @@ app/Sources/WeChatBot/
 │  ├─ SettingsView.swift
 │  ├─ OnboardingView.swift
 │  ├─ MenuBarView.swift
-│  └─ Components/               # 12 个复用组件/编辑 sheet（含 ReplyProgressBar）
+│  └─ Components/               # 13 个复用组件/编辑 sheet（含 ReplyProgressBar、DashboardSystemVitalsCard）
 └─ WeChatBotApp.swift           # Window / Settings / MenuBarExtra / Commands
 ```
 
@@ -483,8 +509,8 @@ app/Sources/WeChatBot/
 
 UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网络/进程：
 
-- 状态：`settings/providers/personas/schedules/conversations/messages/logs/hookStatus/stats`
-- 运行时：`startBot/stopBot/refreshStatus/installHook(onProgress:)/restoreWeChatBackup/testProvider/
+- 状态：`settings/providers/personas/schedules/conversations/messages/logs/hookStatus/stats/batteryStatus/deepSeekBalance/isBalanceRefreshing`
+- 运行时：`startBot/stopBot/refreshStatus/refreshSystemVitals/installHook(onProgress:)/restoreWeChatBackup/testProvider/
   sendManualMessage/clearMessages/deleteMessage/saveAPIKey/apiKey/deleteAPIKey/persist/reload/appendLog/clearLogs`
 - 配置集合（providers/personas/schedules）由 UI 修改数组后调用 `persist()`；Core 不提供
   冲突的 CRUD，避免重复实现。
@@ -493,7 +519,7 @@ UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网�
 
 已验证：
 
-- `cd app && swift build --scratch-path .build-verify` 通过；`swift test` **304 项通过**（2 项按模型跳过）
+- `cd app && swift build --scratch-path .build-verify` 通过；`swift test` **305 项通过**（2 项按模型跳过）
   （含批量记忆、压缩器、权重强化、旧库迁移、防睡眠配置兼容与三档决策、回复进度倒计时、
   自消息路由修复、通讯录标题补全、拍一拍回复、唤醒后免唤醒词窗口、appmsg 引用/链接/文件等分类与历史文本修复、
   入站帧单次解析与历史修复 trusted 语义、微信 4.2.0.5 R3 版本门禁/运行期配置合并、识图设置/多模态请求/图片编码与描述落库/引用图片说明）。
@@ -556,4 +582,5 @@ UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网�
   （`-[NSConcreteTask terminationStatus]: task still running`）与 UI 无关，已同步 swift-core。
 - 开发期截图位于 `/tmp/wechatai-*.png`、`/tmp/shot-*.png`、`/tmp/demo-*.png`，不纳入仓库。
 
-> 语音设置面板同时位于「机器人」页与「设置 → 语音」，会话详情不再提供语音覆盖；气泡转写交互见 [`voice.md`](voice.md)。
+> 语音设置面板同时位于「机器人」页与「设置 → 语音」；会话详情「会话设置 → 语音」提供「接收转译语音」与
+> 「语音回复」两项会话级覆盖。气泡转写交互见 [`voice.md`](voice.md)。

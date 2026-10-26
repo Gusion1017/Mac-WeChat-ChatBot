@@ -682,6 +682,52 @@ final class CoreServicesTests: XCTestCase {
                       "身份硬约束应放在 system 提示词最后，压过最近聊天里的玩梗")
     }
 
+    /// 回归（2026-10-26 真机）：AI 自己的 TTS 语音回复在短期历史里曾带 `[语音 Ns]` 标注，
+    /// 模型把标注当成自己的回复格式照抄，下一轮文字回复以 `[语音 8s]` 开头发到微信。
+    /// 出站语音必须只以正文进入 assistant 轮次；system 提示同时明确禁止输出标注。
+    func testBuildMessagesKeepsOutgoingVoiceHistoryUnlabelled() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechatai-voice-prompt-\(UUID().uuidString)", isDirectory: true)
+        let store = MemoryStore(databaseURL: directory.appendingPathComponent("chatbot.sqlite"))
+        try await store.open()
+        defer {
+            Task { await store.close() }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let group = Conversation(id: "test-group@chatroom", kind: .group, title: "测试群")
+        let now = Date()
+        var voice = ChatMessage(
+            id: "v1", conversationID: group.id, senderID: "self", senderName: "我",
+            direction: .outgoing, kind: .voice, text: "我在呢",
+            timestamp: now.addingTimeInterval(1)
+        )
+        voice.voiceDurationMs = 9_680
+        voice.voiceTranscriptState = .disabled
+        let history = [
+            ChatMessage(id: "h1", conversationID: group.id, senderID: "wxid_member_a",
+                        senderName: "群友甲", direction: .incoming, text: "在吗",
+                        timestamp: now),
+            voice,
+            ChatMessage(id: "h2", conversationID: group.id, senderID: "wxid_member_a",
+                        senderName: "群友甲", direction: .incoming, text: "出来聊天",
+                        timestamp: now.addingTimeInterval(2))
+        ]
+        let incoming = ChatMessage(id: "h3", conversationID: group.id, senderID: "wxid_member_a",
+                                   senderName: "群友甲", direction: .incoming, text: "测试消息",
+                                   timestamp: now.addingTimeInterval(3))
+        let engine = ChatEngine(memory: store, aiClient: AIClient())
+        let messages = engine.buildMessages(
+            conversation: group, incoming: incoming, settings: .default,
+            persona: nil, history: history, memoryNotes: nil
+        )
+        let system = messages.first?.content ?? ""
+        XCTAssertTrue(system.contains("回复里绝对不要输出"), "system 提示要明确禁止输出语音标注")
+        let assistant = messages.filter { $0.role == .assistant }.map(\.content)
+        XCTAssertEqual(assistant, ["我在呢"], "出站语音在历史里只保留正文，不能带 `[语音 Ns]`")
+        let body = messages.dropFirst().map(\.content).joined(separator: "\n")
+        XCTAssertFalse(body.contains("[语音"), "assistant 轮次出现标注会被模型照抄")
+    }
+
     /// 手写/核心记忆里的 `wxid：称呼` 是群聊身份的唯一权威来源；
     /// 最近聊天里「我现在是某某」「某某其实是某某」不能被当成映射。
     func testSpeakerIdentityNoteUsesAuthoritativeWXIDNotRecentChat() throws {
@@ -993,6 +1039,54 @@ final class CoreServicesTests: XCTestCase {
         XCTAssertNil(ChatEngine.forceStream(for: settings), "总开关开启时按各 provider 的 stream 设置")
         settings.ai.streamReplies = false
         XCTAssertEqual(ChatEngine.forceStream(for: settings), false, "关闭时所有通道强制非流式")
+    }
+
+    // MARK: AI channel editor settings
+
+    func testProviderRequiresAPIKeyByKind() {
+        var provider = AIProvider(
+            name: "test",
+            kind: .deepSeek,
+            baseURL: "https://api.deepseek.com/v1",
+            model: "deepseek-chat"
+        )
+
+        XCTAssertTrue(provider.requiresAPIKey, "DeepSeek 必须有 Key")
+        XCTAssertFalse(provider.hasUsableCredential)
+
+        provider.kind = .openAI
+        XCTAssertTrue(provider.requiresAPIKey)
+        XCTAssertFalse(provider.hasUsableCredential)
+
+        provider.kind = .ollama
+        XCTAssertFalse(provider.requiresAPIKey, "本地 Ollama 无需 Key")
+        XCTAssertTrue(provider.hasUsableCredential)
+
+        provider.kind = .custom
+        XCTAssertFalse(provider.requiresAPIKey, "自定义兼容端点 Key 可选")
+        XCTAssertTrue(provider.hasUsableCredential)
+
+        provider.kind = .openAI
+        provider.apiKeyReference = "provider-openai"
+        XCTAssertTrue(provider.hasUsableCredential)
+    }
+
+    func testLegacyAISettingsWithRemovedRequestTimeoutStillDecodes() throws {
+        let encoded = try JSONEncoder().encode(AppSettings.default)
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var ai = try XCTUnwrap(root["ai"] as? [String: Any])
+        XCTAssertNil(ai["requestTimeoutSeconds"], "已移除未生效的全局请求超时")
+
+        // 旧 config.json 仍带着已删除的键：未知键必须被忽略，不能影响整份配置解码。
+        ai["requestTimeoutSeconds"] = 30
+        root["ai"] = ai
+        let legacyData = try JSONSerialization.data(withJSONObject: root)
+
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: legacyData)
+
+        XCTAssertTrue(decoded.ai.streamReplies)
+        XCTAssertEqual(decoded.ai.retryCount, AppSettings.default.ai.retryCount)
+        XCTAssertEqual(decoded.providers.count, AppSettings.default.providers.count)
     }
 
     // MARK: SQLite helpers (legacy DB fixtures)

@@ -14,6 +14,8 @@
 | `Services/KeychainStore.swift` | API Key 的 Keychain 读写/删除/存在性 |
 | `Services/MemoryStore.swift` | SQLite（WAL）持久化：会话/消息/日志/定时任务/长期记忆/KV |
 | `Services/SleepPreventionService.swift` | 通用防睡眠：IOKit 空闲睡眠断言 + 电源适配器监听（事件驱动，不轮询） |
+| `Services/BatteryStatus.swift` | 本机电池快照：IOKit 电源字典解析（电量/充电/适配器/剩余时间） |
+| `Services/DeepSeekBalance.swift` | DeepSeek 账户余额：`/user/balance` 地址推导、容错解析、通道选择 |
 | `Services/ActivationPolicyController.swift` | Dock 图标与 `NSApplication.ActivationPolicy` 同步（用户设置优先，台前调度不覆盖；bundle 以 `LSUIElement` 启动，仅在设置页用于提示文案） |
 | `Services/OneBotClient.swift` | WS 收事件、HTTP 发送/图片获取、媒体落地、事件解析、去重、重连 |
 | `Services/ImageFetcher.swift` | 入站图片获取串行队列 + `ImageFetchPolicy`（设置开关 / 去重 / 取消） |
@@ -67,6 +69,10 @@ func searchMessages(_ query: String, limit: Int = 100) async -> [MemorySearchHit
 // 辅助
 func currentSelfID() -> String
 func isRuntimeConnected() -> Bool
+
+// 设备与账户（2026-10-26）
+func refreshSystemVitals() async
+// 只读状态：store.batteryStatus / store.deepSeekBalance / store.isBalanceRefreshing
 ```
 
 约定：
@@ -460,6 +466,22 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 - 失败只写 `lastError`（UI 显示 warning），不崩溃、不影响聊天；
   断言只阻止**系统空闲睡眠**，不阻止合盖、手动睡眠或显示器休眠。
 
+### 5.9 BatteryReader / DeepSeekBalance（设备与账户）
+
+- 电量：`BatteryReader.current()` 通过 IOKit.ps 读取 `InternalBattery` 的
+  Current/Max Capacity、Is Charging/Charged、Power Source State、Time to Empty/Full Charge，
+  只读、不修改任何系统电源设置。`RuntimeCoordinator` 启动后立即读一次、之后每 30 秒刷新
+  `store.batteryStatus`；台式机/无电池返回 `.unavailable`，UI 显示「未检测到电池」而不是 0%。
+- 余额：`DeepSeekBalanceClient` 请求 `GET {API origin}/user/balance`。接口固定在 API 根路径，
+  聊天 baseURL 的 `/v1` 会被丢弃（`/v1/user/balance` 会 404）；`Authorization: Bearer` 的 Key
+  由 Runtime 从 Keychain 读取，读取放在后台线程（ad-hoc 重签后 Keychain 授权弹窗可能阻塞主线程）。
+- 通道选择：默认通道是 DeepSeek 时用它；否则回退第一个已启用且有 Key 的 DeepSeek 通道；
+  完全没有 DeepSeek 通道时状态为 `unavailable`（UI 给「前往 AI 模型配置」入口）。
+- 刷新节奏：启动查一次、之后每 5 分钟轮询；AI 模型页保存通道/Key 后按配置指纹立即重查；
+  总览卡片与 `refreshSystemVitals()` 可手动刷新。成功解析 `is_available` 与 `balance_infos`
+  （金额字符串或数字均可）；缺 Key/缺通道属于 `unavailable`，网络/HTTP/解析失败属于 `failed`，
+  失败只展示原因并可重试，不伪造金额、不阻断机器人运行。
+
 ## 6. 错误处理策略
 
 | 场景 | 行为 |
@@ -496,12 +518,13 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 `ContactDirectoryTests.swift`（15）、`PatMessageTests.swift`（20）、`PatReplySettingsTests.swift`（7）、
 `HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（26）、`AppmsgRoutingTests.swift`（20）、
 `WakeWindowTests.swift`（6）、`ImageFetchTests.swift`（16）、`OneBotEventParserTests.swift`（5）、
-`DataRepairTrustTests.swift`（2）、`VisionTests.swift`（12），共 220 项）：
+`DataRepairTrustTests.swift`（2）、`VisionTests.swift`（12）、`SystemVitalsTests.swift`（16），
+2026-10-26 实测共 325 项）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 220 tests, with 0 failures（2026-10-23）
+# Executed 325 tests, with 2 skipped, 0 failures（2026-10-26）
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
@@ -511,7 +534,8 @@ swift test --scratch-path .build-verify
 长期记忆滚动合并与历史多条合并、`MemorySummaryCompactor` 去重/600 字上限、
 `accessCount` 权重强化与 `sourceCount` 对数增长、`baseWeight` 可调（范围收敛/持久化/
 核心记忆按权重排序与超额时的注入优先级）、旧库 v2→v4 迁移；
-防睡眠旧配置兼容/三档标签/决策表；OneBot 事件解析（群/@/私聊/非法帧）、
+防睡眠旧配置兼容/三档标签/决策表；设备与账户（电池字典解析、百分比边界与台式机回退，
+DeepSeek 余额地址推导、官方字符串/数字金额解析、401 与畸形响应、通道选择优先级）；OneBot 事件解析（群/@/私聊/非法帧）、
 入站帧单次解析（`parse(object:rawText:)` 复用对象与原始帧文本、数组/包装帧兼容）、
 历史修复 `trusted:` 语义（权威 selfID 跳过反推、默认参数仍反推并归位）、
 appmsg 分类（引用 57 / 链接 5 / 文件 6 / 表情 8 / 聊天记录 19 / 转账 2000 / 视频号 51、

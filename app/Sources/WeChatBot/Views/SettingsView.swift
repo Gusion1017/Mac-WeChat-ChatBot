@@ -888,7 +888,7 @@ struct SettingsView: View {
             ) {
                 SettingsRow(
                     title: "转写收到的语音",
-                    subtitle: "语音消息自动获取音频并转写，用于气泡展示、AI 回复与记忆",
+                    subtitle: "语音消息自动获取音频并转写，用于气泡展示、AI 回复与记忆；会话可单独覆盖",
                     symbol: "waveform",
                     tint: Theme.violet
                 ) {

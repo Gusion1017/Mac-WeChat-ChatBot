@@ -11,6 +11,19 @@ enum ProviderTestState: Equatable {
         if case .testing = self { return true }
         return false
     }
+
+    /// 测试结果详情（成功耗时/tokens 或失败原因）。UI 直接展开显示，不再只放在 tooltip 里。
+    var detail: String? {
+        switch self {
+        case .success(let detail), .failure(let detail): return detail
+        case .idle, .testing: return nil
+        }
+    }
+
+    var isFailure: Bool {
+        if case .failure = self { return true }
+        return false
+    }
 }
 
 extension ProviderKind {
@@ -30,6 +43,8 @@ struct ProviderRow: View {
     let isDefault: Bool
     var testState: ProviderTestState = .idle
     var canDelete: Bool = true
+    /// 全局流式总开关。关闭时「流式」标签需要说明暂不生效，避免和实际请求行为矛盾。
+    var globalStreamingEnabled: Bool = true
     var onEdit: () -> Void
     var onTest: () -> Void
     var onDelete: () -> Void
@@ -69,12 +84,22 @@ struct ProviderRow: View {
 
                 HStack(spacing: 8) {
                     apiKeyState
-                    Text("≤ \(provider.maxTokens) tokens")
+                    Text(Lf("输出上限 %d tokens", provider.maxTokens))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
-                    if provider.stream {
-                        PillLabel(text: "流式", color: Theme.info, symbol: "waveform")
-                    }
+                    Text(Lf("超时 %d 秒", Int(provider.timeoutSeconds)))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    streamPill
+                }
+
+                if let detail = testState.detail {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(testState.isFailure ? Theme.danger : Theme.success)
+                        .lineLimit(2)
+                        .help(detail)
+                        .accessibilityLabel(L("连接测试结果"))
                 }
             }
 
@@ -91,28 +116,26 @@ struct ProviderRow: View {
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .help(provider.enabled ? "停用此通道" : "启用此通道")
-                    .accessibilityLabel(L("启用 \(provider.name)"))
+                    .accessibilityLabel(Lf("启用 %@", provider.name))
                 }
 
                 HStack(spacing: 6) {
                     Button(L("编辑")) { onEdit() }
                         .buttonStyle(.glass)
                         .controlSize(.small)
-                    Menu {
-                        Button(L("编辑…"), action: onEdit)
-                        Button(L("测试连接"), action: onTest)
-                        Divider()
-                        Button(L("删除通道…"), role: .destructive, action: onDelete)
-                            .disabled(!canDelete)
+                    Button(role: .destructive) {
+                        onDelete()
                     } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.secondary)
+                        Image(systemName: "trash")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Theme.danger)
+                            .frame(width: 22, height: 20)
+                            .contentShape(Rectangle())
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help(L("更多操作"))
-                    .accessibilityLabel(L("\(provider.name) 更多操作"))
+                    .buttonStyle(.glass)
+                    .disabled(!canDelete)
+                    .help(canDelete ? "删除通道" : "至少保留一个通道")
+                    .accessibilityLabel(L("删除通道"))
                 }
             }
         }
@@ -135,14 +158,39 @@ struct ProviderRow: View {
         return host
     }
 
+    private var keyStatus: (text: String, color: Color, symbol: String) {
+        if provider.hasAPIKey {
+            return ("密钥已登记", Theme.success, "key.fill")
+        }
+        if provider.requiresAPIKey {
+            return ("缺少 API Key", Theme.warning, "key.slash")
+        }
+        if provider.kind == .ollama {
+            return ("无需密钥", .secondary, "key.slash")
+        }
+        return ("密钥可选", .secondary, "key.slash")
+    }
+
     private var apiKeyState: some View {
-        HStack(spacing: 3) {
-            Image(systemName: provider.hasAPIKey ? "key.fill" : "key.slash")
+        let status = keyStatus
+        return HStack(spacing: 3) {
+            Image(systemName: status.symbol)
                 .font(.system(size: 8.5, weight: .semibold))
-            Text(L(provider.hasAPIKey ? "密钥已登记" : "未配置密钥"))
+            Text(L(status.text))
                 .font(.caption2)
         }
-        .foregroundStyle(provider.hasAPIKey ? Theme.success : Color.secondary)
+        .foregroundStyle(status.color)
+    }
+
+    @ViewBuilder
+    private var streamPill: some View {
+        if provider.stream && globalStreamingEnabled {
+            PillLabel(text: "流式", color: Theme.info, symbol: "waveform")
+        } else if provider.stream {
+            PillLabel(text: "流式已暂停", color: .secondary, symbol: "pause.circle")
+        } else {
+            PillLabel(text: "非流式", color: .secondary, symbol: "text.alignleft")
+        }
     }
 
     @ViewBuilder

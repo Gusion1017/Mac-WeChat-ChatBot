@@ -649,6 +649,13 @@ struct AIProvider: Identifiable, Codable, Hashable {
     var isDefault: Bool = false
 
     var hasAPIKey: Bool { !apiKeyReference.isEmpty }
+
+    /// DeepSeek / OpenAI 官方接口必须带 API Key；Ollama 与自定义兼容端点允许无密钥。
+    /// UI 用它区分「必填 / 可选」并给出正确的缺失状态，而不是对所有通道都显示「未配置密钥」。
+    var requiresAPIKey: Bool { kind == .deepSeek || kind == .openAI }
+
+    /// 当前通道是否已经具备发起请求所需的凭据。
+    var hasUsableCredential: Bool { hasAPIKey || !requiresAPIKey }
 }
 
 // MARK: - Personas / triggers

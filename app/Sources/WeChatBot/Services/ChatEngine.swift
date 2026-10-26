@@ -132,6 +132,10 @@ final class ChatEngine: @unchecked Sendable {
         )
         let plan = makePlan(result: result, provider: provider, persona: persona,
                             settings: settings, dryRun: dryRun, contextCount: promptMessages.count)
+        guard !plan.segments.isEmpty else {
+            onLog?(.warning, "AI 回复为空（清洗系统语音标注后没有剩余内容）")
+            throw AIError.emptyResponse
+        }
         onLog?(.debug, "AI 回复生成完成：\(result.text.count) 字，\(Int(result.latencyMs))ms，"
             + "tokens=\(result.usage.totalTokens)（上下文 \(promptMessages.count) 条）")
         return plan
@@ -175,7 +179,9 @@ final class ChatEngine: @unchecked Sendable {
             + "那是被引用图片的画面描述，不是本轮的新内容。"
             + "如果写成「（引用的图片内容暂不可用）」，说明系统没有拿到该图片的内容，"
             + "不要凭空猜测图片里有什么。")
-        systemLines.append("语音消息的格式为「[语音 Ns] 转写内容」，括号内是语音时长；"
+        systemLines.append("对方发来的语音消息在聊天记录里标成「[语音 Ns] 转写内容」，括号内是语音时长；"
+            + "这是系统加的标注，不是你回复的一部分，回复里绝对不要输出「[语音 Ns]」「[语音]」"
+            + "「[语音，转写失败]」这类标记。"
             + "「（识别可能不准确）」表示转写置信度较低，理解有偏差时以常识为准。"
             + "「[语音，转写失败]」表示这条语音没有拿到转写内容，不要编造对方说了什么。")
         systemLines.append("引用语音时，消息末尾会附「（引用语音内容：…）」；"
@@ -258,8 +264,15 @@ final class ChatEngine: @unchecked Sendable {
         // 语音消息优先用转写结果：桥接正文只有 `[语音]` 占位，直接返回它会让模型
         // 完全不知道对方说了什么。格式：`[语音 5s] <转写>`；低置信度追加提示；
         // 转写失败明确写「转写失败」，禁止模型编造内容。
+        //
+        // 时长标注只是给「读到对方语音」的模型看的系统元信息：AI 自己发出的语音回复
+        // 进历史时必须保持纯正文，否则模型会把 `[语音 Ns]` 当成自己的回复格式照抄。
+        // （2026-10-26 真机：上一轮 TTS 语音在历史里是 assistant「[语音 10s] …」，
+        // 下一轮文字回复就以「[语音 8s]」开头发到了微信。）
         if message.kind == .voice {
-            return voicePromptText(for: message)
+            return message.direction == .outgoing
+                ? outgoingVoicePromptText(for: message)
+                : voicePromptText(for: message)
         }
         let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty {
@@ -304,6 +317,16 @@ final class ChatEngine: @unchecked Sendable {
             }
             return "\(label) \(transcript)"
         }
+    }
+
+    /// 出站语音（AI 自己的 TTS 回复）在提示词/记忆里的文本。
+    ///
+    /// 只保留说出口的正文，**不加** `[语音 Ns]` 标注：标注是给模型读对方语音用的
+    /// 系统元信息，出现在 assistant 轮次会被模型当成回复格式照抄。没有正文时
+    /// （例如自消息回显只剩桥接占位 `[语音]`）返回空串，`buildMessages` 会整条跳过，
+    /// 避免产生只有标注的 assistant 轮次。
+    static func outgoingVoicePromptText(for message: ChatMessage) -> String {
+        normalizedVoiceTranscript(message) ?? ""
     }
 
     /// 语音转写文本（去空白）；兼容旧数据把转写写在 `text` 里。
@@ -726,9 +749,11 @@ final class ChatEngine: @unchecked Sendable {
         var total = 0
         for message in messages where message.direction != .system {
             let content: String
-            if message.kind == .voice, !includeVoiceTranscripts {
-                // 用户关闭「转写写入记忆」时，长期总结只保留 [语音 Ns] 标签，
-                // 不把转写原文沉淀进记忆库（即时回复上下文仍可用转写）。
+            if message.kind == .voice, message.direction == .incoming, !includeVoiceTranscripts {
+                // 用户关闭「转写写入记忆」时，对方语音在长期总结里只保留 `[语音 Ns]`
+                // 标签，不把转写原文沉淀进记忆库（即时回复上下文仍可用转写）。
+                // 只对入站语音生效：出站语音的正文是 AI 自己的回复，不按转写处理，
+                // 也避免记忆里出现只有 `[语音 Ns]` 的「我：」行。
                 content = VoiceTranscriptionService.voiceLabel(durationMs: message.voiceDurationMs)
             } else {
                 content = Self.promptText(for: message)
@@ -811,8 +836,15 @@ final class ChatEngine: @unchecked Sendable {
         dryRun: Bool,
         contextCount: Int
     ) -> ChatReplyPlan {
+        // 模型偶尔会把历史里看到的系统语音标注抄进回复（`[语音 8s] 你好`）。
+        // 标注只用于让模型读懂对方的语音，绝不能发到微信；这里统一清洗，
+        // 语音回复决策与 TTS 也只看清洗后的正文。
+        let replyText = Self.strippingVoiceAnnotations(result.text)
+        if replyText != result.text {
+            onLog?(.debug, "AI 回复自带的系统语音标注已移除")
+        }
         let segments = Self.splitReply(
-            result.text,
+            replyText,
             humanize: settings.bot.humanize,
             dryRun: dryRun
         )
@@ -826,7 +858,7 @@ final class ChatEngine: @unchecked Sendable {
         }
         return ChatReplyPlan(
             segments: segments,
-            fullText: result.text,
+            fullText: replyText,
             providerID: provider.id,
             providerName: provider.name,
             personaID: persona?.id,
@@ -837,6 +869,33 @@ final class ChatEngine: @unchecked Sendable {
             delaysMs: delays,
             contextMessageCount: contextCount
         )
+    }
+
+    /// 模型回复里「系统语音标注」的正则：`[语音 5s]` / `[语音]` / `[语音，转写失败]`，
+    /// 兼容全角括号、全角逗号与「8 秒」写法。
+    private static let voiceAnnotationPattern =
+        #"[\[［]\s*语音\s*(?:[，,]\s*转写失败|\d+\s*(?:[sS]|秒))?\s*[\]］]"#
+
+    /// 去掉模型误抄进回复里的系统语音标注（`[语音 Ns]` 等）。
+    ///
+    /// 这些标注是提示词里给模型读对方语音用的元信息，一旦被模型当成回复格式照抄，
+    /// 就会以文字形式发到微信（2026-10-26 真机复现 `[语音 8s] …`）。人类聊天里
+    /// 不会这样写，因此出现即整段删除；删除后顺带收敛多余空白，全部删空则返回空串，
+    /// 由调用方按「空回复」处理。
+    static func strippingVoiceAnnotations(_ raw: String) -> String {
+        let stripped = raw.replacingOccurrences(
+            of: voiceAnnotationPattern,
+            with: "",
+            options: .regularExpression
+        )
+        guard stripped != raw else {
+            return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var text = stripped
+        text = text.replacingOccurrences(of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"\n[ \t]+"#, with: "\n", options: .regularExpression)
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Splits a reply into natural chat bubbles and collapses overly small fragments.

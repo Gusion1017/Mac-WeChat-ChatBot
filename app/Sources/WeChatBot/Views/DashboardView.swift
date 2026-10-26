@@ -32,6 +32,7 @@ struct DashboardView: View {
             .accessibilityHint(store.isBotRunning ? "停止接收与自动回复" : "开始接收消息并按触发设置自动回复")
         } content: {
             statusGrid
+            DashboardSystemVitalsCard()
             metricsGrid
 
             if isInstallingHook {

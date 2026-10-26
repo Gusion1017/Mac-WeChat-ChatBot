@@ -668,7 +668,7 @@ struct BotView: View {
                 }
                 .frame(maxWidth: 260)
 
-                Text(L("默认通道在「AI 模型 → 全局请求」设置"))
+                Text(L("默认通道在「AI 模型 → 默认通道」设置"))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
 
