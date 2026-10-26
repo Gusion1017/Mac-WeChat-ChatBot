@@ -13,6 +13,7 @@ struct OnboardingView: View {
     @State private var showRiskConfirm = false
     @State private var isDetecting = false
     @State private var isInstalling = false
+    @State private var commandLineToolsStatus: CommandLineToolsStatus?
     @State private var installProgress: Double?
     @State private var installMessage: String?
     @State private var installError: String?
@@ -286,6 +287,18 @@ struct OnboardingView: View {
                 }
             }
 
+            CommandLineToolsCard(onStatusChange: { status in
+                commandLineToolsStatus = status
+            })
+
+            if commandLineToolsStatus?.isReady == false {
+                InlineNotice(
+                    kind: .warning,
+                    title: "未安装 Command Line Tools，无法备份并安装 Hook。",
+                    message: "装完 Command Line Tools 后点「重新检测」，再安装 Hook。"
+                )
+            }
+
             if isInstalling {
                 ProgressPanel(
                     title: "正在安装 Hook",
@@ -317,7 +330,13 @@ struct OnboardingView: View {
                 }
                 .buttonStyle(.glassProminent)
                 .tint(Theme.warning)
-                .disabled(isInstalling || isDetecting)
+                .disabled(isInstalling || isDetecting || commandLineToolsStatus?.isReady != true)
+                .help(L(commandLineToolsStatus?.isReady == true
+                        ? "备份并安装 Hook…"
+                        : "需要安装 Xcode Command Line Tools"))
+                .accessibilityHint(commandLineToolsStatus?.isReady == true
+                        ? ""
+                        : L("需要安装 Xcode Command Line Tools"))
 
                 Spacer()
             }

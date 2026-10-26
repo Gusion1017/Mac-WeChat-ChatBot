@@ -22,13 +22,20 @@ Makefile.* text eol=lf linguist-language=Makefile
 *.zip binary
 *.dmg binary
 *.pdf binary
+*.silk binary
 
 # 文档截图：显式声明为二进制，避免被当成文本
 docs/images/*.png binary
 
-# 生成代码：GitHub 折叠 diff 与语言统计
+# 生成代码 / 第三方 vendored 源码：GitHub 折叠 diff 与语言统计
 bridge/proto/** linguist-generated=true
 *.pb.go linguist-generated=true
+bridge/silkenc/** linguist-vendored=true
+app/Sources/CSherpaOnnx/** linguist-vendored=true
+
+# 许可与声明文本保持普通文本统计
+LICENSES/*.txt text eol=lf
+ThirdPartyNotices.txt text eol=lf
 
 # 本项目自有的 Hook 脚本（非第三方 vendored，保留在语言统计中）
 hook/script.js linguist-vendored=false

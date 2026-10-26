@@ -88,6 +88,18 @@ if (( DOCS_ONLY == 1 )); then
   exit "${FAILED}"
 fi
 
+# ---------- 4.5 TTS 静态库 ----------
+step "sherpa-onnx 静态库（TTS 依赖）"
+if bash "${ROOT_DIR}/scripts/fetch_sherpa.sh" --check >/dev/null 2>&1; then
+  say "  ✓ 已就绪（app/Vendor/sherpa）"
+else
+  say "  未就绪，按需下载 112MB 静态库…"
+  if ! bash "${ROOT_DIR}/scripts/fetch_sherpa.sh"; then
+    say "  ✘ 拉取失败；Swift 构建会缺少 TTS 依赖"
+    FAILED=1
+  fi
+fi
+
 # ---------- 5. Swift 测试 ----------
 if [[ "${CHECK_SKIP_SWIFT:-0}" == "1" ]]; then
   step "Swift 测试（CHECK_SKIP_SWIFT=1，已跳过）"

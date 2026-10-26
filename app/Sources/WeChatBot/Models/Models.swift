@@ -133,6 +133,15 @@ struct Conversation: Identifiable, Codable, Hashable {
     /// 用户在该会话菜单里切换后写入 true/false；照片下载成功后据此决定是否自动显示。
     var imageFetchEnabled: Bool?
 
+    // MARK: 语音（2026-10-26，全部可选以兼容旧库）
+
+    /// 此会话是否启用语音转写：nil 表示跟随全局 `BotSettings.voice.transcriptionEnabled`。
+    var voiceTranscriptionEnabled: Bool?
+    /// 此会话是否允许语音回复：nil 表示跟随全局 `BotSettings.voice.replyEnabled`。
+    var voiceReplyEnabled: Bool?
+    /// 此会话语音回复概率（0...1）：nil 表示跟随全局 `replyProbability`。
+    var voiceReplyProbability: Double?
+
     /// 用户重命名或微信下发的真实昵称；nil 表示当前只有自动兜底名称。
     var customTitle: String? {
         ConversationName.customTitle(title, conversationID: id, kind: kind)
@@ -154,6 +163,21 @@ struct Conversation: Identifiable, Codable, Hashable {
     /// 生效值：会话覆盖 →（旧）全局默认 → true。
     func effectiveImageFetchEnabled(global: Bool) -> Bool {
         imageFetchEnabled ?? global
+    }
+
+    /// 生效的语音转写开关：会话覆盖 → 全局设置（默认开启）。
+    func effectiveVoiceTranscriptionEnabled(global: Bool) -> Bool {
+        voiceTranscriptionEnabled ?? global
+    }
+
+    /// 生效的语音回复开关：会话覆盖 → 全局设置（默认关闭）。
+    func effectiveVoiceReplyEnabled(global: Bool) -> Bool {
+        voiceReplyEnabled ?? global
+    }
+
+    /// 生效的语音回复概率（0...1）：会话覆盖 → 全局设置。
+    func effectiveVoiceReplyProbability(global: Double) -> Double {
+        min(max(voiceReplyProbability ?? global, 0), 1)
     }
 }
 
@@ -433,6 +457,21 @@ enum DeliveryStatus: String, Codable, Hashable {
     case generating
 }
 
+/// 入站语音的转写状态（2026-10-26）。
+///
+/// `nil` 表示旧数据/非语音消息；新消息在收到时即写入状态，气泡按状态展示
+/// 「转写中 / 转写失败·重试 / 已转写 / 已关闭」。全部可选字段保证旧库可读。
+enum VoiceTranscriptState: String, Codable, Hashable, Sendable {
+    /// 已入队：等待语音下载或转写完成。
+    case pending
+    /// 转写成功（文本可能为空：静音/无有效内容）。
+    case done
+    /// 获取或转写失败，可手动重试。
+    case failed
+    /// 用户关闭了语音转写（或该会话关闭），不下载、不转写。
+    case disabled
+}
+
 struct ChatMessage: Identifiable, Codable, Hashable {
     var id: String
     var conversationID: String
@@ -446,6 +485,22 @@ struct ChatMessage: Identifiable, Codable, Hashable {
     /// 识图结果：视觉模型对这张图片内容的文字描述（2026-10-23）。
     /// nil 表示未开启识图、识别失败或尚未识别；图片本身不会直接进入回复提示词。
     var imageDescription: String?
+
+    // MARK: 语音（2026-10-26，全部可选以兼容旧库）
+
+    /// 语音音频的本地路径（16k 单声道 WAV）；与 `mediaPath` 同步写入，
+    /// 单独保留一份便于把「语音」与普通媒体路径区分开。
+    var voiceMediaPath: String?
+    /// 语音时长（毫秒）：优先 bridge `duration_ms`，其次 WAV 实际时长。
+    var voiceDurationMs: Int?
+    /// 转写文本（清洗后）；用于气泡展示、提示词与引用说明。
+    /// 是否沉淀进长期记忆总结由 `VoiceSettings.saveTranscriptToMemory` 控制。
+    var voiceTranscript: String?
+    /// 全文最高置信度（0...1）；nil 表示旧数据或未拿到置信度。
+    var voiceTranscriptConfidence: Double?
+    /// 转写状态；nil 表示旧数据（按未转写处理）。
+    var voiceTranscriptState: VoiceTranscriptState?
+
     var timestamp: Date
     var status: DeliveryStatus = .received
     var replyToID: String?
@@ -963,6 +1018,173 @@ struct WakeWindowSettings: Codable, Hashable {
     }
 }
 
+// MARK: - 语音设置（2026-10-26）
+
+/// 语音超长处理：默认改发文字，可切换为按句截断（TTS 使用）。
+enum VoiceOverLimit: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
+    case text
+    case truncate
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .text: L("改发文字")
+        case .truncate: L("按句截断")
+        }
+    }
+}
+
+/// 语音功能设置（`BotSettings.voice` 的可选值，2026-10-26）。
+///
+/// 全部字段都有默认值，且通过自定义 Codable 容忍缺键/未知枚举值：
+/// 旧 `config.json` 没有 `voice` 键时保持 nil，行为与旧版本完全一致；
+/// 新配置即使只写了部分字段也能正常解码（缺失字段用默认值补齐）。
+/// 数值在解码与保存时收敛到合法范围，避免手改配置把 UI 滑块撑坏。
+struct VoiceSettings: Codable, Hashable {
+    /// 入站语音是否转写（默认开启）。
+    var transcriptionEnabled: Bool = true
+    /// 气泡里是否显示转写文本（默认开启）。
+    var showTranscriptInBubble: Bool = true
+    /// 转写是否写入消息正文/长期记忆（默认开启）。
+    var saveTranscriptToMemory: Bool = true
+    /// 是否允许语音回复（默认关闭）。
+    var replyEnabled: Bool = false
+    /// 语音回复概率（0...1）。
+    var replyProbability: Double = 0.3
+    /// 对等：只有收到语音时才回语音（默认关闭）。
+    var mirrorIncomingVoice: Bool = false
+    /// 仅短回复发语音（默认开启）。
+    var shortReplyOnly: Bool = true
+    /// 「短回复」的字符阈值。
+    var shortReplyMaxChars: Int = 80
+    /// 语音回复最长时长（秒），范围 5–60。
+    var maxVoiceSeconds: Int = 30
+    /// 超过时长上限时的处理方式。
+    var overLimit: VoiceOverLimit = .text
+    /// TTS 引擎（由 T3 的 `VoiceEngineKind` 定义）。
+    var engine: VoiceEngineKind = .kokoro
+    /// Kokoro 音色编号。
+    var kokoroSpeakerID: Int = 0
+    /// Kokoro 语速（0.5–2.0）。
+    var kokoroSpeed: Double = 1.0
+    /// 克隆音色档案 ID（engine == .zipvoiceClone 时使用）。
+    var cloneID: String?
+    /// 是否已同意按需下载语音模型（默认关闭，下载前必须为 true）。
+    var modelDownloadConsent: Bool = false
+
+    // MARK: 生效值
+
+    /// 生效的语音时长上限（5...60 秒）。
+    var effectiveMaxVoiceSeconds: Int {
+        min(max(maxVoiceSeconds, 5), 60)
+    }
+
+    /// 生效的短回复字符阈值（1...500）。
+    var effectiveShortReplyMaxChars: Int {
+        min(max(shortReplyMaxChars, 1), 500)
+    }
+
+    /// 生效的语音回复概率（0...1）。
+    var effectiveReplyProbability: Double {
+        guard replyProbability.isFinite else { return 0.3 }
+        return min(max(replyProbability, 0), 1)
+    }
+
+    /// 生效的 Kokoro 语速（0.5...2.0）。
+    var effectiveKokoroSpeed: Double {
+        guard kokoroSpeed.isFinite else { return 1.0 }
+        return min(max(kokoroSpeed, 0.5), 2.0)
+    }
+
+    /// 是否启用克隆引擎且填写了档案 ID。
+    var usesCloneVoice: Bool {
+        engine == .zipvoiceClone && !(cloneID ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+// Custom Codable in an extension: preserves the synthesized memberwise init used by
+// tests and by programmatic defaults, while tolerating partial/legacy JSON.
+extension VoiceSettings {
+    private enum CodingKeys: String, CodingKey {
+        case transcriptionEnabled
+        case showTranscriptInBubble
+        case saveTranscriptToMemory
+        case replyEnabled
+        case replyProbability
+        case mirrorIncomingVoice
+        case shortReplyOnly
+        case shortReplyMaxChars
+        case maxVoiceSeconds
+        case overLimit
+        case engine
+        case kokoroSpeakerID
+        case kokoroSpeed
+        case cloneID
+        case modelDownloadConsent
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = VoiceSettings()
+        transcriptionEnabled = try container.decodeIfPresent(Bool.self, forKey: .transcriptionEnabled)
+            ?? defaults.transcriptionEnabled
+        showTranscriptInBubble = try container.decodeIfPresent(Bool.self, forKey: .showTranscriptInBubble)
+            ?? defaults.showTranscriptInBubble
+        saveTranscriptToMemory = try container.decodeIfPresent(Bool.self, forKey: .saveTranscriptToMemory)
+            ?? defaults.saveTranscriptToMemory
+        replyEnabled = try container.decodeIfPresent(Bool.self, forKey: .replyEnabled)
+            ?? defaults.replyEnabled
+        replyProbability = try container.decodeIfPresent(Double.self, forKey: .replyProbability)
+            ?? defaults.replyProbability
+        mirrorIncomingVoice = try container.decodeIfPresent(Bool.self, forKey: .mirrorIncomingVoice)
+            ?? defaults.mirrorIncomingVoice
+        shortReplyOnly = try container.decodeIfPresent(Bool.self, forKey: .shortReplyOnly)
+            ?? defaults.shortReplyOnly
+        shortReplyMaxChars = try container.decodeIfPresent(Int.self, forKey: .shortReplyMaxChars)
+            ?? defaults.shortReplyMaxChars
+        maxVoiceSeconds = try container.decodeIfPresent(Int.self, forKey: .maxVoiceSeconds)
+            ?? defaults.maxVoiceSeconds
+        // 未知 raw value 回退到默认，避免手改配置导致整份 config 解码失败。
+        overLimit = (try container.decodeIfPresent(String.self, forKey: .overLimit))
+            .flatMap { VoiceOverLimit(rawValue: $0) } ?? defaults.overLimit
+        engine = (try container.decodeIfPresent(String.self, forKey: .engine))
+            .flatMap { VoiceEngineKind(rawValue: $0) } ?? defaults.engine
+        kokoroSpeakerID = try container.decodeIfPresent(Int.self, forKey: .kokoroSpeakerID)
+            ?? defaults.kokoroSpeakerID
+        kokoroSpeed = try container.decodeIfPresent(Double.self, forKey: .kokoroSpeed)
+            ?? defaults.kokoroSpeed
+        cloneID = try container.decodeIfPresent(String.self, forKey: .cloneID)
+        modelDownloadConsent = try container.decodeIfPresent(Bool.self, forKey: .modelDownloadConsent)
+            ?? defaults.modelDownloadConsent
+
+        // 解码后收敛数值范围（手改配置/历史异常值）。
+        maxVoiceSeconds = effectiveMaxVoiceSeconds
+        shortReplyMaxChars = effectiveShortReplyMaxChars
+        replyProbability = effectiveReplyProbability
+        kokoroSpeed = effectiveKokoroSpeed
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(transcriptionEnabled, forKey: .transcriptionEnabled)
+        try container.encode(showTranscriptInBubble, forKey: .showTranscriptInBubble)
+        try container.encode(saveTranscriptToMemory, forKey: .saveTranscriptToMemory)
+        try container.encode(replyEnabled, forKey: .replyEnabled)
+        try container.encode(effectiveReplyProbability, forKey: .replyProbability)
+        try container.encode(mirrorIncomingVoice, forKey: .mirrorIncomingVoice)
+        try container.encode(shortReplyOnly, forKey: .shortReplyOnly)
+        try container.encode(effectiveShortReplyMaxChars, forKey: .shortReplyMaxChars)
+        try container.encode(effectiveMaxVoiceSeconds, forKey: .maxVoiceSeconds)
+        try container.encode(overLimit.rawValue, forKey: .overLimit)
+        try container.encode(engine.rawValue, forKey: .engine)
+        try container.encode(kokoroSpeakerID, forKey: .kokoroSpeakerID)
+        try container.encode(effectiveKokoroSpeed, forKey: .kokoroSpeed)
+        try container.encodeIfPresent(cloneID, forKey: .cloneID)
+        try container.encode(modelDownloadConsent, forKey: .modelDownloadConsent)
+    }
+}
+
 struct BotSettings: Codable, Hashable {
     var enabled: Bool = false
     var dryRun: Bool = false
@@ -989,6 +1211,28 @@ struct BotSettings: Codable, Hashable {
 
     /// 群聊唤醒后的免唤醒窗口（2026-10-23）。可选以兼容旧配置；nil 表示默认关闭。
     var wakeWindow: WakeWindowSettings?
+
+    /// 语音功能设置（2026-10-26）。可选以兼容旧配置；nil 表示全部默认值
+    /// （转写开启、语音回复关闭），旧配置行为不变。
+    var voice: VoiceSettings?
+
+    /// 语音设置的读写入口：nil 时返回默认值；写入时创建结构。
+    var voiceSettings: VoiceSettings {
+        get { voice ?? VoiceSettings() }
+        set { voice = newValue }
+    }
+
+    /// 生效的语音转写总开关（旧配置缺省开启）。
+    var voiceTranscriptionEnabled: Bool {
+        get { voiceSettings.transcriptionEnabled }
+        set { voiceSettings.transcriptionEnabled = newValue }
+    }
+
+    /// 生效的语音回复总开关（旧配置缺省关闭）。
+    var voiceReplyEnabled: Bool {
+        get { voiceSettings.replyEnabled }
+        set { voiceSettings.replyEnabled = newValue }
+    }
 
     /// 收到图片时是否向 bridge 请求图片内容（默认开启）。
     /// 旧配置缺少该键时保持开启；关闭后只显示「图片」占位，不下载、不落盘。

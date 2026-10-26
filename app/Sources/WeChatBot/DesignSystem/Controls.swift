@@ -458,3 +458,111 @@ struct UnavailableLabel: View {
         .accessibilityElement(children: .combine)
     }
 }
+
+// MARK: - Page sub-navigation
+
+/// One entry of a `PageTabBar`. Titles are Chinese source strings and get
+/// localized by the bar itself, so pages only declare the raw section names.
+protocol PageTabItem: Identifiable, Hashable {
+    var tabTitle: String { get }
+    var tabSymbol: String { get }
+    /// Optional tooltip / VoiceOver hint describing what the section contains.
+    var tabHelp: String? { get }
+}
+
+extension PageTabItem {
+    var tabHelp: String? { nil }
+}
+
+/// Sticky sub-navigation for pages whose settings no longer fit on one screen
+/// (currently 机器人). Pill tabs inside a translucent capsule track: the
+/// selected tab keeps the brand tint, the others stay quiet until hover.
+struct PageTabBar<Tab: PageTabItem>: View {
+    let tabs: [Tab]
+    @Binding var selection: Tab
+    var tint: Color = Theme.accent
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            tabRow
+            // 极端窄窗口或超大字号时退化为横向滚动，避免 pill 被截断。
+            ScrollView(.horizontal, showsIndicators: false) {
+                tabRow
+            }
+        }
+        .padding(3)
+        .background(Color.primary.opacity(0.045), in: Capsule())
+        .overlay {
+            Capsule().strokeBorder(Theme.hairline, lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var tabRow: some View {
+        HStack(spacing: 3) {
+            ForEach(tabs) { tab in
+                PageTabButton(
+                    title: tab.tabTitle,
+                    help: tab.tabHelp,
+                    symbol: tab.tabSymbol,
+                    isSelected: selection == tab,
+                    tint: tint
+                ) {
+                    guard selection != tab else { return }
+                    selection = tab
+                }
+            }
+        }
+    }
+}
+
+private struct PageTabButton: View {
+    let title: String
+    let help: String?
+    let symbol: String
+    let isSelected: Bool
+    let tint: Color
+    let action: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: symbol)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .accessibilityHidden(true)
+                Text(L(title))
+                    .font(.callout.weight(isSelected ? .semibold : .medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(isSelected ? Color.white : Color.secondary)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 5)
+            .background {
+                if isSelected {
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [tint, tint.opacity(0.82)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .shadow(color: tint.opacity(0.24), radius: 4, y: 1.5)
+                } else if isHovering {
+                    Capsule().fill(Color.primary.opacity(0.06))
+                }
+            }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help(L(help ?? title))
+        .animation(Theme.animation(reduceMotion, .easeOut(duration: 0.12)), value: isSelected)
+        .animation(Theme.animation(reduceMotion, .easeOut(duration: 0.12)), value: isHovering)
+        .accessibilityLabel(L(title))
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+}

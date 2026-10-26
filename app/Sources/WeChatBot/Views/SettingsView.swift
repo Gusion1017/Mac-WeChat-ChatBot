@@ -15,6 +15,16 @@ struct SettingsView: View {
     @State private var progress: Double?
     @State private var progressMessage: String?
     @State private var sleepCenter = SleepPreventionCenter.shared
+    @State private var voiceAssetStatus: VoiceAssetStatus = .unknown
+    @State private var isRefreshingVoiceAsset = false
+    /// 语音发送句柄/倒计时的本地刷新 tick（每秒重算倒计时，不每秒请求 bridge）。
+    @State private var voiceStatusTick = Date()
+    /// 开启语音回复但句柄未就绪时弹出捕获引导。
+    @State private var voiceSetupPresented = false
+    /// 语音模型下载/导入进行中（避免重复点按）。
+    @State private var isImportingVoiceClone = false
+    /// Hook 安装所需的 Xcode Command Line Tools 状态（值由环境检查卡回填）。
+    @State private var commandLineToolsStatus: CommandLineToolsStatus?
 
     enum SettingsCategory: String, CaseIterable, Identifiable {
         case general
@@ -22,6 +32,7 @@ struct SettingsView: View {
         case notifications
         case hook
         case onebot
+        case voice
         case data
         case about
 
@@ -34,6 +45,7 @@ struct SettingsView: View {
             case .notifications: "通知"
             case .hook: "Hook"
             case .onebot: "OneBot"
+            case .voice: "语音"
             case .data: "数据与备份"
             case .about: "关于"
             }
@@ -46,6 +58,7 @@ struct SettingsView: View {
             case .notifications: "bell"
             case .hook: "link"
             case .onebot: "network"
+            case .voice: "waveform"
             case .data: "externaldrive"
             case .about: "info.circle"
             }
@@ -58,6 +71,7 @@ struct SettingsView: View {
             case .notifications: Theme.warning
             case .hook: Theme.info
             case .onebot: Theme.accent
+            case .voice: Theme.violet
             case .data: Theme.info
             case .about: .secondary
             }
@@ -131,7 +145,7 @@ struct SettingsView: View {
 
     private var categorySidebar: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sidebarGroup("应用", items: [.general, .appearance, .notifications])
+            sidebarGroup("应用", items: [.general, .appearance, .notifications, .voice])
             sidebarGroup("集成", items: [.hook, .onebot])
             sidebarGroup("数据", items: [.data, .about])
             Spacer()
@@ -194,6 +208,7 @@ struct SettingsView: View {
         case .notifications: notificationSettings
         case .hook: hookSettings
         case .onebot: oneBotSettings
+        case .voice: VoiceSettingsPanel()
         case .data: dataSettings
         case .about: aboutSettings
         }
@@ -653,7 +668,10 @@ struct SettingsView: View {
                         }
                         .buttonStyle(.glassProminent)
                         .tint(Theme.warning)
-                        .disabled(isWorking)
+                        .disabled(isWorking || commandLineToolsStatus?.isReady != true)
+                        .help(L(commandLineToolsStatus?.isReady == true
+                                ? "安装 Hook"
+                                : "需要安装 Xcode Command Line Tools"))
 
                         Button {
                             hookAction = .restore
@@ -672,6 +690,10 @@ struct SettingsView: View {
                 }
                 .padding(14)
             }
+
+            CommandLineToolsCard(onStatusChange: { status in
+                commandLineToolsStatus = status
+            })
 
             InlineNotice(
                 kind: .warning,
@@ -849,6 +871,599 @@ struct SettingsView: View {
 
     private var wsURL: String {
         "ws://\(store.settings.onebot.host):\(store.settings.onebot.port)/ws"
+    }
+
+    // MARK: Voice
+
+    /// 语音设置页（2026-10-26）：入站转写 + 气泡展示 + 记忆 + 语音回复策略 + TTS 引擎。
+    ///
+    /// 所有字段都写入 `BotSettings.voice`（可选结构，旧配置缺键时全部默认）。
+    /// 语音发送依赖 bridge `/voice_status` 的句柄与登录稳定门禁；
+    /// TTS 模型下载由 `modelDownloadConsent` 控制，下载前必须由用户显式同意。
+    private var voiceSettings: some View {
+        VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
+            SettingsSection(
+                title: "语音转写",
+                footer: "使用 macOS 26 本地语音识别（SpeechAnalyzer），音频与转写只保存在本机，日志不打印转写原文。"
+            ) {
+                SettingsRow(
+                    title: "转写收到的语音",
+                    subtitle: "语音消息自动获取音频并转写，用于气泡展示、AI 回复与记忆",
+                    symbol: "waveform",
+                    tint: Theme.violet
+                ) {
+                    Toggle(L("转写收到的语音"), isOn: bind(\.bot.voiceSettings.transcriptionEnabled))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "气泡显示转写",
+                    subtitle: "关闭后气泡只显示「语音 Ns」，转写仍用于 AI 回复",
+                    symbol: "text.bubble",
+                    tint: .secondary
+                ) {
+                    Toggle(L("气泡显示转写"), isOn: bind(\.bot.voiceSettings.showTranscriptInBubble))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "转写写入记忆与搜索",
+                    subtitle: "关闭后转写只用于即时回复，不进入长期记忆总结",
+                    symbol: "brain",
+                    tint: Theme.info
+                ) {
+                    Toggle(L("转写写入记忆与搜索"), isOn: bind(\.bot.voiceSettings.saveTranscriptToMemory))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "转写资源",
+                    subtitle: voiceAssetDetail,
+                    symbol: "arrow.down.circle",
+                    tint: voiceAssetTint
+                ) {
+                    HStack(spacing: 8) {
+                        PillLabel(
+                            text: L(voiceAssetStatus.label),
+                            color: voiceAssetTint,
+                            symbol: voiceAssetStatus == .installed ? "checkmark.circle.fill" : "exclamationmark.circle"
+                        )
+                        Button {
+                            Task { await refreshVoiceAssetStatus() }
+                        } label: {
+                            if isRefreshingVoiceAsset {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Label(L("刷新"), systemImage: "arrow.clockwise")
+                            }
+                        }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                        .disabled(isRefreshingVoiceAsset)
+                    }
+                }
+            }
+
+            if voiceAssetStatus == .downloadable {
+                InlineNotice(
+                    kind: .info,
+                    title: "需要安装中文语音资源",
+                    message: "系统支持中文语音识别但资源尚未安装。请到「系统设置 → 通用 → 语言与地区 → 语音识别资源」下载中文资源；"
+                        + "App 不会自动下载。安装后点上方「刷新」。"
+                )
+            } else if voiceAssetStatus == .unsupported {
+                InlineNotice(
+                    kind: .warning,
+                    title: "当前系统不支持本地中文语音识别",
+                    message: "需要 macOS 26 及以上并支持 SpeechTranscriber 的中文语言包；转写将不可用，但文字聊天不受影响。"
+                )
+            }
+
+            SettingsSection(
+                title: "语音回复",
+                footer: "仅短回复会转语音：「对等」只对语音消息回语音。发送失败（如未捕获语音句柄、上传链路未就绪）会安全降级为文字（不会重复发送）。"
+            ) {
+                SettingsRow(
+                    title: "允许语音回复",
+                    subtitle: "按概率把部分文字回复改成语音；会话可单独覆盖",
+                    symbol: "speaker.wave.2",
+                    tint: Theme.accent
+                ) {
+                    Toggle(L("允许语音回复"), isOn: bind(\.bot.voiceSettings.replyEnabled))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "语音回复概率",
+                    subtitle: "每条符合条件的回复按概率转语音",
+                    symbol: "percent",
+                    tint: Theme.info
+                ) {
+                    HStack(spacing: 10) {
+                        Slider(value: bind(\.bot.voiceSettings.replyProbability), in: 0...1, step: 0.05)
+                            .frame(width: 180)
+                            .labelsHidden()
+                        Text("\(Int((store.settings.bot.voiceSettings.effectiveReplyProbability * 100).rounded()))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 38, alignment: .trailing)
+                    }
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "对等回复",
+                    subtitle: "只有收到语音消息时才用语音回复",
+                    symbol: "arrow.left.arrow.right",
+                    tint: .secondary
+                ) {
+                    Toggle(L("对等回复"), isOn: bind(\.bot.voiceSettings.mirrorIncomingVoice))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "仅短回复发语音",
+                    subtitle: "长回复继续发文字，避免语音过长",
+                    symbol: "text.alignleft",
+                    tint: .secondary
+                ) {
+                    Toggle(L("仅短回复发语音"), isOn: bind(\.bot.voiceSettings.shortReplyOnly))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                if store.settings.bot.voiceSettings.shortReplyOnly {
+                    SettingsDivider()
+                    SettingsRow(
+                        title: "短回复字数阈值",
+                        subtitle: "超过该字数的回复一律发文字",
+                        symbol: "character.cursor.ibeam",
+                        tint: .secondary
+                    ) {
+                        Stepper(
+                            value: bind(\.bot.voiceSettings.shortReplyMaxChars),
+                            in: 20...300,
+                            step: 10
+                        ) {
+                            Text(Lf("%d 字", store.settings.bot.voiceSettings.effectiveShortReplyMaxChars))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        .fixedSize()
+                    }
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "语音最长时长",
+                    subtitle: "超过上限时按下方策略处理（语音回复用）",
+                    symbol: "timer",
+                    tint: Theme.warning
+                ) {
+                    HStack(spacing: 10) {
+                        Slider(
+                            value: Binding(
+                                get: { Double(store.settings.bot.voiceSettings.effectiveMaxVoiceSeconds) },
+                                set: { store.settings.bot.voiceSettings.maxVoiceSeconds = Int($0.rounded()); store.persist() }
+                            ),
+                            in: 5...60,
+                            step: 5
+                        )
+                        .frame(width: 180)
+                        .labelsHidden()
+                        Text("\(store.settings.bot.voiceSettings.effectiveMaxVoiceSeconds)s")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 38, alignment: .trailing)
+                    }
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "超限处理",
+                    subtitle: "改发文字：直接降级；按句截断：切到不超限后重新合成",
+                    symbol: "scissors",
+                    tint: Theme.warning
+                ) {
+                    Picker(L("超限处理"), selection: bind(\.bot.voiceSettings.overLimit)) {
+                        ForEach(VoiceOverLimit.allCases) { limit in
+                            Text(limit.label).tag(limit)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 210)
+                }
+            }
+
+            SettingsSection(
+                title: L("语音发送状态"),
+                footer: L("首次启用语音回复或微信重启后，需要在本机微信手动发一条文字和一条语音以捕获发送句柄；bridge 启动后的登录稳定期内不会发送语音。")
+            ) {
+                SettingsRow(
+                    title: L("发送通道"),
+                    subtitle: voiceRuntimeSummary,
+                    symbol: voiceRuntimeSymbol,
+                    tint: voiceRuntimeTint
+                ) {
+                    HStack(spacing: 8) {
+                        if store.voiceRuntimeStatus.remainingWarmupSeconds(now: voiceStatusTick) > 0 {
+                            ProgressView().controlSize(.small)
+                        }
+                        Button(L("重新检测")) {
+                            Task {
+                                await store.refreshVoiceStatus()
+                                voiceStatusTick = Date()
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+                SettingsDivider()
+                voiceSeedRow(title: L("文本发送句柄"), ready: store.voiceRuntimeStatus.textSeed)
+                SettingsDivider()
+                voiceSeedRow(title: L("语音发送句柄"), ready: store.voiceRuntimeStatus.voiceSeed)
+                if store.settings.bot.voiceSettings.replyEnabled,
+                   store.voiceRuntimeStatus.configured,
+                   !store.voiceRuntimeStatus.canSendVoice(now: voiceStatusTick) {
+                    SettingsDivider()
+                    SettingsRow(
+                        title: L("需要捕获发送句柄"),
+                        subtitle: L("点开查看步骤；捕获完成前语音回复会自动降级文字"),
+                        symbol: "waveform.badge.exclamationmark",
+                        tint: Theme.warning
+                    ) {
+                        Button(L("查看步骤…")) { voiceSetupPresented = true }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                    }
+                }
+            }
+
+            SettingsSection(
+                title: "语音引擎（TTS）",
+                footer: "模型首次使用时按需下载到本机；下载前必须同意。首次启用语音发送或微信重启后，请先在 Mac 微信手动发一条文字 + 一条语音以捕获发送句柄（bridge 重启会自动恢复）；发送失败会自动降级为文字。"
+            ) {
+                SettingsRow(
+                    title: "合成引擎",
+                    subtitle: "Kokoro 内置音色；ZipVoice 使用克隆音色（需导入参考音频）",
+                    symbol: "waveform.circle",
+                    tint: Theme.violet
+                ) {
+                    Picker(L("合成引擎"), selection: bind(\.bot.voiceSettings.engine)) {
+                        ForEach([VoiceEngineKind.kokoro, .zipvoiceClone], id: \.self) { kind in
+                            Text(voiceEngineLabel(kind)).tag(kind)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 240)
+                }
+                if store.settings.bot.voiceSettings.engine == .zipvoiceClone {
+                    SettingsDivider()
+                    SettingsRow(
+                        title: "克隆音色档案 ID",
+                        subtitle: "在语音模型管理中导入参考音频后填写（留空则不可用）",
+                        symbol: "person.wave.2",
+                        tint: .secondary
+                    ) {
+                        TextField(L("克隆音色档案 ID"), text: cloneIDBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 220)
+                    }
+                } else {
+                    SettingsDivider()
+                    SettingsRow(
+                        title: "Kokoro 音色",
+                        subtitle: "音色编号（以模型说明为准，0 为默认音色）",
+                        symbol: "person.2.wave.2",
+                        tint: .secondary
+                    ) {
+                        Stepper(
+                            value: bind(\.bot.voiceSettings.kokoroSpeakerID),
+                            in: 0...200,
+                            step: 1
+                        ) {
+                            Text("#\(store.settings.bot.voiceSettings.kokoroSpeakerID)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        .fixedSize()
+                    }
+                    SettingsDivider()
+                    SettingsRow(
+                        title: "Kokoro 语速",
+                        subtitle: "0.5×–2.0×，默认 1.0×",
+                        symbol: "speedometer",
+                        tint: .secondary
+                    ) {
+                        HStack(spacing: 10) {
+                            Slider(value: bind(\.bot.voiceSettings.kokoroSpeed), in: 0.5...2.0, step: 0.05)
+                                .frame(width: 180)
+                                .labelsHidden()
+                            Text(String(format: "%.2f×", store.settings.bot.voiceSettings.effectiveKokoroSpeed))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 48, alignment: .trailing)
+                        }
+                    }
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "允许下载语音模型",
+                    subtitle: "首次使用前需要同意；模型较大（Kokoro 约 365MB、ZipVoice 约 109MB）",
+                    symbol: "arrow.down.circle",
+                    tint: Theme.warning
+                ) {
+                    Toggle(L("允许下载语音模型"), isOn: bind(\.bot.voiceSettings.modelDownloadConsent))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+            }
+
+            SettingsSection(
+                title: L("语音模型与克隆音色"),
+                footer: L("模型按需下载到本机，不入 App 包体；下载前需先允许。ZipVoice 克隆需要参考音频与参考文本（导入后自动用本地语音识别转写，可手动修正）。")
+            ) {
+                ForEach(Array(VoiceModelKind.allCases), id: \.rawValue) { kind in
+                    let spec = VoiceModelStore.catalog.first { $0.kind == kind }
+                    let state = VoiceModelStore.shared.state(for: kind)
+                    SettingsRow(
+                        title: spec?.displayName ?? kind.rawValue,
+                        subtitle: "\(state.displayText) · 约 \(ByteCountFormatter.string(fromByteCount: spec?.approximateBytes ?? 0, countStyle: .file))",
+                        symbol: state.isReady ? "checkmark.circle.fill" : "arrow.down.circle",
+                        tint: state.isReady ? Theme.success : Theme.warning
+                    ) {
+                        HStack(spacing: 8) {
+                            if state.isBusy {
+                                ProgressView(value: state.fraction)
+                                    .frame(width: 90)
+                            }
+                            if state.isReady {
+                                Button(L("删除")) {
+                                    do {
+                                        try VoiceModelStore.shared.delete(kind)
+                                    } catch {
+                                        toast.show(error.localizedDescription, tone: .error)
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            } else {
+                                Button(L("下载")) {
+                                    downloadVoiceModels([kind])
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .disabled(state.isBusy || VoiceModelStore.shared.isDownloading)
+                            }
+                        }
+                    }
+                    SettingsDivider()
+                }
+                SettingsRow(
+                    title: L("下载全部语音模型"),
+                    subtitle: L("Kokoro 约 365MB、ZipVoice 约 109MB、声码器约 54MB；网络较慢时请耐心等待"),
+                    symbol: "arrow.down.circle",
+                    tint: Theme.violet
+                ) {
+                    Button(L("下载全部")) {
+                        downloadVoiceModels(VoiceModelKind.allCases)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(VoiceModelStore.shared.isDownloading)
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: L("克隆音色档案"),
+                    subtitle: VoiceCloneStore.shared.profiles.isEmpty
+                        ? L("还没有克隆音色；导入 10–30 秒参考音频即可")
+                        : Lf("共 %d 个克隆音色", VoiceCloneStore.shared.profiles.count),
+                    symbol: "person.wave.2",
+                    tint: .secondary
+                ) {
+                    Button(L("导入参考音频…")) {
+                        importVoiceClone()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(isImportingVoiceClone)
+                }
+                if !VoiceCloneStore.shared.profiles.isEmpty {
+                    ForEach(VoiceCloneStore.shared.profiles) { profile in
+                        SettingsDivider()
+                        SettingsRow(
+                            title: profile.name,
+                            subtitle: "\(Int(profile.duration.rounded()))s · \(profile.hasReferenceText ? L("参考文本已填写") : L("缺少参考文本（克隆不可用）"))",
+                            symbol: store.settings.bot.voiceSettings.cloneID == profile.id
+                                ? "checkmark.circle.fill" : "circle",
+                            tint: store.settings.bot.voiceSettings.cloneID == profile.id ? Theme.success : .secondary
+                        ) {
+                            HStack(spacing: 8) {
+                                Button(L("使用")) {
+                                    store.settings.bot.voiceSettings.engine = .zipvoiceClone
+                                    store.settings.bot.voiceSettings.cloneID = profile.id
+                                    store.persist()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                Button(L("删除")) {
+                                    do {
+                                        try VoiceCloneStore.shared.delete(id: profile.id)
+                                        if store.settings.bot.voiceSettings.cloneID == profile.id {
+                                            store.settings.bot.voiceSettings.cloneID = nil
+                                            store.persist()
+                                        }
+                                    } catch {
+                                        toast.show(error.localizedDescription, tone: .error)
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .task { await refreshVoiceAssetStatus() }
+        .task {
+            while !Task.isCancelled {
+                await store.refreshVoiceStatus()
+                voiceStatusTick = Date()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+        .onChange(of: store.settings.bot.voiceSettings.replyEnabled) { _, enabled in
+            guard enabled else { return }
+            Task {
+                await store.refreshVoiceStatus()
+                voiceStatusTick = Date()
+                if store.voiceRuntimeStatus.configured,
+                   !store.voiceRuntimeStatus.canSendVoice() {
+                    voiceSetupPresented = true
+                }
+            }
+        }
+        .sheet(isPresented: $voiceSetupPresented) {
+            VoiceHandleSetupSheet()
+                .environment(store)
+        }
+    }
+
+
+    /// 下载语音模型（必须已有用户同意；未同意时提示，不自动改设置）。
+    private func downloadVoiceModels(_ kinds: [VoiceModelKind]) {
+        guard store.settings.bot.voiceSettings.modelDownloadConsent else {
+            toast.show(L("请先打开「允许下载语音模型」"), tone: .warning)
+            return
+        }
+        Task {
+            do {
+                try await VoiceModelStore.shared.download(kinds, consent: true)
+                toast.show(L("语音模型下载完成"), tone: .success)
+            } catch {
+                toast.show(error.localizedDescription, tone: .error)
+            }
+        }
+    }
+
+    /// 导入克隆参考音频：导入 → 本地转写参考文本（失败可稍后手动补）→ 自动选中。
+    private func importVoiceClone() {
+        guard !isImportingVoiceClone else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = L("选择 10–30 秒、单人说话的参考音频（wav/m4a）")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        isImportingVoiceClone = true
+        Task {
+            defer { Task { @MainActor in isImportingVoiceClone = false } }
+            do {
+                let name = url.deletingPathExtension().lastPathComponent
+                let profile = try VoiceCloneStore.shared.add(name: name, audioURL: url)
+                if let transcription = try? await store.voiceTranscription.transcribe(
+                    fileURL: profile.audioURL
+                ), !transcription.text.isEmpty {
+                    try? VoiceCloneStore.shared.setReferenceText(id: profile.id, text: transcription.text)
+                }
+                store.settings.bot.voiceSettings.engine = .zipvoiceClone
+                store.settings.bot.voiceSettings.cloneID = profile.id
+                store.persist()
+                toast.show(L("已导入克隆音色"), tone: .success)
+            } catch {
+                toast.show(error.localizedDescription, tone: .error)
+            }
+        }
+    }
+
+
+    private var voiceRuntimeSummary: String {
+        let status = store.voiceRuntimeStatus
+        if status.available, status.remainingWarmupSeconds(now: voiceStatusTick) > 0 {
+            return Lf("预热中：约 %d 秒后可发送语音", status.remainingWarmupSeconds(now: voiceStatusTick))
+        }
+        return status.summary(now: voiceStatusTick)
+    }
+
+    private var voiceRuntimeSymbol: String {
+        store.voiceRuntimeStatus.canSendVoice(now: voiceStatusTick)
+            ? "checkmark.circle.fill" : "waveform.badge.exclamationmark"
+    }
+
+    private var voiceRuntimeTint: Color {
+        if store.voiceRuntimeStatus.canSendVoice(now: voiceStatusTick) { return Theme.success }
+        if store.voiceRuntimeStatus.remainingWarmupSeconds(now: voiceStatusTick) > 0 { return Theme.warning }
+        return Theme.danger
+    }
+
+    @ViewBuilder
+    private func voiceSeedRow(title: String, ready: Bool) -> some View {
+        SettingsRow(
+            title: title,
+            subtitle: ready ? L("已捕获") : L("未捕获"),
+            symbol: ready ? "checkmark.circle.fill" : "circle",
+            tint: ready ? Theme.success : .secondary
+        ) {
+            Text(ready ? L("就绪") : L("待捕获"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var voiceAssetDetail: String {
+        switch voiceAssetStatus {
+        case .installed: return "已安装中文语音资源，可以离线转写"
+        case .downloadable: return "系统支持但资源未安装，需要到系统设置下载"
+        case .unsupported: return "当前系统或语言包不支持本地中文语音识别"
+        case .unknown: return "点击「刷新」检查本机语音资源状态"
+        }
+    }
+
+    private var voiceAssetTint: Color {
+        switch voiceAssetStatus {
+        case .installed: return Theme.success
+        case .downloadable: return Theme.warning
+        case .unsupported: return Theme.danger
+        case .unknown: return .secondary
+        }
+    }
+
+    private func refreshVoiceAssetStatus() async {
+        guard !isRefreshingVoiceAsset else { return }
+        isRefreshingVoiceAsset = true
+        defer { isRefreshingVoiceAsset = false }
+        voiceAssetStatus = await store.voiceAssetStatus()
+    }
+
+    /// 引擎展示名：不依赖 `VoiceEngineKind` 是否 CaseIterable/Identifiable。
+    private func voiceEngineLabel(_ kind: VoiceEngineKind) -> String {
+        if kind == .kokoro { return "Kokoro" }
+        if kind == .zipvoiceClone { return L("ZipVoice 克隆") }
+        return kind.rawValue
+    }
+
+    /// 克隆音色档案 ID：空字符串 ↔ nil。
+    private var cloneIDBinding: Binding<String> {
+        Binding(
+            get: { store.settings.bot.voiceSettings.cloneID ?? "" },
+            set: { newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                store.settings.bot.voiceSettings.cloneID = trimmed.isEmpty ? nil : trimmed
+                store.persist()
+            }
+        )
     }
 
     // MARK: Data
@@ -1398,6 +2013,97 @@ private struct LogBufferMaintenanceRow: View {
             .buttonStyle(.glass)
             .controlSize(.small)
             .disabled(store.logs.isEmpty)
+        }
+    }
+}
+
+
+// MARK: - 语音发送句柄捕获引导（2026-10-26）
+
+/// 开启语音回复时弹出的捕获引导。
+///
+/// 用户需要在本机微信「文件传输助手」手动发一条文字 + 一条语音；页面每秒刷新
+/// bridge `/voice_status`，显示三项就绪状态并允许关闭后稍后再试。
+struct VoiceHandleSetupSheet: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var tick = Date()
+    @State private var refreshing = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "waveform.circle.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(Theme.violet)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(L("启用语音回复前，先捕获发送句柄"))
+                        .font(.title3.weight(.semibold))
+                    Text(L("语音发送复用微信原生发送链路。请在本机微信给「文件传输助手」手动发一条文字和一条语音，完成后这里会自动检测。"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                stepRow(index: 1, title: L("发一条文字"), detail: L("任意内容，用于文本发送句柄"), ready: store.voiceRuntimeStatus.textSeed)
+                stepRow(index: 2, title: L("发一条语音"), detail: L("任意内容，用于语音发送句柄"), ready: store.voiceRuntimeStatus.voiceSeed)
+                stepRow(index: 3, title: L("等待登录稳定"), detail: warmupDetail, ready: store.voiceRuntimeStatus.loginSettled)
+            }
+
+            HStack(spacing: 10) {
+                Button(L("重新检测")) {
+                    refreshing = true
+                    Task {
+                        await store.refreshVoiceStatus()
+                        tick = Date()
+                        refreshing = false
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(refreshing)
+
+                if store.voiceRuntimeStatus.canSendVoice(now: tick) {
+                    Button(L("完成")) { dismiss() }
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Button(L("稍后再说")) { dismiss() }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(24)
+        .frame(width: 520)
+        .task {
+            while !Task.isCancelled {
+                await store.refreshVoiceStatus()
+                tick = Date()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private var warmupDetail: String {
+        let remaining = store.voiceRuntimeStatus.remainingWarmupSeconds(now: tick)
+        if remaining > 0 { return Lf("约 %d 秒后稳定", remaining) }
+        return store.voiceRuntimeStatus.loginSettled ? L("已稳定") : L("等待中")
+    }
+
+    private func stepRow(index: Int, title: String, detail: String, ready: Bool) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: ready ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(ready ? Theme.success : .secondary)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(index). \(title)").font(.callout.weight(.medium))
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(ready ? L("已就绪") : L("待完成"))
+                .font(.caption)
+                .foregroundStyle(ready ? Theme.success : .secondary)
         }
     }
 }

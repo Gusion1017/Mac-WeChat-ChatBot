@@ -33,6 +33,9 @@ func main() {
 	http.HandleFunc("/send_private_msg", sendHandler)
 	http.HandleFunc("/send_group_msg", sendHandler)
 	http.HandleFunc("/fetch_image", fetchImageHandler)
+	http.HandleFunc("/fetch_voice", fetchVoiceHandler)
+	http.HandleFunc("/send_voice", sendVoiceHandler)
+	http.HandleFunc("/voice_status", voiceStatusHandler)
 
 	http.HandleFunc("/ws", handleWebSocket)
 	http.HandleFunc("/test_ws", testWebSocket)
@@ -262,6 +265,30 @@ func loadJs() {
 								persistR3Seed(pid, seed)
 								Info("R3 发送句柄已持久化", "pid", pid, "seed", seed)
 							}
+						case "r3_voice_header":
+							header, _ := pMap["header"].(string)
+							pidFloat, _ := pMap["pid"].(float64)
+							pid := int(pidFloat)
+							if pid <= 0 {
+								pid = attachedWechatPid
+							}
+							if header != "" && pid > 0 {
+								attachedWechatPid = pid
+								persistR3VoiceHeader(pid, header)
+								Info("R3 语音 header 已持久化", "pid", pid)
+							}
+						case "r3_voice_seed":
+							seed, _ := pMap["seed"].(string)
+							pidFloat, _ := pMap["pid"].(float64)
+							pid := int(pidFloat)
+							if pid <= 0 {
+								pid = attachedWechatPid
+							}
+							if seed != "" && pid > 0 {
+								attachedWechatPid = pid
+								persistR3VoiceSeed(pid, seed)
+								Info("R3 语音句柄已持久化", "pid", pid, "seed", seed)
+							}
 						case "r3_mode":
 							enabled := true
 							if v, ok := pMap["enabled"].(bool); ok {
@@ -397,16 +424,38 @@ func loadJs() {
 	// 4.1.15.55 R3：bridge 重启但微信未重启时，恢复上次捕获的发送句柄，避免回复排队。
 	// gadget 模式拿不到微信 PID，由 JS 用 Process.id 做新鲜度校验。
 	if rec, ok := loadR3SeedRecord(); ok {
-		result := fridaScript.ExportsCall("r3RestoreSeed", rec.PID, rec.Seed)
-		switch fmt.Sprint(result) {
-		case "ok":
-			Info("R3 发送句柄恢复（bridge 重启）", "pid", rec.PID, "seed", rec.Seed)
-		case "stale":
-			Info("R3 发送句柄记录已过期（微信已重启），等待重新捕获")
-			_ = os.Remove(r3SeedFile())
-		default:
-			Warn("R3 发送句柄已失效，等待重新捕获", "result", result)
-			_ = os.Remove(r3SeedFile())
+		if rec.Seed != "" {
+			result := fridaScript.ExportsCall("r3RestoreSeed", rec.PID, rec.Seed)
+			switch fmt.Sprint(result) {
+			case "ok":
+				Info("R3 发送句柄恢复（bridge 重启）", "pid", rec.PID, "seed", rec.Seed)
+			case "stale":
+				Info("R3 发送句柄记录已过期（微信已重启），等待重新捕获")
+				_ = os.Remove(r3SeedFile())
+			default:
+				Warn("R3 发送句柄已失效，等待重新捕获", "result", result)
+				_ = os.Remove(r3SeedFile())
+			}
+		}
+		if rec.VoiceSeed != "" {
+			result := fridaScript.ExportsCall("r3RestoreVoiceSeed", rec.PID, rec.VoiceSeed)
+			switch fmt.Sprint(result) {
+			case "1":
+				Info("R3 语音句柄恢复（bridge 重启）", "pid", rec.PID, "seed", rec.VoiceSeed)
+			case "stale":
+				Info("R3 语音句柄记录已过期（微信已重启）")
+				_ = os.Remove(r3SeedFile())
+			default:
+				Warn("R3 语音句柄恢复失败", "result", result)
+			}
+		}
+		if rec.VoiceHeader != "" {
+			result := fridaScript.ExportsCall("r3RestoreVoiceHeader", rec.PID, rec.VoiceHeader)
+			if fmt.Sprint(result) != "1" {
+				Warn("R3 语音 header 恢复失败", "result", result)
+			} else {
+				Info("R3 语音 header 恢复（bridge 重启）", "pid", rec.PID)
+			}
 		}
 	}
 }

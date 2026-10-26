@@ -14,7 +14,9 @@ import (
 type r3SeedRecord struct {
 	PID       int    `json:"pid"`
 	Seed      string `json:"seed"`
-	UpdatedAt int64  `json:"updated_at"`
+	VoiceSeed   string `json:"voice_seed,omitempty"`
+	VoiceHeader string `json:"voice_header,omitempty"`
+	UpdatedAt   int64  `json:"updated_at"`
 }
 
 // attachedWechatPid 记录本次 attach 的微信 PID（本地 attach 模式可预知；
@@ -58,7 +60,44 @@ func persistR3Seed(pid int, seed string) {
 	if pid <= 0 || seed == "" {
 		return
 	}
-	rec := r3SeedRecord{PID: pid, Seed: seed, UpdatedAt: time.Now().Unix()}
+	rec, _ := loadR3SeedRecord()
+	if rec.PID != pid {
+		rec = r3SeedRecord{PID: pid}
+	}
+	rec.Seed = seed
+	rec.UpdatedAt = time.Now().Unix()
+	writeR3SeedRecord(rec)
+}
+
+// persistR3VoiceHeader 保存真实语音 proto 的最小 header（session/device）。
+func persistR3VoiceHeader(pid int, header string) {
+	if pid <= 0 || header == "" {
+		return
+	}
+	rec, _ := loadR3SeedRecord()
+	if rec.PID != pid {
+		rec = r3SeedRecord{PID: pid}
+	}
+	rec.VoiceHeader = header
+	rec.UpdatedAt = time.Now().Unix()
+	writeR3SeedRecord(rec)
+}
+
+// persistR3VoiceSeed 单独保存 uploadvoice 任务闭包；与文本句柄共用同一记录。
+func persistR3VoiceSeed(pid int, seed string) {
+	if pid <= 0 || seed == "" {
+		return
+	}
+	rec, _ := loadR3SeedRecord()
+	if rec.PID != pid {
+		rec = r3SeedRecord{PID: pid}
+	}
+	rec.VoiceSeed = seed
+	rec.UpdatedAt = time.Now().Unix()
+	writeR3SeedRecord(rec)
+}
+
+func writeR3SeedRecord(rec r3SeedRecord) {
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return
@@ -72,7 +111,8 @@ func loadR3SeedRecord() (r3SeedRecord, bool) {
 		return r3SeedRecord{}, false
 	}
 	var rec r3SeedRecord
-	if err := json.Unmarshal(data, &rec); err != nil || rec.PID <= 0 || rec.Seed == "" {
+	if err := json.Unmarshal(data, &rec); err != nil || rec.PID <= 0 ||
+		(rec.Seed == "" && rec.VoiceSeed == "" && rec.VoiceHeader == "") {
 		return r3SeedRecord{}, false
 	}
 	return rec, true

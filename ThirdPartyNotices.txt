@@ -4,6 +4,23 @@ This project is a personal-use derivative of open-source WeChat hook projects.
 It is distributed under **GPL-3.0** (see `LICENSE`). The app communicates with
 official WeChat locally through Frida Gadget; no Tencent source code is included.
 
+Release builds also bundle or statically link the components below. The
+corresponding license texts are shipped in `LICENSES/` (and inside
+`WeChat AI.app/Contents/Resources/LICENSES/` for binary releases). Per-component
+copyright notices are listed with each component.
+
+## License texts
+
+| License | File |
+| --- | --- |
+| GPL-3.0 | `LICENSE` |
+| Apache-2.0 | `LICENSES/Apache-2.0.txt` |
+| MIT | `LICENSES/MIT.txt` (plus component-specific texts, e.g. `LICENSES/MIT-Vocos.txt`) |
+| BSD-3-Clause | `LICENSES/BSD-3-Clause.txt` |
+| ISC | `LICENSES/ISC.txt` |
+| wxWindows Library Licence 3.1 | `LICENSES/wxWindows-Library-Licence-3.1.txt` |
+| SILK SDK (Skype Limited) | `LICENSES/SILK-SDK.txt` |
+
 ## Hook / bridge / protocol
 
 - **yincongcyincong/weixin-macos** — https://github.com/yincongcyincong/weixin-macos
@@ -17,14 +34,39 @@ official WeChat locally through Frida Gadget; no Tencent source code is included
 ## Runtime components bundled or invoked
 
 - **Frida / frida-gadget** — https://frida.re, https://github.com/frida/frida
-  Runtime instrumentation. License: LGPL-2.1 (frida-core / gadget).
-- **frida-go** — https://github.com/frida/frida-go, LGPL-2.1.
-- **gorilla/websocket** — BSD-3-Clause.
-- **zerolog** — MIT.
-- **google/uuid** — BSD-3-Clause.
-- **go-silk** — see upstream.
-- **protobuf-go** — BSD-3-Clause.
-- **lumberjack** — MIT.
+  Runtime instrumentation bundled in `hook/gadget/`. License: wxWindows Library
+  Licence 3.1 (`LICENSES/wxWindows-Library-Licence-3.1.txt`). Source code is
+  available at the upstream repository; this project ships the unmodified
+  upstream gadget binary and links against frida-core via frida-go.
+- **frida-go** — https://github.com/frida/frida-go
+  License: ISC (`LICENSES/ISC.txt`), copyright frida-go contributors.
+- **gorilla/websocket** — BSD-3-Clause, copyright The Gorilla WebSocket Authors.
+- **zerolog** — MIT, copyright Jason Rana.
+- **google/uuid** — BSD-3-Clause, copyright Google Inc.
+- **go-silk (wdvxdr1123/go-silk)** — https://github.com/wdvxdr1123/go-silk
+  Inbound SILK decoding. License: BSD-3-Clause, copyright wdvxdr1123.
+- **SILK SDK / silk-v3-decoder** — https://github.com/kn007/silk-v3-decoder
+  WeChat/QQ-compatible SILK v3 encoder, statically linked into bridge (cgo).
+  The `SKP_Silk_*.c/h` sources carry the Skype Limited 2006–2012 SILK SDK
+  license (`LICENSES/SILK-SDK.txt`). The wrapper source layout and `encode.go`
+  adaptation are MIT (`bridge/silkenc/LICENSE`).
+- **protobuf-go** — BSD-3-Clause, copyright The Go Authors.
+- **lumberjack** — MIT, copyright Nate Finch.
+
+- **sherpa-onnx** — https://github.com/k2-fsa/sherpa-onnx
+  Static library for offline TTS inference. License: Apache-2.0
+  (`LICENSES/Apache-2.0.txt`), copyright the sherpa-onnx authors.
+  Its statically linked dependencies are distributed under their upstream
+  licenses: onnxruntime (MIT, Microsoft), kissfft (BSD-3-Clause),
+  utf8proc (MIT), kaldi-decoder / kaldi-native-fbank / kaldi-fst /
+  sentencepiece (Apache-2.0).
+- **Kokoro-82M (multi-lang v1_1)** — https://huggingface.co/hexgrad/Kokoro-82M
+  TTS model weights, downloaded on demand. License: Apache-2.0 (see model card).
+- **ZipVoice (distill int8 zh-en)** — https://github.com/k2-fsa/ZipVoice
+  Zero-shot voice-cloning TTS model, downloaded on demand. License: Apache-2.0.
+- **Vocos 24 kHz** — https://github.com/charactr-platform/vocos
+  Neural vocoder for ZipVoice. License: MIT (`LICENSES/MIT-Vocos.txt`),
+  copyright Charactr Inc.
 
 ## Apple
 
@@ -32,4 +74,4 @@ official WeChat locally through Frida Gadget; no Tencent source code is included
 - The app is not affiliated with or endorsed by Tencent or Apple.
 
 If you redistribute this project or a binary, comply with GPL-3.0 and keep this
-notice plus the corresponding source available.
+notice plus the corresponding source and license texts available.

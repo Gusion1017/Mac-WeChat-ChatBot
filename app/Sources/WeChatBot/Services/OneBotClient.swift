@@ -19,20 +19,34 @@ enum OneBotConnectionState: String, Sendable, Equatable {
 }
 
 /// One message segment as delivered by the bridge. `type` is one of
-/// `text` / `image` / `record` / `face` / `file` / `video` / `at` / unknown.
+/// `text` / `image` / `record` / `voice` / `face` / `file` / `video` / `at` / unknown.
+///
+/// 入站语音（2026-10-26）：bridge 会把 `[语音]` 文本段替换成无文件的
+/// `{"type":"voice","data":{"duration_ms":5200}}`；`durationMs` 只用于气泡展示
+/// 与提示词里的 `[语音 4s]` 标签，音频需要通过 `POST /fetch_voice` 单独获取。
 struct OneBotSegment: Sendable, Hashable {
     var type: String
     var text: String?
     var url: String?
     var file: String?
     var targetID: String?
+    /// 语音时长（毫秒）；仅 `voice` 段可能携带，缺省表示 bridge/旧版本未提供。
+    var durationMs: Int?
 
-    init(type: String, text: String? = nil, url: String? = nil, file: String? = nil, targetID: String? = nil) {
+    init(
+        type: String,
+        text: String? = nil,
+        url: String? = nil,
+        file: String? = nil,
+        targetID: String? = nil,
+        durationMs: Int? = nil
+    ) {
         self.type = type
         self.text = text
         self.url = url
         self.file = file
         self.targetID = targetID
+        self.durationMs = durationMs
     }
 
     static func text(_ value: String) -> OneBotSegment {
@@ -85,7 +99,7 @@ struct OneBotEvent: Sendable {
                 return segment.text
             case "image":
                 return "[图片]"
-            case "record":
+            case "record", "voice":
                 return "[语音]"
             case "video":
                 return "[视频]"
@@ -106,18 +120,26 @@ struct OneBotEvent: Sendable {
 
     /// First non-text media segment, if any.
     var primaryMediaSegment: OneBotSegment? {
-        segments.first { ["image", "record", "face", "file", "video"].contains($0.type) }
+        segments.first { ["image", "record", "voice", "face", "file", "video"].contains($0.type) }
     }
 
     var primaryMessageKind: MessageKind {
         switch primaryMediaSegment?.type {
         case "image": return .image
-        case "record": return .voice
+        case "record", "voice": return .voice
         case "face": return .emoji
         case "file": return .file
         case "video": return .video
         default: return .text
         }
+    }
+
+    /// 入站语音时长（毫秒）；非语音消息或 bridge 未提供时为 nil。
+    var voiceDurationMs: Int? {
+        guard primaryMessageKind == .voice, let duration = primaryMediaSegment?.durationMs else {
+            return nil
+        }
+        return duration > 0 ? duration : nil
     }
 }
 
@@ -135,6 +157,18 @@ enum OneBotError: LocalizedError {
         case .badResponse(let reason): return "OneBot 返回异常：\(reason)"
         }
     }
+}
+
+/// `POST /fetch_voice` 成功回包。
+///
+/// bridge 契约（`docs/voice.md` §2.2）：
+/// `{"ok":true,"path":"file:///…/voice_x_16k.wav","silk_path":"file:///…x.silk","duration_ms":5200}`；
+/// 也兼容 OneBot 风格的 `{"status":"ok","data":{...}}` 包装。`path`/`silkPath`
+/// 已从 `file://` 转成本地路径（不含 scheme）。
+struct VoiceFetchPayload: Sendable, Equatable {
+    var path: String
+    var silkPath: String?
+    var durationMs: Int?
 }
 
 // MARK: - Client
@@ -676,6 +710,257 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
         return path
     }
 
+    // MARK: 入站语音获取
+
+    /// 请求 bridge 解密/解码一条入站语音，返回 16k WAV 的本地路径。
+    ///
+    /// 只负责 `POST /fetch_voice` 的一次请求与响应解析；队列/去重/重试由
+    /// `VoiceFetcher` 负责。`messageID` 必须是 bridge 事件里的原始 OneBot
+    /// `message_id`（不是 `ChatMessage.id` 的 `ob-<id>`）。
+    /// bridge 侧下载＋解密＋SILK 解码总预算 ≤25s，这里给到 ≥35s。
+    func fetchVoice(messageID: String) async throws -> VoiceFetchPayload {
+        let trimmed = messageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw OneBotError.sendFailed("消息 ID 为空") }
+        let config = activeConfiguration
+        guard let base = config.httpBaseURL else {
+            throw OneBotError.invalidURL("http://\(config.host):\(config.port)")
+        }
+        var request = try Self.fetchVoiceRequest(baseURL: base, token: config.token, messageID: trimmed)
+        request.timeoutInterval = max(config.requestTimeout, 35)
+        let (data, response) = try await httpSession.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw OneBotError.badResponse("非 HTTP 响应")
+        }
+        return try Self.parseVoiceFetchResponse(data: data, statusCode: httpResponse.statusCode)
+    }
+
+    /// Builds the `POST /fetch_voice` request. Pure function so it can be unit-tested.
+    static func fetchVoiceRequest(baseURL: URL, token: String, messageID: String) throws -> URLRequest {
+        guard let url = URL(string: "/fetch_voice", relativeTo: baseURL) else {
+            throw OneBotError.invalidURL(baseURL.absoluteString)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["message_id": messageID], options: [])
+        return request
+    }
+
+    /// Parses the bridge `POST /fetch_voice` response. Pure function so it can be unit-tested.
+    ///
+    /// 兼容两种成功形状（spec §2.2 顶层 `ok` / OneBot 风格 `status`+`data`）与
+    /// 两种失败形状（HTTP 200 + `ok:false`；或非 2xx）。失败文案直接取自 bridge，
+    /// 但不包含 aeskey / CDN key（bridge 已保证）。
+    static func parseVoiceFetchResponse(data: Data, statusCode: Int) throws -> VoiceFetchPayload {
+        let body = String(data: data, encoding: .utf8) ?? ""
+        guard (200..<300).contains(statusCode) else {
+            if statusCode == 404 {
+                throw OneBotError.badResponse("当前 bridge 不支持语音获取（HTTP 404），请更新 bridge")
+            }
+            throw OneBotError.badResponse("HTTP \(statusCode) \(body.prefix(300))")
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw OneBotError.badResponse("语音获取响应无法解析")
+        }
+        let payload = (object["data"] as? [String: Any]) ?? object
+        let explicitOK = bool(object["ok"]) ?? bool(payload["ok"])
+        let statusOK = (object["status"] as? String) == "ok"
+        guard explicitOK ?? statusOK else {
+            let reason = (object["error"] as? String)
+                ?? (payload["error"] as? String)
+                ?? (object["message"] as? String)
+                ?? body
+            throw OneBotError.badResponse(reason.isEmpty ? "语音获取失败" : reason)
+        }
+        guard let file = (payload["path"] as? String) ?? (payload["file"] as? String),
+              !file.isEmpty else {
+            throw OneBotError.badResponse("语音获取响应缺少音频路径")
+        }
+        let silk = ((payload["silk_path"] as? String) ?? (payload["silkPath"] as? String))
+            .map(localFilePath(from:))
+        let duration = integer(payload["duration_ms"]) ?? integer(payload["durationMs"])
+        return VoiceFetchPayload(
+            path: localFilePath(from: file),
+            silkPath: (silk?.isEmpty == false) ? silk : nil,
+            durationMs: (duration ?? 0) > 0 ? duration : nil
+        )
+    }
+
+    // MARK: 出站语音发送
+
+    /// `POST /send_voice` 成功回包（实际时长由 bridge 按 SILK 帧计算）。
+    struct VoiceSendResult: Sendable, Equatable {
+        var durationMs: Int
+    }
+
+    /// 把 16k WAV 交给 bridge 编码成 Tencent SILK 并发送语音消息。
+    ///
+    /// - Parameters:
+    ///   - wavURL: `VoiceSynthesisService` 产出的 16k 单声道 WAV（bridge 兼容 WAV base64）。
+    ///   - durationHintMs: 时长提示；实际发送时长以 bridge 返回为准。
+    /// - Throws: `OneBotError.sendFailed("voice_send_unsupported")` 表示 Hook 未支持，
+    ///   调用方应降级为文字（不重试语音，避免重复发送）。
+    func sendVoice(
+        conversationID: String,
+        isGroup: Bool,
+        wavURL: URL,
+        durationHintMs: Int
+    ) async throws -> VoiceSendResult {
+        guard !conversationID.isEmpty else { throw OneBotError.sendFailed("会话 ID 为空") }
+        let wavData = try Data(contentsOf: wavURL)
+        guard !wavData.isEmpty else { throw OneBotError.sendFailed("语音文件为空") }
+        let config = activeConfiguration
+        guard let base = config.httpBaseURL else {
+            throw OneBotError.invalidURL("http://\(config.host):\(config.port)")
+        }
+        var request = try Self.sendVoiceRequest(
+            baseURL: base,
+            token: config.token,
+            conversationID: conversationID,
+            isGroup: isGroup,
+            wavBase64: wavData.base64EncodedString(),
+            durationHintMs: durationHintMs
+        )
+        request.timeoutInterval = max(config.requestTimeout, 40)
+        let (data, response) = try await httpSession.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw OneBotError.badResponse("非 HTTP 响应")
+        }
+        return try Self.parseSendVoiceResponse(data: data, statusCode: httpResponse.statusCode)
+    }
+
+    /// Builds `POST /send_voice`. Pure function so it can be unit-tested.
+    static func sendVoiceRequest(
+        baseURL: URL,
+        token: String,
+        conversationID: String,
+        isGroup: Bool,
+        wavBase64: String,
+        durationHintMs: Int
+    ) throws -> URLRequest {
+        guard let url = URL(string: "/send_voice", relativeTo: baseURL) else {
+            throw OneBotError.invalidURL(baseURL.absoluteString)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        var payload: [String: Any] = [
+            "pcm16k": wavBase64,
+            "duration_ms": max(0, durationHintMs)
+        ]
+        payload[isGroup ? "group_id" : "user_id"] = conversationID
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
+        return request
+    }
+
+    /// Parses `POST /send_voice` response. Pure function so it can be unit-tested.
+    static func parseSendVoiceResponse(data: Data, statusCode: Int) throws -> VoiceSendResult {
+        let body = String(data: data, encoding: .utf8) ?? ""
+        guard (200..<300).contains(statusCode) else {
+            if statusCode == 404 {
+                throw OneBotError.badResponse("当前 bridge 不支持语音发送（HTTP 404），请更新 bridge")
+            }
+            throw OneBotError.badResponse("HTTP \(statusCode) \(body.prefix(300))")
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw OneBotError.badResponse("语音发送响应无法解析")
+        }
+        let payload = (object["data"] as? [String: Any]) ?? object
+        let explicitOK = bool(object["ok"]) ?? bool(payload["ok"])
+        let statusOK = (object["status"] as? String) == "ok"
+        guard explicitOK ?? statusOK else {
+            let reason = (object["error"] as? String)
+                ?? (payload["error"] as? String)
+                ?? (object["message"] as? String)
+                ?? body
+            throw OneBotError.sendFailed(reason.isEmpty ? "语音发送失败" : reason)
+        }
+        let duration = integer(payload["duration_ms"]) ?? integer(object["duration_ms"]) ?? 0
+        return VoiceSendResult(durationMs: max(0, duration))
+    }
+
+    // MARK: 语音发送运行时状态
+
+    /// 请求 bridge `/voice_status`：登录稳定倒计时、文本/语音句柄、CdnManager。
+    func fetchVoiceStatus() async throws -> VoiceRuntimeStatus {
+        let config = activeConfiguration
+        guard let base = config.httpBaseURL else {
+            throw OneBotError.invalidURL("http://\(config.host):\(config.port)")
+        }
+        var request = try Self.voiceStatusRequest(baseURL: base, token: config.token)
+        request.timeoutInterval = min(max(config.requestTimeout, 5), 10)
+        let (data, response) = try await httpSession.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw OneBotError.badResponse("非 HTTP 响应")
+        }
+        return try Self.parseVoiceStatus(data: data, statusCode: httpResponse.statusCode)
+    }
+
+    /// Builds `GET /voice_status`. Pure function so it can be unit-tested.
+    static func voiceStatusRequest(baseURL: URL, token: String) throws -> URLRequest {
+        guard let url = URL(string: "/voice_status", relativeTo: baseURL) else {
+            throw OneBotError.invalidURL(baseURL.absoluteString)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
+    /// Parses `/voice_status`. Pure function so it can be unit-tested.
+    ///
+    /// `ok:false` 不抛错：App 需要把「bridge 未连接/版本不支持」显示为状态，
+    /// 而不是让语音设置页报错。网络层失败才抛 `OneBotError`。
+    static func parseVoiceStatus(data: Data, statusCode: Int) throws -> VoiceRuntimeStatus {
+        let body = String(data: data, encoding: .utf8) ?? ""
+        guard (200..<300).contains(statusCode) else {
+            if statusCode == 404 {
+                return VoiceRuntimeStatus(
+                    available: false, configured: false, voiceSend: false,
+                    textSeed: false, voiceSeed: false, cdnReady: false,
+                    loginSettled: false, warmupRemainingMs: 0, voiceReady: false,
+                    error: "当前 bridge 不支持语音状态（HTTP 404）", receivedAt: Date()
+                )
+            }
+            throw OneBotError.badResponse("HTTP \(statusCode) \(body.prefix(200))")
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw OneBotError.badResponse("语音状态响应无法解析")
+        }
+        let ok = bool(object["ok"]) ?? false
+        let configured = bool(object["configured"]) ?? false
+        guard ok, let hook = object["hook"] as? [String: Any] else {
+            let reason = (object["error"] as? String) ?? "语音状态不可用"
+            return VoiceRuntimeStatus(
+                available: false, configured: configured, voiceSend: false,
+                textSeed: false, voiceSeed: false, cdnReady: false,
+                loginSettled: false, warmupRemainingMs: 0, voiceReady: false,
+                error: reason, receivedAt: Date()
+            )
+        }
+        return VoiceRuntimeStatus(
+            available: true,
+            configured: configured,
+            voiceSend: bool(hook["voiceSend"]) ?? false,
+            textSeed: bool(hook["textSeed"]) ?? false,
+            voiceSeed: bool(hook["voiceSeed"]) ?? false,
+            cdnReady: bool(hook["cdnReady"]) ?? false,
+            loginSettled: bool(hook["loginSettled"]) ?? false,
+            warmupRemainingMs: integer(hook["warmupRemainingMs"]) ?? 0,
+            voiceReady: bool(hook["voiceReady"]) ?? false,
+            error: nil,
+            receivedAt: Date()
+        )
+    }
+
     /// Encodes segments into the OneBot message array. Base64 files pass through.
     static func encodeSegments(_ segments: [OneBotSegment]) -> [[String: Any]] {
         segments.map { segment in
@@ -806,6 +1091,27 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
             guard let self, self.socket === task else { return }
             self.handleDisconnectLocked(reason: error.localizedDescription)
         }
+    }
+
+    // MARK: Response value helpers
+
+    /// JSON 布尔（顶层 `ok` / `data.ok`），只接受真正的布尔或 0/1。
+    private static func bool(_ value: Any?) -> Bool? {
+        if let number = value as? NSNumber {
+            switch number.intValue {
+            case 0: return false
+            case 1: return true
+            default: return nil
+            }
+        }
+        return value as? Bool
+    }
+
+    /// JSON 整数（bridge 可能用数字或字符串下发毫秒时长）。
+    private static func integer(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber { return number.intValue }
+        if let string = value as? String { return Int(string) }
+        return nil
     }
 }
 
@@ -957,7 +1263,8 @@ enum OneBotEventParser {
                     text: string(data["text"]),
                     url: string(data["url"]),
                     file: string(data["file"]),
-                    targetID: string(data["qq"]) ?? string(data["user_id"]) ?? string(data["target_id"])
+                    targetID: string(data["qq"]) ?? string(data["user_id"]) ?? string(data["target_id"]),
+                    durationMs: integer(data["duration_ms"]) ?? integer(data["duration"])
                 )
             }
         }
@@ -978,6 +1285,12 @@ enum OneBotEventParser {
         default:
             return nil
         }
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber { return number.intValue }
+        if let string = value as? String { return Int(string) }
+        return nil
     }
 
     private static func bool(_ value: Any?) -> Bool? {

@@ -334,7 +334,11 @@ struct ConversationsView: View {
                             }
                             MessageBubble(
                                 message: message,
-                                showsSender: conversation.kind == .group
+                                showsSender: conversation.kind == .group,
+                                voiceTranscriptVisible: store.settings.bot.voiceSettings.showTranscriptInBubble,
+                                onRetryVoice: { failed in
+                                    Task { await store.retryVoiceTranscription(messageID: failed.id) }
+                                }
                             )
                             .equatable()
                         }

@@ -334,6 +334,12 @@ Content-Type: application/json
 
 ---
 
+
+> **语音接口（2026-10-26）**：`POST /fetch_voice`、`POST /send_voice` 与 `GET /voice_status` 的完整契约、
+> 状态与 4.2.0.5 限制见 [`voice.md`](voice.md)。入站下载默认 `fileType=15` 已真机验证；
+> 出站仍存在“气泡可见但音频无声”的上传关联问题，默认 `r3VoiceSend=false`，App 自动降级文字；
+> `/voice_status` 提供登录稳定倒计时与句柄状态。
+
 ## 4. 验证记录
 
 以下为 2026-10-19 在 macOS 26.7.1 / arm64 / Xcode 27 上的实测结果。

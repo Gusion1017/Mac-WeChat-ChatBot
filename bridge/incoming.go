@@ -42,6 +42,10 @@ func HandleIncomingMessage(payload map[string]interface{}) {
 	// 入站图片：在推送事件前登记下载元数据，并把 [图片] 文本占位替换成
 	// image 段（事件里不新增 aeskey / CDN file key 字段）。
 	registerIncomingImage(payload)
+	// 入站语音（2026-10-26）：解析 <voicemsg>、按 message_id 登记 pending job，
+	// 并把 [语音] 文本占位替换成无文件的 voice 段（duration_ms 可空）；
+	// 下载由 App 按需调用 POST /fetch_voice，不阻塞事件推送。
+	registerIncomingVoice(payload)
 
 	data, err := json.Marshal(payload)
 	if err != nil {

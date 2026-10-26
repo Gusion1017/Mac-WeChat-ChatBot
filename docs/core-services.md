@@ -17,6 +17,9 @@
 | `Services/ActivationPolicyController.swift` | Dock 图标与 `NSApplication.ActivationPolicy` 同步（用户设置优先，台前调度不覆盖；bundle 以 `LSUIElement` 启动，仅在设置页用于提示文案） |
 | `Services/OneBotClient.swift` | WS 收事件、HTTP 发送/图片获取、媒体落地、事件解析、去重、重连 |
 | `Services/ImageFetcher.swift` | 入站图片获取串行队列 + `ImageFetchPolicy`（设置开关 / 去重 / 取消） |
+| `Services/VoiceTranscriptionService.swift` / `VoiceFetcher.swift` | 入站语音转写（SpeechAnalyzer）与 `/fetch_voice` 串行队列 |
+| `Services/VoiceSynthesisService.swift` / `VoiceModelStore.swift` / `VoiceCloneStore.swift` | 本地 TTS（sherpa-onnx Kokoro/ZipVoice）、模型下载、克隆音色 |
+| `Services/VoiceReplyDecision.swift` | 语音回复决策（开关/概率/对等/短回复/模型就绪） |
 | `Services/VisionEngine.swift` | 识图支持：候选图片筛选、ImageIO 缩放/JPEG data URL、多模态请求消息、描述清洗 |
 | `Services/AIClient.swift` | OpenAI 兼容 `/chat/completions`，SSE 流式 / 非流式 / 超时 / 错误映射 |
 | `Services/RuleEngine.swift` | 白黑名单、私聊/群触发、唤醒窗口、冷却、频率、工作时段 |

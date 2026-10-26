@@ -89,6 +89,14 @@ final class RuntimeCoordinator {
     /// 已成功入队的图片获取 ID（`ChatMessage.id`）。识图等待本地文件时据此判断
     /// 「还在下载」还是「已失败/从未请求」，不需要额外轮询 ImageFetcher 内部状态。
     private var pendingImageFetchIDs: Set<String> = []
+    /// 已入队/在途的语音获取与转写 ID（`ChatMessage.id`）。自动回复等待转写完成
+    /// （≤15s）时据此判断「还在处理」还是「已失败」，不轮询 VoiceFetcher 内部状态。
+    private var pendingVoiceFetchIDs: Set<String> = []
+    private var pendingVoiceTranscriptionIDs: Set<String> = []
+    /// 本次运行是否已尝试过转写（避免同一消息反复调用识别；用户手动重试例外）。
+    private var voiceTranscriptionAttempted: Set<String> = []
+    /// 上一次声明的「语音转写总开关」，用于设置关闭时取消未完成的获取请求。
+    private var lastVoiceTranscriptionEnabled: Bool?
     private var memoryMaintenanceInFlight: Set<String> = []
     private var lastSchedulerTasks: [ScheduledTask] = []
     /// 最近一次可用的通讯录目录（内存副本）；数据库缓存由 `MemoryStore` 负责。
@@ -330,6 +338,11 @@ final class RuntimeCoordinator {
                     value: String(Self.dataRepairVersion)
                 )
             }
+        }
+        // 语音：上次运行崩溃/退出时仍 pending 的转写不会再有人处理，统一标失败，
+        // 气泡显示「重试」而不是永远「转写中」。
+        if let interrupted = try? await memory.failInterruptedVoiceTranscripts(), interrupted > 0 {
+            log(.debug, "Voice", "已将 \(interrupted) 条中断的语音转写标记为失败（可手动重试）")
         }
 
         do {
@@ -618,6 +631,26 @@ final class RuntimeCoordinator {
     /// 4.1.15.55 / 4.2.0.5 使用 R3 原生文本发送（由 App 设置开启）；
     /// 4.1.12 及更早版本保持 legacy 发送路径，不做任何覆盖。
     /// 首次使用 R3 前需要在本机微信手动发一条消息以捕获发送句柄。
+    /// 刷新 bridge `/voice_status`（登录稳定倒计时、文本/语音句柄、CdnManager）。
+    /// 失败时保留可展示的错误状态，不抛给 UI。
+    func refreshVoiceStatus() async {
+        guard let client = oneBotClient else {
+            var unavailable = VoiceRuntimeStatus.unavailable
+            unavailable.error = "bridge 未运行"
+            unavailable.receivedAt = Date()
+            store.voiceRuntimeStatus = unavailable
+            return
+        }
+        do {
+            store.voiceRuntimeStatus = try await client.fetchVoiceStatus()
+        } catch {
+            var unavailable = VoiceRuntimeStatus.unavailable
+            unavailable.error = error.localizedDescription
+            unavailable.receivedAt = Date()
+            store.voiceRuntimeStatus = unavailable
+        }
+    }
+
     private func nativeSendConfigOverrides() async -> [String: String] {
         let path = store.settings.hook.wechatPath
         let installation = await Task.detached(priority: .userInitiated) {
@@ -635,14 +668,17 @@ final class RuntimeCoordinator {
                 "req2bufSendMode": "r3",
                 "r3ClosureCapture": "true",
                 "r3Slot13Capture": "true",
-                "r3QueueUntilSeed": "true"
+                "r3QueueUntilSeed": "true",
+                // 2026-10-26 真机：官方 24k SILK 编码 + 上传/R3 发送已能正常播放。
+                "r3VoiceSend": "true"
             ]
             return overrides
         } else {
             log(.warning, "Hook", "微信 4.1.15.55 / 4.2.0.5：R3 原生发送已关闭，主动发送不可用（接收不受影响）")
             return [
                 "enableSend": "false",
-                "req2bufSendMode": "off"
+                "req2bufSendMode": "off",
+                "r3VoiceSend": "false"
             ]
         }
     }
@@ -728,6 +764,7 @@ final class RuntimeCoordinator {
         }
         oneBotClient = client
         startedOneBotConfiguration = configuration
+        await refreshVoiceStatus()
         store.imageFetcher.configure(
             fetch: { [weak self] bridgeMessageID in
                 guard let client = self?.oneBotClient else { throw OneBotError.notRunning }
@@ -742,6 +779,25 @@ final class RuntimeCoordinator {
                 self?.log(.debug, "Media", "图片获取失败（\(request.chatMessageID)）：\(reason)")
             }
         )
+        store.voiceFetcher.configure(
+            fetch: { [weak self] bridgeMessageID in
+                guard let client = self?.oneBotClient else { throw OneBotError.notRunning }
+                let payload = try await client.fetchVoice(messageID: bridgeMessageID)
+                return VoiceFetchResult(
+                    path: payload.path,
+                    silkPath: payload.silkPath,
+                    durationMs: payload.durationMs
+                )
+            },
+            onFetched: { [weak self] request, result in
+                await self?.applyFetchedVoice(request: request, result: result)
+            },
+            onFailed: { [weak self] request, reason in
+                // bridge 侧失败通常是音频未下载/SILK 解码失败；只记 debug，气泡转「重试」。
+                self?.handleVoiceFetchFailure(request: request, reason: reason)
+            }
+        )
+        lastVoiceTranscriptionEnabled = store.settings.bot.voiceTranscriptionEnabled
         client.start()
 
         ruleEngine.resetThrottles()
@@ -776,6 +832,11 @@ final class RuntimeCoordinator {
         store.imageFetcher.cancelAll()
         pendingImageFetchIDs.removeAll()
         visionAttempted.removeAll()
+        store.voiceFetcher.cancelAll()
+        pendingVoiceFetchIDs.removeAll()
+        pendingVoiceTranscriptionIDs.removeAll()
+        voiceTranscriptionAttempted.removeAll()
+        lastVoiceTranscriptionEnabled = nil
         await scheduler.stop()
         if store.settings.hook.autoStartBridge {
             hookManager.stopBridge()
@@ -906,7 +967,14 @@ final class RuntimeCoordinator {
         }
 
         let conversation = upsertConversation(for: event)
-        let chatMessage = makeChatMessage(from: event)
+        // 历史回放/补同步的语音不自动下载转写：直接标失败（气泡可手动重试），
+        // 避免打开旧会话时对旧语音批量发请求。
+        let isStaleReplay = receivedAt.timeIntervalSince(event.timestamp) > Self.staleReplyWindow
+        let chatMessage = makeChatMessage(
+            from: event,
+            conversation: conversation,
+            isStaleReplay: isStaleReplay
+        )
 
         var list = store.messages[conversationID] ?? []
         if list.contains(where: { $0.id == chatMessage.id }) { return }
@@ -933,6 +1001,13 @@ final class RuntimeCoordinator {
             conversation: conversation,
             receivedAt: receivedAt
         )
+        // 入站语音：先向 bridge 取 16k WAV，再走本地转写；开关按会话生效值。
+        scheduleVoiceFetchIfNeeded(
+            event: event,
+            message: chatMessage,
+            conversation: conversation,
+            receivedAt: receivedAt
+        )
 
         if !event.isSelf {
             store.stats.receivedToday += 1
@@ -954,7 +1029,17 @@ final class RuntimeCoordinator {
             scheduleMemoryMaintenance(conversationID: conversationID)
             return
         }
-        await evaluateAndReply(conversation: conversation, message: chatMessage, receivedAt: receivedAt)
+        // 语音消息：自动回复必须等转写完成（≤15s）；超时按「转写失败」继续回复，
+        // 不丢消息。用最新消息副本做规则判定，关键词触发才能看到转写文本。
+        var replyMessage = chatMessage
+        if chatMessage.kind == .voice, store.settings.bot.voiceTranscriptionEnabled {
+            replyMessage = await waitForVoiceReplyMessage(
+                conversationID: conversationID,
+                messageID: chatMessage.id,
+                fallback: chatMessage
+            )
+        }
+        await evaluateAndReply(conversation: conversation, message: replyMessage, receivedAt: receivedAt)
         scheduleMemoryMaintenance(conversationID: conversationID)
     }
 
@@ -1047,15 +1132,20 @@ final class RuntimeCoordinator {
         return rest
     }
 
-    private func makeChatMessage(from event: OneBotEvent) -> ChatMessage {
+    private func makeChatMessage(
+        from event: OneBotEvent,
+        conversation: Conversation,
+        isStaleReplay: Bool = false
+    ) -> ChatMessage {
         let id = event.messageID.isEmpty ? "ob-\(UUID().uuidString)" : "ob-\(event.messageID)"
-        return ChatMessage(
+        let kind = event.primaryMessageKind
+        var message = ChatMessage(
             id: id,
             conversationID: event.conversationID,
             senderID: event.isSelf ? (event.selfID.isEmpty ? "self" : event.selfID) : event.userID,
             senderName: event.isSelf ? "我" : event.senderName,
             direction: event.isSelf ? .outgoing : .incoming,
-            kind: event.primaryMessageKind,
+            kind: kind,
             text: event.plainText,
             mediaPath: event.mediaPath,
             mediaURL: event.primaryMediaSegment?.url,
@@ -1064,6 +1154,20 @@ final class RuntimeCoordinator {
             replyToID: nil,
             rawJSON: event.rawJSON
         )
+        if kind == .voice {
+            // 语音时长来自 bridge 段（可能为空）；转写状态先置 pending，
+            // 关闭转写时直接 disabled，气泡不显示「转写中」。
+            message.voiceDurationMs = event.voiceDurationMs
+            let enabled = store.settings.bot.voiceTranscriptionEnabled
+            // 自己发出的语音不转写（不触发自动回复，也没有上下文价值）；
+            // 历史回放的语音不自动下载，标失败让用户可在气泡里手动重试。
+            if !event.isSelf, enabled, !isStaleReplay {
+                message.voiceTranscriptState = .pending
+            } else {
+                message.voiceTranscriptState = .disabled
+            }
+        }
+        return message
     }
 
     // MARK: 入站图片获取
@@ -1130,6 +1234,391 @@ final class RuntimeCoordinator {
         let title = store.conversations.first(where: { $0.id == request.conversationID })?.displayTitle
             ?? request.conversationID
         log(.info, "Media", "已获取图片：\(title)（\(URL(fileURLWithPath: trimmedPath).lastPathComponent)）")
+    }
+
+    // MARK: 入站语音（获取 + 本地转写，2026-10-26）
+
+    /// 自动回复等待语音转写完成的预算（spec §2.3：≤15s，超时按转写失败继续）。
+    private static let voiceTranscriptionWait: TimeInterval = 15
+
+    /// 消息入库后决定是否向 bridge 请求语音音频。门槛见 `VoiceFetchPolicy`：
+    /// 该会话生效的转写开关、非自消息、kind=voice、无本地音频、message_id 非空；
+    /// 另加与自动回复相同的历史回放门禁（打开旧会话重放历史不触发批量下载）。
+    private func scheduleVoiceFetchIfNeeded(
+        event: OneBotEvent,
+        message: ChatMessage,
+        conversation: Conversation,
+        receivedAt: Date
+    ) {
+        guard receivedAt.timeIntervalSince(event.timestamp) <= Self.staleReplyWindow else { return }
+        let enabled = store.settings.bot.voiceTranscriptionEnabled
+        guard VoiceFetchPolicy.shouldFetch(
+            kind: message.kind,
+            enabled: enabled,
+            isSelf: event.isSelf,
+            messageID: event.messageID,
+            voiceMediaPath: message.voiceMediaPath,
+            mediaPath: message.mediaPath
+        ) else { return }
+
+        let request = VoiceFetcher.Request(
+            bridgeMessageID: event.messageID,
+            chatMessageID: message.id,
+            conversationID: event.conversationID
+        )
+        guard store.voiceFetcher.enqueue(request) else { return }
+        pendingVoiceFetchIDs.insert(message.id)
+        pendingVoiceTranscriptionIDs.insert(message.id)
+        // 只记 message_id 尾号，不打印 XML / aeskey / CDN key。
+        let suffix = event.messageID.count > 6 ? String(event.messageID.suffix(6)) : event.messageID
+        log(.debug, "Media", "已排队获取语音（\(event.conversationID)，message_id 尾号 \(suffix)）")
+    }
+
+    /// 语音获取成功：写入 16k WAV 路径与时长并落库，随后在独立任务里转写，
+    /// 不阻塞 `VoiceFetcher` 队列（下一条语音可以继续下载）。
+    private func applyFetchedVoice(request: VoiceFetcher.Request, result: VoiceFetchResult) async {
+        pendingVoiceFetchIDs.remove(request.chatMessageID)
+        let path = result.path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else {
+            pendingVoiceTranscriptionIDs.remove(request.chatMessageID)
+            log(.debug, "Media", "语音获取返回空路径（\(request.chatMessageID)）")
+            _ = await updateVoiceMessage(
+                conversationID: request.conversationID,
+                messageID: request.chatMessageID
+            ) { $0.voiceTranscriptState = .failed }
+            return
+        }
+
+        let updated = await updateVoiceMessage(
+            conversationID: request.conversationID,
+            messageID: request.chatMessageID
+        ) { message in
+            message.voiceMediaPath = path
+            message.mediaPath = path
+            if let duration = result.durationMs, duration > 0 {
+                message.voiceDurationMs = duration
+            }
+            if message.voiceTranscriptState == .done { message.voiceTranscriptState = .pending }
+        }
+        guard updated != nil else {
+            log(.debug, "Media", "语音已获取，但消息已不存在，跳过转写（\(request.chatMessageID)）")
+            pendingVoiceTranscriptionIDs.remove(request.chatMessageID)
+            return
+        }
+        let title = store.conversations.first(where: { $0.id == request.conversationID })?.displayTitle
+            ?? request.conversationID
+        let milliseconds = result.durationMs ?? 0
+        log(.info, "Media", "已获取语音：\(title)（\(URL(fileURLWithPath: path).lastPathComponent)，\(milliseconds)ms）")
+        Task { [weak self] in
+            await self?.transcribeVoiceMessage(
+                conversationID: request.conversationID,
+                messageID: request.chatMessageID
+            )
+        }
+    }
+
+    /// 语音获取失败（含队列内重试后仍失败）：气泡显示「转写失败 · 重试」。
+    /// 只记 debug 日志，不影响自动回复（等待方会按失败继续）。
+    private func handleVoiceFetchFailure(request: VoiceFetcher.Request, reason: String) {
+        pendingVoiceFetchIDs.remove(request.chatMessageID)
+        pendingVoiceTranscriptionIDs.remove(request.chatMessageID)
+        log(.debug, "Media", "语音获取失败（\(request.chatMessageID)）：\(reason)")
+        Task { [weak self] in
+            _ = await self?.updateVoiceMessage(
+                conversationID: request.conversationID,
+                messageID: request.chatMessageID
+            ) { $0.voiceTranscriptState = .failed }
+        }
+    }
+
+    /// 本地转写一条已落盘的语音。
+    ///
+    /// - `force == false` 时同一消息在本次运行内最多尝试一次（避免重复付费/重复识别）；
+    /// - 失败/静音/资源未安装都写入状态并落库，气泡可重试；
+    /// - 日志只写字数、置信度、时长，**不打印转写原文**。
+    private func transcribeVoiceMessage(
+        conversationID: String,
+        messageID: String,
+        force: Bool = false
+    ) async {
+        guard let message = await voiceMessage(conversationID: conversationID, messageID: messageID) else {
+            pendingVoiceTranscriptionIDs.remove(messageID)
+            return
+        }
+        guard message.kind == .voice else {
+            pendingVoiceTranscriptionIDs.remove(messageID)
+            return
+        }
+        if !force, voiceTranscriptionAttempted.contains(messageID) {
+            pendingVoiceTranscriptionIDs.remove(messageID)
+            return
+        }
+        let conversation = store.conversations.first(where: { $0.id == conversationID })
+        let enabled = store.settings.bot.voiceTranscriptionEnabled
+        guard enabled else {
+            pendingVoiceTranscriptionIDs.remove(messageID)
+            _ = await updateVoiceMessage(conversationID: conversationID, messageID: messageID) {
+                $0.voiceTranscriptState = .disabled
+            }
+            return
+        }
+        guard let path = message.voiceMediaPath ?? message.mediaPath, !path.isEmpty else {
+            pendingVoiceTranscriptionIDs.remove(messageID)
+            _ = await updateVoiceMessage(conversationID: conversationID, messageID: messageID) {
+                $0.voiceTranscriptState = .failed
+            }
+            return
+        }
+
+        voiceTranscriptionAttempted.insert(messageID)
+        pendingVoiceTranscriptionIDs.insert(messageID)
+        if message.voiceTranscriptState != .pending {
+            _ = await updateVoiceMessage(conversationID: conversationID, messageID: messageID) {
+                $0.voiceTranscriptState = .pending
+            }
+        }
+        do {
+            let transcription = try await store.voiceTranscription.transcribe(
+                fileURL: URL(fileURLWithPath: path)
+            )
+            await applyVoiceTranscription(
+                conversationID: conversationID,
+                messageID: messageID,
+                transcription: transcription
+            )
+        } catch {
+            let errorText = (error as? VoiceTranscriptionError)?.errorDescription
+                ?? error.localizedDescription
+            _ = await updateVoiceMessage(conversationID: conversationID, messageID: messageID) {
+                $0.voiceTranscriptState = .failed
+            }
+            let title = conversation?.displayTitle ?? conversationID
+            if let voiceError = error as? VoiceTranscriptionError, voiceError.isAssetUnavailable {
+                log(.warning, "Voice", "语音转写不可用（\(title)）：\(errorText)；"
+                    + "可在「机器人 → 语音」或「设置 → 语音」直接下载中文语音资源")
+            } else {
+                log(.warning, "Voice", "语音转写失败（\(title)）：\(errorText)")
+            }
+        }
+        pendingVoiceTranscriptionIDs.remove(messageID)
+    }
+
+    /// 把转写结果写回消息：文本、置信度、状态、时长；成功时把转写写入 `text`
+    /// （记忆总结/搜索使用 `text`；长期总结是否使用由 `saveTranscriptToMemory` 控制）。
+    private func applyVoiceTranscription(
+        conversationID: String,
+        messageID: String,
+        transcription: VoiceTranscription
+    ) async {
+        let trimmed = transcription.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let updated = await updateVoiceMessage(conversationID: conversationID, messageID: messageID) { message in
+            message.voiceTranscript = trimmed
+            message.voiceTranscriptConfidence = transcription.maxConfidence
+            message.voiceTranscriptState = .done
+            if transcription.duration > 0 {
+                message.voiceDurationMs = Int((transcription.duration * 1000).rounded())
+            }
+            // 转写写入 `text` 才会进入消息搜索与长期记忆总结；关闭该设置时只保留
+            // 独立字段，气泡/AI 即时上下文仍可用，但不沉淀进记忆库。
+            if store.settings.bot.voiceSettings.saveTranscriptToMemory {
+                message.text = trimmed
+            }
+        }
+        guard updated != nil else { return }
+        let title = store.conversations.first(where: { $0.id == conversationID })?.displayTitle
+            ?? conversationID
+        log(.info, "Voice", "已转写语音：\(title)（\(trimmed.count) 字，"
+            + "置信度 \(String(format: "%.2f", transcription.maxConfidence))，"
+            + "\(String(format: "%.1f", transcription.duration))s）")
+    }
+
+    /// 等待一条语音的转写结果，最多 `voiceTranscriptionWait` 秒。
+    ///
+    /// 成功/失败/关闭都会立即返回最新消息；超时把状态标记为 failed 后返回
+    /// （自动回复继续，上下文用 `[语音，转写失败]`，不丢消息）。
+    private func waitForVoiceReplyMessage(
+        conversationID: String,
+        messageID: String,
+        fallback: ChatMessage
+    ) async -> ChatMessage {
+        let deadline = Date().addingTimeInterval(Self.voiceTranscriptionWait)
+        while !Task.isCancelled {
+            if let message = store.messages[conversationID]?.first(where: { $0.id == messageID }) {
+                switch message.voiceTranscriptState {
+                case .done, .failed, .disabled, .none:
+                    return message
+                case .pending:
+                    break
+                }
+            } else if !pendingVoiceFetchIDs.contains(messageID),
+                      !pendingVoiceTranscriptionIDs.contains(messageID) {
+                return fallback
+            }
+            guard Date() < deadline else {
+                pendingVoiceFetchIDs.remove(messageID)
+                pendingVoiceTranscriptionIDs.remove(messageID)
+                let timedOut = await updateVoiceMessage(conversationID: conversationID, messageID: messageID) {
+                    $0.voiceTranscriptState = .failed
+                }
+                let title = store.conversations.first(where: { $0.id == conversationID })?.displayTitle
+                    ?? conversationID
+                log(.warning, "Voice", "语音转写在 \(Int(Self.voiceTranscriptionWait))s 内未完成，"
+                    + "按转写失败继续回复（\(title)）")
+                return timedOut ?? fallback
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return fallback
+    }
+
+    /// 引用语音时附加的转写说明（与引用图片 `prepareQuotedImageNote` 同构）。
+    ///
+    /// 微信引用只带 `svrid`（与 `ChatMessage.id` 的 `ob-<id>` 精确对应）和摘要
+    /// `[语音]`。按 svrid 找回原语音：已有转写直接复用；没有转写但有本地音频时
+    /// 现场转写一次（用户明确引用了它，不受 15s 自动回复预算限制）；仍拿不到就
+    /// 明确告诉模型「暂不可用」，避免编造内容。
+    private func prepareQuotedVoiceNote(conversation: Conversation, incoming: ChatMessage) async -> String? {
+        guard let quote = WeChatAppmsg.parse(eventJSON: incoming.rawJSON)?.quote,
+              quote.messageType == 34 || quote.snippet.trimmingCharacters(in: .whitespacesAndNewlines) == "[语音]"
+        else { return nil }
+
+        var referenced: ChatMessage?
+        if let voiceID = quote.imageMessageID {
+            referenced = store.messages[conversation.id]?.first(where: { $0.id == voiceID })
+            if referenced == nil {
+                referenced = try? await memory.message(id: voiceID)
+            }
+        }
+
+        var transcript = referenced.flatMap(ChatEngine.normalizedVoiceTranscript)
+        if transcript == nil,
+           let referenced,
+           let path = referenced.voiceMediaPath ?? referenced.mediaPath,
+           !path.isEmpty,
+           FileManager.default.fileExists(atPath: path) {
+            await transcribeVoiceMessage(
+                conversationID: conversation.id,
+                messageID: referenced.id,
+                force: true
+            )
+            var refreshed = store.messages[conversation.id]?.first(where: { $0.id == referenced.id })
+            if refreshed == nil {
+                refreshed = try? await memory.message(id: referenced.id)
+            }
+            transcript = refreshed.flatMap(ChatEngine.normalizedVoiceTranscript)
+        }
+
+        let enabled = store.settings.bot.voiceTranscriptionEnabled
+        guard enabled || transcript != nil else { return nil }
+        return VoiceQuoteText.quotedVoiceNote(transcript: transcript)
+    }
+
+    /// 内存或数据库里的最新消息副本。
+    private func voiceMessage(conversationID: String, messageID: String) async -> ChatMessage? {
+        if let message = store.messages[conversationID]?.first(where: { $0.id == messageID }) {
+            return message
+        }
+        return try? await memory.message(id: messageID)
+    }
+
+    /// 按消息 ID 在全部已加载会话里查找（「重试」按钮只带 messageID，不带会话）。
+    /// 找不到再查数据库。
+    private func voiceMessageAnywhere(messageID: String) async -> ChatMessage? {
+        for list in store.messages.values {
+            if let message = list.first(where: { $0.id == messageID }) { return message }
+        }
+        return try? await memory.message(id: messageID)
+    }
+
+    /// 以事务安全的方式更新一条消息的语音字段（内存命中优先，否则按 ID 从库里读），
+    /// 并立即落库；消息已被裁剪/删除时返回 nil。
+    @discardableResult
+    private func updateVoiceMessage(
+        conversationID: String,
+        messageID: String,
+        mutate: (inout ChatMessage) -> Void
+    ) async -> ChatMessage? {
+        var updated: ChatMessage?
+        if var list = store.messages[conversationID],
+           let index = list.firstIndex(where: { $0.id == messageID }) {
+            mutate(&list[index])
+            updated = list[index]
+            store.messages[conversationID] = list
+        } else if var stored = try? await memory.message(id: messageID) {
+            mutate(&stored)
+            updated = stored
+        }
+        guard let updated else { return nil }
+        do {
+            try await memory.upsertMessages([updated])
+        } catch {
+            log(.warning, "Database", "写入语音字段失败：\(error.localizedDescription)")
+        }
+        return updated
+    }
+
+    /// 关闭语音转写时把内存里仍 pending 的语音消息标为 disabled（落库）：
+    /// 取消队列后不会再有人更新它们，避免气泡永远停在「转写中」。
+    private func markPendingVoiceMessagesDisabled() {
+        var changed: [ChatMessage] = []
+        for (conversationID, list) in store.messages {
+            guard list.contains(where: { $0.kind == .voice && $0.voiceTranscriptState == .pending }) else {
+                continue
+            }
+            var updated = list
+            for index in updated.indices
+            where updated[index].kind == .voice && updated[index].voiceTranscriptState == .pending {
+                updated[index].voiceTranscriptState = .disabled
+                changed.append(updated[index])
+            }
+            store.messages[conversationID] = updated
+        }
+        guard !changed.isEmpty else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            try? await self.memory.upsertMessages(changed)
+        }
+    }
+
+    /// 手动重试：有本地音频直接重新转写；没有音频时重新向 bridge 获取。
+    func retryVoiceTranscription(messageID: String) async {
+        guard messageID.hasPrefix("ob-") else {
+            log(.debug, "Voice", "重试跳过：不是微信消息 ID（\(messageID)）")
+            return
+        }
+        guard let message = await voiceMessageAnywhere(messageID: messageID) else {
+            log(.debug, "Voice", "重试跳过：消息不存在（\(messageID)）")
+            return
+        }
+        let conversationID = message.conversationID
+        voiceTranscriptionAttempted.remove(messageID)
+        if let path = message.voiceMediaPath ?? message.mediaPath,
+           !path.isEmpty,
+           FileManager.default.fileExists(atPath: path) {
+            await transcribeVoiceMessage(conversationID: conversationID, messageID: messageID, force: true)
+            return
+        }
+        let enabled = store.settings.bot.voiceTranscriptionEnabled
+        guard enabled else {
+            log(.debug, "Voice", "重试跳过：该会话已关闭语音转写（\(conversationID)）")
+            return
+        }
+        _ = await updateVoiceMessage(conversationID: conversationID, messageID: messageID) {
+            $0.voiceTranscriptState = .pending
+        }
+        let bridgeID = String(messageID.dropFirst("ob-".count))
+        let request = VoiceFetcher.Request(
+            bridgeMessageID: bridgeID,
+            chatMessageID: messageID,
+            conversationID: conversationID
+        )
+        if store.voiceFetcher.retry(request) {
+            pendingVoiceFetchIDs.insert(messageID)
+            pendingVoiceTranscriptionIDs.insert(messageID)
+            log(.debug, "Voice", "已重新排队获取语音（\(conversationID)）")
+        } else {
+            log(.debug, "Voice", "重试跳过：语音正在获取中（\(conversationID)）")
+        }
     }
 
     // MARK: 识图（视觉模型）
@@ -1661,12 +2150,15 @@ final class RuntimeCoordinator {
         // 引用图片：按 svrid 找回被引用原图，把它的识图描述附加到本轮消息，
         // 让回复模型知道用户引用的是哪一张图（旧图也可以现场识别一次）。
         let quotedImageNote = await prepareQuotedImageNote(conversation: conversation, incoming: message)
+        // 引用语音：按 svrid 找回被引用语音的转写，附加「（引用语音内容：…）」。
+        let quotedVoiceNote = await prepareQuotedVoiceNote(conversation: conversation, incoming: message)
         // 描述写回 store.messages 后，用最新副本作为 incoming（避免提示词读到旧值）。
         let replyMessage = store.messages[conversation.id]?.first(where: { $0.id == message.id }) ?? message
         var promptMessage = replyMessage
-        if let quotedImageNote, !quotedImageNote.isEmpty {
+        for note in [quotedImageNote, quotedVoiceNote] {
+            guard let note, !note.isEmpty else { continue }
             let base = promptMessage.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            promptMessage.text = base.isEmpty ? quotedImageNote : base + "\n" + quotedImageNote
+            promptMessage.text = base.isEmpty ? note : base + "\n" + note
         }
 
         // ChatEngine only reads the last `shortTermMemoryLimit` messages; pass that window
@@ -1689,7 +2181,8 @@ final class RuntimeCoordinator {
                 plan: plan,
                 conversation: conversation,
                 receivedAt: receivedAt,
-                mention: patMention
+                mention: patMention,
+                incomingWasVoice: replyMessage.kind == .voice
             )
             ruleEngine.noteReply(conversationID: conversation.id)
             log(.info, "AI", "\(conversation.displayTitle) 生成回复（\(Int(plan.latencyMs))ms，tokens \(plan.usage.totalTokens)，\(evaluation.triggerLabel)）")
@@ -1706,7 +2199,8 @@ final class RuntimeCoordinator {
         plan: ChatReplyPlan,
         conversation: Conversation,
         receivedAt: Date,
-        mention: PatMention? = nil
+        mention: PatMention? = nil,
+        incomingWasVoice: Bool = false
     ) async {
         if plan.dryRun {
             var text = "（dry-run）将回复：\(plan.fullText)"
@@ -1738,7 +2232,7 @@ final class RuntimeCoordinator {
             return
         }
 
-        let sentCount = await sendPlanSegments(plan, conversation: conversation, mention: mention)
+        let sentCount = await sendPlanSegments(plan, conversation: conversation, mention: mention, incomingWasVoice: incomingWasVoice)
 
         guard sentCount > 0 else {
             failReplyProgress(conversationID: conversation.id, error: "消息发送失败，详见运行日志")
@@ -1764,11 +2258,36 @@ final class RuntimeCoordinator {
     private func sendPlanSegments(
         _ plan: ChatReplyPlan,
         conversation: Conversation,
-        mention: PatMention? = nil
+        mention: PatMention? = nil,
+        incomingWasVoice: Bool = false
     ) async -> Int {
         let humanize = store.settings.bot.humanize
         let segmentCount = plan.segments.count
         var sentCount = 0
+
+        // 语音回复决策：只在「单段 + 无 @ 提及」时尝试，避免多段语音刷屏或丢失群 @。
+        let voiceSettings = store.settings.bot.voice ?? VoiceSettings()
+        let voiceConfigured = voiceSettings.replyEnabled
+        var runtimeReady = false
+        if voiceConfigured {
+            await refreshVoiceStatus()
+            runtimeReady = store.voiceRuntimeStatus.canSendVoice()
+        }
+        let voiceDecision = decideVoiceReply(VoiceReplyContext(
+            global: voiceSettings,
+            conversation: conversation,
+            incomingWasVoice: incomingWasVoice,
+            replyText: plan.fullText,
+            modelsReady: VoiceSynthesisService.isReady(voiceSettings.engine),
+            runtimeReady: runtimeReady,
+            rng: Double.random(in: 0..<1)
+        ))
+        let useVoice = voiceDecision.isVoice && segmentCount == 1 && mention == nil
+        if voiceDecision.isVoice, !useVoice {
+            log(.debug, "Voice", "本次不改发语音：\(voiceDecision.reason)（段数 \(segmentCount)，mention=\(mention == nil ? "无" : "有")）")
+        } else if useVoice {
+            log(.debug, "Voice", "本次回复改发语音：\(voiceDecision.reason)")
+        }
         for (index, segment) in plan.segments.enumerated() {
             if humanize.enabled, index < plan.delaysMs.count, plan.delaysMs[index] > 0 {
                 let delaySeconds = Double(plan.delaysMs[index]) / 1000
@@ -1791,11 +2310,21 @@ final class RuntimeCoordinator {
                 segmentIndex: index + 1,
                 segmentCount: segmentCount
             )
-            let sent = await sendOutgoingText(
-                segment,
-                conversation: conversation,
-                mention: sentCount == 0 ? mention : nil
-            )
+            var sent = false
+            if useVoice, index == 0 {
+                sent = await sendOutgoingVoice(
+                    segment,
+                    conversation: conversation,
+                    settings: voiceSettings
+                )
+            }
+            if !sent {
+                sent = await sendOutgoingText(
+                    segment,
+                    conversation: conversation,
+                    mention: sentCount == 0 ? mention : nil
+                )
+            }
             if sent { sentCount += 1 }
         }
         return sentCount
@@ -1973,6 +2502,95 @@ final class RuntimeCoordinator {
         await persistMessage(notice)
     }
 
+    /// 尝试把一段 AI 回复合成语音并通过 bridge 发送。
+    ///
+    /// 返回 `false` 时调用方必须降级为文字（spec §3.3）：模型未就绪、合成失败、
+    /// bridge 返回 `voice_send_unsupported`（4.2 Hook 尚未支持）都走这一条。
+    /// 只有真正发送成功才落一条 outgoing 语音消息，避免出现「本地已发、微信没收到」。
+    @discardableResult
+    private func sendOutgoingVoice(
+        _ text: String,
+        conversation: Conversation,
+        settings: VoiceSettings
+    ) async -> Bool {
+        guard settings.modelDownloadConsent else {
+            log(.debug, "Voice", "跳过语音回复：尚未同意下载语音模型")
+            return false
+        }
+        if !store.voiceRuntimeStatus.canSendVoice() {
+            await refreshVoiceStatus()
+            guard store.voiceRuntimeStatus.canSendVoice() else {
+                log(.info, "Voice", "语音发送未就绪：\(store.voiceRuntimeStatus.summary())；本条改发文字")
+                return false
+            }
+        }
+        let voice = VoiceSelection(settings: settings)
+        if voice.engine == .zipvoiceClone,
+           (voice.cloneID ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            log(.debug, "Voice", "跳过语音回复：克隆引擎未选择音色档案")
+            return false
+        }
+        let synthesis: SynthesisResult
+        do {
+            synthesis = try await store.voiceSynthesis.synthesize(
+                text: text,
+                voice: voice,
+                maxSeconds: settings.effectiveMaxVoiceSeconds,
+                allowsTruncation: settings.overLimit == .truncate
+            )
+        } catch {
+            log(.warning, "Voice", "语音合成失败：\(error.localizedDescription)；本条改发文字")
+            return false
+        }
+        guard let client = oneBotClient else {
+            log(.debug, "Voice", "bridge 未运行，语音改发文字")
+            return false
+        }
+        do {
+            let sent = try await client.sendVoice(
+                conversationID: conversation.id,
+                isGroup: conversation.kind == .group,
+                wavURL: synthesis.wavURL,
+                durationHintMs: Int(synthesis.duration * 1000)
+            )
+            let durationMs = sent.durationMs > 0
+                ? sent.durationMs
+                : Int(synthesis.duration * 1000)
+            var message = ChatMessage(
+                id: "local-\(UUID().uuidString)",
+                conversationID: conversation.id,
+                senderID: selfID.isEmpty ? "self" : selfID,
+                senderName: "我",
+                direction: .outgoing,
+                kind: .voice,
+                text: text,
+                timestamp: Date(),
+                status: .sent
+            )
+            message.voiceDurationMs = durationMs
+            message.mediaPath = synthesis.wavURL.path
+            appendMessage(message)
+            if let updatedConversation = updateConversationAfterSend(
+                conversation: conversation,
+                message: message
+            ) {
+                do {
+                    try await memory.upsertConversationAndMessages(updatedConversation, [message])
+                } catch {
+                    log(.warning, "Database", "写入语音消息失败：\(error.localizedDescription)")
+                }
+            } else {
+                await persistMessage(message)
+            }
+            log(.info, "Voice", "已发送语音 → \(conversation.displayTitle)：\(durationMs)ms")
+            return true
+        } catch {
+            // 典型：voice_send_unsupported（4.2 Hook 未支持）；不重试语音，直接降级文字。
+            log(.info, "Voice", "语音发送未成功（\(error.localizedDescription)）；本条改发文字")
+            return false
+        }
+    }
+
     @discardableResult
     func sendOutgoingText(
         _ text: String,
@@ -2139,6 +2757,21 @@ final class RuntimeCoordinator {
     func settingsDidChange() {
         guard bootstrapped || bootstrapping else { return }
         hookManager.configure(wechatPath: store.settings.hook.wechatPath)
+        // 语音转写总开关关闭：取消未完成的语音获取（已在途的转写完成后仍会落库，
+        // 只是不再发起新的 bridge 下载）。与图片开关的行为保持一致。
+        let voiceEnabled = store.settings.bot.voiceTranscriptionEnabled
+        if lastVoiceTranscriptionEnabled == nil {
+            lastVoiceTranscriptionEnabled = voiceEnabled
+        } else if lastVoiceTranscriptionEnabled != voiceEnabled {
+            lastVoiceTranscriptionEnabled = voiceEnabled
+            if !voiceEnabled {
+                store.voiceFetcher.cancelAll()
+                pendingVoiceFetchIDs.removeAll()
+                pendingVoiceTranscriptionIDs.removeAll()
+                markPendingVoiceMessagesDisabled()
+                log(.info, "Voice", "语音转写已关闭，已取消未完成的语音获取")
+            }
+        }
         if store.isBotRunning {
             if store.schedules != lastSchedulerTasks {
                 Task { [weak self] in
@@ -2440,6 +3073,7 @@ final class RuntimeCoordinator {
         oneBotClient = nil
         clearReplyProgresses()
         store.imageFetcher.cancelAll()
+        store.voiceFetcher.cancelAll()
         hookManager.shutdown()
         LogPipeline.shared.flushForTermination()
         let statsSnapshot = store.stats
@@ -2525,6 +3159,24 @@ extension AppStore {
     /// 已在途的请求返回后也不再更新消息（不会写入任何 App 侧文件）。
     func cancelPendingImageFetches() {
         imageFetcher.cancelAll()
+    }
+
+    /// 重试一条语音的获取/转写（气泡「转写失败 · 重试」按钮）。
+    func retryVoiceTranscription(messageID: String) async {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.bootstrapIfNeeded()
+        await coordinator.retryVoiceTranscription(messageID: messageID)
+    }
+
+    /// 刷新 bridge `/voice_status`（语音发送句柄 / 登录稳定倒计时），供设置页展示与决策门禁。
+    func refreshVoiceStatus() async {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.refreshVoiceStatus()
+    }
+
+    /// 查询本机中文语音识别资源状态（设置页「语音」区展示下载引导）。
+    func voiceAssetStatus() async -> VoiceAssetStatus {
+        await voiceTranscription.assetStatus()
     }
 
     func refreshStatus() async {

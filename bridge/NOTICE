@@ -53,6 +53,8 @@ main.go
   Frida ready 后调用 `restoreContactDBKeys()`，把本机受限缓存中的通讯录读取密钥用
   `setDbKeys` 回灌给 hook（无缓存/失败只记日志，密钥不打印）。
   2026-10-23：新增 `-media_dir`（入站图片落盘根目录）与 `POST /fetch_image` 路由。
+  2026-10-26：注册语音路由 `POST /fetch_voice`（入站语音下载/解密/解码）与
+  `POST /send_voice`（语音发送别名，与 /send_private_msg 的 voice 段共用契约）。
 
 logger.go
   日志文件路径改为由 `-log_file` 指定，并在启动时创建所在目录。
@@ -63,6 +65,9 @@ param.go
   `pat_chat_wxid` / `pat_target_wxid` / `pat_suffix` / `pat_template`
   （拍一拍目标判定）；同时接收 `-self_id` 覆盖值。
   2026-10-23：`Config` 增加 `media_dir`（`-media_dir`）。
+  2026-10-26：`SendRequestData` 增加 `pcm16k`（base64 的 16k 单声道 s16le）与
+  `duration_ms`，供语音发送扩展与入站 voice 段透传（否则 HandleMsg 反序列化再
+  序列化时会静默丢弃）。
 
 incoming.go
   4.1.15 Message finalizer 入站事件归一化：把 `hook/script.js` 上报的
@@ -79,6 +84,8 @@ incoming.go
   按需下载元数据，把文本占位替换成无 data 的 image 段。
   2026-10-23：`收到入站消息事件` 日志降为 Debug（保留 `data_len`），历史回放时
   不再每条事件写 Info 日志。
+  2026-10-26：推送前调用 `registerIncomingVoice`，解析入站 `<voicemsg>` 并登记
+  按需下载元数据，把 `[语音]` 文本占位替换成无文件的 voice 段（duration_ms 可空）。
 
 worker.go
   新增 `pat` 发送分支：构建 appmsg type=62 的 `SendAppMsgReq` 并调用 hook
@@ -109,6 +116,10 @@ http.go
   按 `message_id` 触发入站图片下载并返回本地路径）。
   2026-10-23：`SendHttpReq` 同步删除 `send_interval` sleep，入站事件立即 POST；
   `发送数据` 日志降为 Debug，只记字节长度与最多 256 字符的截断预览。
+  2026-10-26：`sendHandler` 支持 voice 段的 `data.pcm16k` 扩展（16k 单声道 s16le
+  base64；也兼容 16k WAV base64），交给 `sendVoicePCM16k` 用 go-silk 编码
+  Tencent SILK；Hook 未支持时
+  返回 `{"ok":false,"error":"voice_send_unsupported"}`，App 降级文字。
 
 msg.go
   2026-10-23：`Download()` 在某个 CDN key 的首个分片到达时记录下载代次与 key，
@@ -131,13 +142,31 @@ http_auth_test.go         无 Gadget 场景下验证 HTTP 鉴权、参数校验�
 incoming_msg_test.go      `HandleMsg` 序列化保留 mentions / 自消息字段的回归测试
 incoming_normalize_test.go 入站事件归一化（自消息、群聊、@、非法帧、非法群 ID
                           清洗、旧 hook 群自消息补群）单元测试
-r3seed.go                 R3 发送句柄按微信 PID 持久化，
-                          bridge/App 重启后可恢复
 contact.go                通讯录目录：`get_contact_directory` 的路径推导、
                           目录缓存与入站昵称/群名补全、群 @ 昵称回退，以及
                           本机受限密钥缓存（0600、原子写）与启动回灌
 contact_test.go           上述逻辑的单元测试（路径推导、JSON 解析、缓存、密钥文件
                           权限/往返、入站补全、httptest WS 动作；不连接微信/Frida）
+voice.go                  入站语音获取（2026-10-26）：`<voicemsg>` XML 解析、
+                          `pendingVoiceJobs` 登记、`[语音]` → 无文件 voice 段、
+                          `POST /fetch_voice`（自然分片优先 + triggerDownload
+                          fileType 15（0x0F，4.2 语音）+ AES-ECB 解密 + SILK 魔数校验 +
+                          .silk 落盘 + go-silk 解码 16k PCM + WAV 落盘 + 幂等缓存）；
+                          出站 `POST /send_voice` / voice 段 `data.pcm16k`：官方 SILK SDK
+                          24k WeChat 兼容编码（cgo 包 silkenc）；R3 模式 + 句柄就绪时等待语音发送结果，
+                          未就绪返回 voice_handle_missing / voice_send_unsupported
+r3seed.go                 文本/语音发送句柄按微信 PID 持久化（voice_seed 与 seed
+                          共用记录；bridge 重启自动恢复，微信重启自动失效）
+silkenc/                  SILK SDK（Skype 2006–2012 许可，见 LICENSES/SILK-SDK.txt；
+                          kn007/silk-v3-decoder 封装 MIT）的 cgo 封装：
+                          16k PCM 输入由 bridge 重采样到 24k、20ms 对齐后编码为
+                          WeChat/QQ 兼容 SILK v3；go-silk 仅保留入站解码
+main.go                   r3_voice_seed 事件、启动时恢复 voice 句柄、voice 发送配置读取
+voice_test.go             上述逻辑的单元测试（XML 解析、AES 解密/截断、WAV 头、SILK
+                          解码/编码、handler 鉴权/参数/未知 id/幂等、发送契约；
+                          使用合成数据与 testdata 里的 TTS 合成 SILK 样本，不连接微信/Frida）
+testdata/voice_sample.silk TTS 合成语音样本（5.2s / 16k / Tencent SILK 头；
+                          不含真人聊天音频，SHA256 见 testdata/README.md）
 
 注意：`bridge/script.js` 必须与 `hook/script.js` 保持同步（bridge 只读取自己
 目录下的副本）。修改 Hook 脚本后请运行 `bash scripts/sync_hook_script.sh`，

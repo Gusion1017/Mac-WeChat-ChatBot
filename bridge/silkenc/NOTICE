@@ -1,0 +1,12 @@
+本目录的 `SKP_Silk_*.c/h` 来自 kn007/silk-v3-decoder 打包的 **SILK SDK**
+（Skype SILK codec，WeChat/QQ 兼容模式），用于出站语音编码。
+这些 C 文件保留 Skype Limited 2006–2012 的 SILK SDK 许可（BSD 风格）；
+许可全文见仓库根目录 `LICENSES/SILK-SDK.txt`。
+
+来源: https://github.com/kn007/silk-v3-decoder
+      提交时的 silk/src 与 silk/interface 目录（2026-10-26）。
+
+`LICENSE` 与 `encode.go` 的目录结构/构建适配来自 kn007/silk-v3-decoder（MIT，
+Copyright (c) 2020 Karl Chen）。本项目的 `wechat_silk.c/h` 与 `encode.go` 为适配代码：
+- 固定 20ms 帧、24 kbps、-tencent 头；
+- 仅暴露 `wechat_silk_encode` 供 Go/cgo 调用。

@@ -10,6 +10,10 @@ import SwiftUI
 struct MessageBubble: View, Equatable {
     let message: ChatMessage
     var showsSender: Bool = true
+    /// 是否在无语音气泡里展示转写（`BotSettings.voice.showTranscriptInBubble`）。
+    var voiceTranscriptVisible: Bool = true
+    /// 「转写失败 · 重试」；nil 表示不可重试（如历史消息/离线查看）。
+    var onRetryVoice: ((ChatMessage) -> Void)?
 
     /// Loaded once per media path instead of on every body evaluation: the previous
     /// computed `NSImage(contentsOfFile:)` re-read the file from disk whenever the
@@ -20,7 +24,9 @@ struct MessageBubble: View, Equatable {
 
     /// Manual comparison: `localImage` is view-local state and must not participate.
     static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
-        lhs.message == rhs.message && lhs.showsSender == rhs.showsSender
+        lhs.message == rhs.message
+            && lhs.showsSender == rhs.showsSender
+            && lhs.voiceTranscriptVisible == rhs.voiceTranscriptVisible
     }
 
     var body: some View {
@@ -88,6 +94,12 @@ struct MessageBubble: View, Equatable {
                     Button(L("复制识图描述")) {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(description, forType: .string)
+                    }
+                }
+                if message.kind == .voice, let transcript = voiceTranscript {
+                    Button(L("复制语音转写")) {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(transcript, forType: .string)
                     }
                 }
                 Button(L("复制消息 ID")) {
@@ -233,18 +245,67 @@ struct MessageBubble: View, Equatable {
     }
 
     private var voiceContent: some View {
-        HStack(spacing: 7) {
+        HStack(alignment: .top, spacing: 7) {
             Image(systemName: "waveform")
                 .font(.system(size: 14, weight: .medium))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(message.text.isEmpty ? L("语音消息") : message.text)
-                    .font(.callout)
-                Text(L("语音"))
-                    .font(.system(size: 9))
-                    .opacity(0.7)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    Text(voiceDurationLabel)
+                        .font(.callout)
+                    if message.voiceTranscriptState == .pending {
+                        ProgressView()
+                            .controlSize(.mini)
+                    }
+                }
+                if voiceTranscriptVisible, let transcript = voiceTranscript {
+                    Text(transcript)
+                        .font(.caption)
+                        .lineSpacing(2)
+                        .lineLimit(5)
+                        .opacity(0.88)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: 240, alignment: .leading)
+                } else if voiceTranscriptVisible, message.voiceTranscriptState == .pending {
+                    Text(L("转写中…"))
+                        .font(.system(size: 10))
+                        .opacity(0.7)
+                }
+                if message.voiceTranscriptState == .failed {
+                    if let onRetryVoice {
+                        Button {
+                            onRetryVoice(message)
+                        } label: {
+                            Label(L("转写失败 · 重试"), systemImage: "arrow.clockwise")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(0.85)
+                        .help(L("重新获取并转写这条语音"))
+                    } else {
+                        Text(L("转写失败"))
+                            .font(.system(size: 10))
+                            .opacity(0.7)
+                    }
+                }
             }
         }
-        .frame(minWidth: 80, alignment: .leading)
+        .frame(minWidth: 96, alignment: .leading)
+    }
+
+    /// 语音时长标签：「语音 5s」；未知时长时只显示「语音」。
+    private var voiceDurationLabel: String {
+        guard let durationMs = message.voiceDurationMs, durationMs > 0 else {
+            return L("语音")
+        }
+        let seconds = max(1, Int((Double(durationMs) / 1000).rounded()))
+        return "\(L("语音")) \(seconds)s"
+    }
+
+    /// 非空转写文本；空白按「没有转写」处理。
+    private var voiceTranscript: String? {
+        ChatEngine.normalizedVoiceTranscript(message)
     }
 
     private var fileContent: some View {
@@ -366,7 +427,13 @@ struct MessageBubble: View, Equatable {
             if let description = imageDescription {
                 parts.append("识图描述 \(description)")
             }
-        case .voice: parts.append("语音消息")
+        case .voice:
+            parts.append(voiceDurationLabel)
+            if let transcript = voiceTranscript {
+                parts.append(transcript)
+            } else if message.voiceTranscriptState == .failed {
+                parts.append(L("转写失败"))
+            }
         case .emoji: parts.append("表情 \(message.text)")
         case .file: parts.append("文件 \(fileName)")
         case .video: parts.append("视频")

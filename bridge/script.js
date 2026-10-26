@@ -380,6 +380,8 @@ function initAddresses() {
     // 只保留接收/媒体/下载链路。R3 的构造+提交完全在 triggerSend* 里同步完成。
     if (r3ModeActive) {
         console.log("[+] R3 原生发送模式: 跳过 req2buf/blrX8/StartTask/slot13-capture 等发送 hook");
+        // 语音上传依赖 uploadVoiceX1/uploadFunc*；这些只做内存初始化，不注册发送 hook。
+        setImmediate(setupSendImgMessageDynamic);
         setImmediate(r3Init);
     } else {
         setImmediate(setupSendTextMessageDynamic);
@@ -1313,6 +1315,8 @@ function triggerSendTextMessage(taskId, receiver, content, atUser, protoHex, pay
     return triggerSendMediaMessage(taskId, "", receiver, protoHex, payloadHex, "text");
 }
 
+var startTaskProbeSeen = {};
+
 function AttachSendFunc() {
     if (r3ModeActive) {
         console.log("[+] R3 模式: 不注册 StartTask(sendFunc+0x10) hook");
@@ -2016,7 +2020,7 @@ function triggerUploadVideo(receiver, md5, videoPath, payloadHex) {
     return fillUploadX1AndStart(videoIdAddr, videoPathAddr1, uploadVideoX1, receiver, md5, videoPath, payloadHex);
 }
 
-function triggerUploadVoice(receiver, voicePath, payloadHex, audioDataHex, durationMs) {
+function triggerUploadVoice(receiver, voicePath, payloadHex, audioDataHex, durationMs, voiceFileId) {
     if (uploadGlobalX0.equals(ptr(0))) {
         ensureCdnManagerX0();
     }
@@ -2034,7 +2038,11 @@ function triggerUploadVoice(receiver, voicePath, payloadHex, audioDataHex, durat
     voiceSilkDataLenGlobal = audioLen;
     voiceAudioDataAddr.writeByteArray(audioBytes);
 
-    const voiceIdStr = receiver + "_" + String(Math.floor(Date.now() / 1000)) + "_" + Math.floor(Math.random() * 1001) + "_1";
+    // 4.2 真实语音上传的临时文件 ID 形如 alita_1_<md5>_15_0_<seq>；
+    // bridge 会传真实格式的 voiceFileId，避免 CDN 把语音当未知类型。
+    const voiceIdStr = (typeof voiceFileId === "string" && voiceFileId.length > 0)
+        ? voiceFileId
+        : receiver + "_" + String(Math.floor(Date.now() / 1000)) + "_" + Math.floor(Math.random() * 1001) + "_1";
     patchString(voiceIdAddr, voiceIdStr);
     patchString(voicePathAddr1, voicePath);
 
@@ -2045,6 +2053,9 @@ function triggerUploadVoice(receiver, voicePath, payloadHex, audioDataHex, durat
     uploadVoiceX1.add(0x50).writeU64(voiceIdStr.length);
     uploadVoiceX1.add(0x58).writeU64(uint64("0x8000000000000000").add(voiceIdStr.length + 1));
     uploadVoiceX1.add(0x68).writeUtf8String(receiver);
+    // 4.2 真实上传请求在 +0x7F 写接收者长度；模板里的 0x13 只适用 19 字符 wxid，
+    // 对 filehelper/其他长度会把上传元数据写错（真机 2026-10-26 对比确认）。
+    uploadVoiceX1.add(0x7F).writeU8(receiver.length);
     // 音频二进制数据: 0x100=指针, 0x108=长度, 0x110=容量(长度+1)|高位
     uploadVoiceX1.add(0x100).writePointer(voiceAudioDataAddr);
     uploadVoiceX1.add(0x108).writeU64(audioLen);
@@ -2118,7 +2129,9 @@ function patchCdnOnComplete() {
                 const videoId = (structVer === "2") ? "" : x2.add(0xf0).readPointer().readUtf8String();
                 const targetId = x2.add(0x40 + cndShift).readUtf8String();
 
-                console.log("cndOnComplete x2: " + x2 + " cdnKey: " + cdnKey + " aesKey: " + aesKey + " md5Key: " + md5Key + " videoId: " + videoId + " targetId: " + targetId);
+                console.log("cndOnComplete x2: " + x2 + " cdnKeyLen: " + (cdnKey || "").length +
+                    " aesKeyLen: " + (aesKey || "").length + " md5KeyLen: " + (md5Key || "").length +
+                    " videoIdLen: " + (videoId || "").length + " targetId: " + targetId);
 
                 if (cdnKey !== "" && cdnKey != null && aesKey !== "" && aesKey != null) {
 
@@ -2281,7 +2294,66 @@ function triggerSendPatMessage(taskId, sender, receiver, protoHex, payloadHex) {
 // -------------------------发送回复消息分区-------------------------
 
 // -------------------------发送语音消息分区-------------------------
+// R3 语音发送：4.2 真实发送 = uploadvoice CGI（opcode 0x7F，任务类 ctor 0x3dda314，
+// task size 0x168）。仅当版本 JSON 显式 r3VoiceSend=true 时启用。
+// 从真实 WxSendVoiceMsg 提取 field 10 header 的原始字节（4.2 仅 17B：session_id+device_id）。
+function r3VoiceHeaderHexFromProto(hex) {
+    try {
+        var bytes = hexToByteArray(hex);
+        var pos = 0;
+        function rv() {
+            var v = 0, shift = 0, b;
+            do { b = bytes[pos++]; v += (b & 0x7f) * Math.pow(2, shift); shift += 7; } while (b & 0x80);
+            return v;
+        }
+        while (pos < bytes.length) {
+            var tag = rv(), field = Math.floor(tag / 8), wire = tag % 8;
+            if (wire === 0) { rv(); }
+            else if (wire === 2) {
+                var len = rv(), start = pos; pos += len;
+                if (field === 10 && len > 0 && len <= 64) {
+                    var out = "";
+                    for (var i = 0; i < len; i++) out += ("0" + bytes[start + i].toString(16)).slice(-2);
+                    return out;
+                }
+            } else if (wire === 5) { pos += 4; }
+            else if (wire === 1) { pos += 8; }
+            else return "";
+        }
+    } catch (e) { }
+    return "";
+}
+
+function r3SendVoiceMessage(taskId, protoHex) {
+    if (!r3ModeActive) return "fail";
+    if (!r3State.cfg) r3Ready();
+    if (!r3State.cfg || !r3State.cfg.voiceSendReady) {
+        console.error("[!] R3 voice: 未启用或缺少 voice 配置 (r3VoiceSend=false)");
+        return "fail";
+    }
+    if (!r3BuildFakeSerializer()) return "fail";
+    if (!r3TryResolve(true)) return "fail";
+    if (!r3State.voiceSeed) {
+        console.error("[!] R3 voice: 尚无语音发送句柄; 请先在本机微信手动发一条语音。");
+        return "fail";
+    }
+    return r3SendProtoTask(taskId, protoHex, r3State.cfg.voiceOpcode,
+        r3State.cfg.voiceUrl, "voice", {
+            seed: r3State.voiceSeed,
+            ctor: r3State.cfg.voiceTaskCtor,
+            size: r3State.cfg.voiceTaskSize,
+            vtable: r3State.cfg.voiceTaskVtable,
+            closureVtable: r3State.cfg.voiceClosureVtable
+        });
+}
+
 function triggerSendVoiceMessage(taskId, sender, receiver, protoHex, payloadHex) {
+    if (r3ModeActive) {
+        if (!r3State.cfg) r3Ready();
+        if (r3State.cfg && r3State.cfg.voiceSendReady) {
+            return r3SendVoiceMessage(taskId, protoHex);
+        }
+    }
     return triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex, "voice");
 }
 // -------------------------发送语音消息分区-------------------------
@@ -2330,7 +2402,14 @@ var r3Cfg = {
     closureCapture: "{{.r3ClosureCapture}}",
     slot13Capture: "{{.r3Slot13Capture}}",
     queueUntilSeed: "{{.r3QueueUntilSeed}}",
-    maxClones: "{{.r3MaxClones}}"
+    maxClones: "{{.r3MaxClones}}",
+    r3VoiceSend: "{{.r3VoiceSend}}",
+    voiceTaskCtorAddr: "{{.voiceTaskCtorAddr}}",
+    voiceTaskSize: "{{.voiceTaskSize}}",
+    voiceTaskVtable: "{{.voiceTaskVtable}}",
+    voiceClosureVtable: "{{.voiceClosureVtable}}",
+    voiceOpcode: "{{.voiceOpcode}}",
+    voiceUrl: "{{.voiceUrl}}"
 };
 var r3State = {
     cfg: null,
@@ -2360,6 +2439,10 @@ var r3State = {
     pendingCaptures: [],
     pendingResponses: [],
     appmsgSeed: null,
+    voiceSeed: null,
+    voiceHeaderHex: null,
+    pendingVoiceSeedPersist: null,
+    pendingVoiceHeaderPersist: null,
     patReqHooked: false,
     patReqHookedQuiet: false,
     patBuilderHooked: false,
@@ -2411,6 +2494,19 @@ function r3Ready() {
     // 实验能力：复用 newsendmsg 种子构造 sendappmsg task。默认关闭，
     // 由 App 运行期 JSON 在「R3 原生发送 + 被拍时回拍」同时开启时置 true。
     cfg.appMsgSend = (r3Cfg.r3AppMsgSend === "true");
+    // 4.2 语音发送：uploadvoice 任务类（opcode 0x7F，task size 0x168）。
+    cfg.voiceSend = (r3Cfg.r3VoiceSend === "true");
+    cfg.voiceTaskCtor = r3ParseAddr(r3Cfg.voiceTaskCtorAddr);
+    cfg.voiceTaskSize = r3ParseAddr(r3Cfg.voiceTaskSize);
+    if (cfg.voiceTaskSize === null || cfg.voiceTaskSize < 0x40) cfg.voiceTaskSize = 0x168;
+    cfg.voiceTaskVtable = r3ParseAddr(r3Cfg.voiceTaskVtable);
+    cfg.voiceClosureVtable = r3ParseAddr(r3Cfg.voiceClosureVtable);
+    cfg.voiceOpcode = (typeof r3Cfg.voiceOpcode === "string") ? parseInt(r3Cfg.voiceOpcode, 16) : 0x7F;
+    if (isNaN(cfg.voiceOpcode)) cfg.voiceOpcode = 0x7F;
+    cfg.voiceUrl = (typeof r3Cfg.voiceUrl === "string" && r3Cfg.voiceUrl.indexOf("/") === 0)
+        ? r3Cfg.voiceUrl : "/cgi-bin/micromsg-bin/uploadvoice";
+    cfg.voiceSendReady = cfg.voiceSend && cfg.voiceTaskCtor !== null &&
+        cfg.voiceTaskVtable !== null && cfg.voiceClosureVtable !== null;
     cfg.sendPatCtor = r3ParseAddr(r3Cfg.sendPatTaskCtorAddr);
     cfg.sendPatVtable = r3ParseAddr(r3Cfg.sendPatTaskVtable);
     cfg.sendPatClosureVtable = r3ParseAddr(r3Cfg.sendPatClosureVtable);
@@ -2791,6 +2887,49 @@ function r3StartSlot13Capture(quiet) {
                                             r3ScheduleLogFlush();
                                         }
                                     }
+                                    if (op === 0x7F) {
+                                        try {
+                                            var vClosure = task.add(0x68).readPointer();
+                                            var vCvt = (vClosure && !vClosure.isNull()) ? vClosure.readPointer() : ptr(0);
+                                            try {
+                                                var voser = task.add(0x78);
+                                                var vosVt = voser.readPointer();
+                                                var vosSizeFn = new NativeFunction(vosVt.add(0x48).readPointer(), 'uint32', ['pointer']);
+                                                var vosLen = vosSizeFn(voser);
+                                                if (vosLen > 0 && vosLen < 65536) {
+                                                    var vosBuf = Memory.alloc(vosLen);
+                                                    var vosWriteFn = new NativeFunction(vosVt.add(0x58).readPointer(), 'pointer', ['pointer', 'pointer']);
+                                                    vosWriteFn(voser, vosBuf);
+                                                    var vosArr = new Uint8Array(vosBuf.readByteArray(vosLen));
+                                                    var vosHex = "";
+                                                    for (var vi = 0; vi < vosArr.length; vi++) vosHex += ("0" + vosArr[vi].toString(16)).slice(-2);
+                                                    var vhHex = r3VoiceHeaderHexFromProto(vosHex);
+                                                    if (vhHex) {
+                                                        r3State.voiceHeaderHex = vhHex;
+                                                        r3State.pendingVoiceHeaderPersist = vhHex;
+                                                    }
+                                                }
+                                            } catch (eVP) { }
+                                            r3State.pendingCaptures.push("[capture] voice task=" + task +
+                                                " vtable=" + vt + " closure=" + vClosure + " cvt=" + vCvt +
+                                                " sizeGuess=0x168");
+                                            if (r3IsHeapPtr(vClosure) && r3State.cfg &&
+                                                r3State.cfg.voiceClosureVtable !== null &&
+                                                vCvt.equals(baseAddr.add(r3State.cfg.voiceClosureVtable))) {
+                                                var vCloneFn = vCvt.add(0x10).readPointer();
+                                                var vClone = new NativeFunction(vCloneFn, 'pointer', ['pointer'])(vClosure);
+                                                if (vClone && !vClone.isNull()) {
+                                                    r3State.voiceSeed = vClone;
+                                                    r3State.pendingVoiceSeedPersist = vClone.toString();
+                                                    r3State.pendingCaptures.push("[capture] voice seed=" + vClone);
+                                                }
+                                            }
+                                            r3ScheduleLogFlush();
+                                        } catch (eVC) {
+                                            r3State.pendingCaptures.push("[capture] voice inspect failed: " + eVC.message);
+                                            r3ScheduleLogFlush();
+                                        }
+                                    }
                                 }
                             }
                         } catch (e4) {
@@ -2865,6 +3004,20 @@ function r3FlushPendingLogs() {
             console.log("[+] R3: 发送句柄已提交持久化 (seed=" + r3State.pendingSeedPersist + ")");
         } catch (e) { }
         r3State.pendingSeedPersist = null;
+    }
+    if (r3State.pendingVoiceSeedPersist) {
+        try {
+            send({ type: "r3_voice_seed", pid: Process.id, seed: r3State.pendingVoiceSeedPersist });
+            console.log("[+] R3: 语音句柄已提交持久化 (seed=" + r3State.pendingVoiceSeedPersist + ")");
+        } catch (e) { }
+        r3State.pendingVoiceSeedPersist = null;
+    }
+    if (r3State.pendingVoiceHeaderPersist) {
+        try {
+            send({ type: "r3_voice_header", pid: Process.id, header: r3State.pendingVoiceHeaderPersist });
+            console.log("[+] R3: 语音 header 已提交持久化");
+        } catch (e) { }
+        r3State.pendingVoiceHeaderPersist = null;
     }
 }
 
@@ -3287,6 +3440,7 @@ function r3Dbg() {
         out.slot0 = cvt.readPointer().toString();
         out.cloneFn = cvt.add(0x10).readPointer().toString();
         out.seed = r3State.seed ? r3State.seed.toString() : null;
+        out.voiceSeed = r3State.voiceSeed ? r3State.voiceSeed.toString() : null;
         out.seedVptr = r3State.seed ? r3State.seed.readPointer().toString() : null;
     } catch (e) {
         out.error = e.message;
@@ -3316,6 +3470,65 @@ function r3AdoptSeed(seedHex) {
 
 function r3SetSeed(seedHex) {
     return r3AdoptSeed(seedHex);
+}
+
+function r3VoiceHeader() {
+    return r3State.voiceHeaderHex || "";
+}
+
+function r3SetVoiceHeader(headerHex) {
+    if (typeof headerHex !== "string" || headerHex.length < 8 || headerHex.length % 2 !== 0) return "fail";
+    r3State.voiceHeaderHex = headerHex;
+    return "1";
+}
+
+function r3RestoreVoiceHeader(pid, headerHex) {
+    if (!r3ModeActive) return "off";
+    if (typeof pid === "number" && pid !== Process.id) return "stale";
+    return r3SetVoiceHeader(headerHex);
+}
+
+function r3SetVoiceSeed(seedHex) {
+    if (typeof seedHex !== "string" || seedHex.indexOf("0x") !== 0) return "fail";
+    r3State.voiceSeed = ptr(seedHex);
+    return "1";
+}
+
+// 语音发送运行时诊断（App 倒计时/句柄检查用）。
+// 返回 JSON 字符串；不包含地址/密钥，只报告状态。
+function r3VoiceDiag() {
+    if (!r3ModeActive) return JSON.stringify({ mode: "off", voiceSend: false });
+    if (!r3State.cfg) r3Ready();
+    var settled = loginSettled();
+    var remaining = settled ? 0 : Math.max(0, 60000 - (Date.now() - scriptLoadTime));
+    var cdnReady = !!(downloadGlobalX0 || uploadGlobalX0);
+    var configured = !!(r3State.cfg && r3State.cfg.voiceSendReady);
+    return JSON.stringify({
+        mode: "r3",
+        voiceSend: configured,
+        textSeed: !!r3State.seed,
+        voiceSeed: !!r3State.voiceSeed,
+        voiceHeader: !!r3State.voiceHeaderHex,
+        cdnReady: cdnReady,
+        loginSettled: settled,
+        warmupRemainingMs: remaining,
+        voiceReady: !!(configured && r3State.voiceSeed && r3State.voiceHeaderHex && settled)
+    });
+}
+
+function r3VoiceReady() {
+    if (!r3ModeActive) return "off";
+    if (!r3State.cfg) r3Ready();
+    if (!r3State.cfg || !r3State.cfg.voiceSendReady) return "off";
+    if (!r3State.voiceSeed) return "noseed";
+    if (!r3State.voiceHeaderHex) return "noheader";
+    return "ready";
+}
+
+function r3RestoreVoiceSeed(pid, seedHex) {
+    if (!r3ModeActive) return "off";
+    if (typeof pid === "number" && pid !== Process.id) return "stale";
+    return r3SetVoiceSeed(seedHex);
 }
 
 // bridge 重启后恢复：先校验持久化记录里的微信 PID 是否仍是当前进程。
@@ -4123,6 +4336,13 @@ rpc.exports = {
     triggerUploadAppAttach: triggerUploadAppAttach,
     r3SetSeed: r3SetSeed,
     r3RestoreSeed: r3RestoreSeed,
+    r3SetVoiceSeed: r3SetVoiceSeed,
+    r3RestoreVoiceSeed: r3RestoreVoiceSeed,
+    r3VoiceReady: r3VoiceReady,
+    r3VoiceDiag: r3VoiceDiag,
+    r3VoiceHeader: r3VoiceHeader,
+    r3SetVoiceHeader: r3SetVoiceHeader,
+    r3RestoreVoiceHeader: r3RestoreVoiceHeader,
     r3Dbg: r3Dbg,
     r3Status: r3Status,
     r3ScanOnce: r3ScanOnce,
@@ -4278,7 +4498,6 @@ function setReceiver() {
                 var dataLen = this.context.x2.toInt32();
                 var fileId = readUtf8StringIfReadable(readPointerIfReadable(this.context.x19.add(dlFileIdOff)));
                 var cdnUrl = readUtf8StringIfReadable(readPointerIfReadable(this.context.x19.add(dlCdnUrlOff)));
-
                 sendDownloadChunks(dataPtr, dataLen, fileId, cdnUrl);
             }
         });
@@ -4293,7 +4512,6 @@ function setReceiver() {
                 var dataLen = this.context.x2.toInt32();
                 var fileId = readUtf8StringIfReadable(readPointerIfReadable(this.context.x19.add(dlFileIdOff)));
                 var cdnUrl = readUtf8StringIfReadable(readPointerIfReadable(this.context.x19.add(dlCdnUrlOff)));
-
                 sendDownloadChunks(dataPtr, dataLen, fileId, cdnUrl);
             }
         });
@@ -4323,7 +4541,6 @@ function setReceiver() {
                 }
                 var fileId = readUtf8StringIfReadable(readPointerIfReadable(this.context.x19.add(dlFileIdOff)));
                 var cdnUrl = readUtf8StringIfReadable(readPointerIfReadable(this.context.x19.add(dlCdnUrlOff)));
-
                 sendDownloadChunks(dataPtr, dataLen, fileId, cdnUrl);
             }
         });

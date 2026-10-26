@@ -32,6 +32,10 @@ final class AppStore {
     var gatewayConnected = false
     var lastError: String?
 
+    /// 语音发送运行时状态（bridge /voice_status；登录稳定倒计时/句柄）。
+    /// 由 Runtime 刷新；设置页只读展示，语音回复决策用它拦截未就绪状态。
+    var voiceRuntimeStatus: VoiceRuntimeStatus = .unavailable
+
     /// 自动回复流水线的实时阶段快照，按会话 ID 索引（不持久化）。
     /// 由 `RuntimeCoordinator` 在收到消息后写入，供会话页头、输入区状态条与会话列表实时展示。
     var replyProgress: [String: ReplyProgress] = [:]
@@ -39,6 +43,16 @@ final class AppStore {
     /// 入站图片获取队列（设置开关 + 串行请求）。生命周期跟随 AppStore，
     /// 由 Runtime 注入请求/回调闭包；`@Observable` 不追踪（UI 无需刷新）。
     let imageFetcher = ImageFetcher()
+
+    /// 入站语音获取队列（`POST /fetch_voice`，串行 + 去重 + 重试 1 次）。
+    /// 同样由 Runtime 注入闭包；转写服务是 actor，可在后台串行执行。
+    let voiceFetcher = VoiceFetcher()
+
+    /// 本地语音转写（SpeechAnalyzer actor）；UI 查询资源状态、Runtime 调用转写。
+    let voiceTranscription = VoiceTranscriptionService()
+
+    /// 本地语音合成（sherpa-onnx actor）；回复投递时按设置决定是否改用语音。
+    let voiceSynthesis = VoiceSynthesisService()
 
     init(settings: AppSettings = SettingsStore.load()) {
         self.settings = settings

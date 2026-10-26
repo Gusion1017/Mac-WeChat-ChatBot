@@ -8,6 +8,7 @@ enum HookError: LocalizedError {
     case installScriptMissing
     case gadgetPayloadMissing
     case versionConfigMissing(String)
+    case commandLineToolsMissing
     case weChatNotInstalled(String)
     case weChatRunning
     case weChatNotRunning
@@ -31,6 +32,8 @@ enum HookError: LocalizedError {
             return "Frida Gadget 文件缺失：hook/gadget/FridaGadget.dylib 或配置文件"
         case .versionConfigMissing(let path):
             return "Hook 版本文件未就绪：\(path)（等待 hook-port 产出对应微信版本的 JSON 偏移）"
+        case .commandLineToolsMissing:
+            return L("需要安装 Xcode Command Line Tools（提供 python3 与 otool）。请到首启向导或「设置 → Hook」点击安装，然后重试。")
         case .weChatNotInstalled(let path):
             return "未找到微信 App：\(path)"
         case .weChatRunning:
@@ -164,17 +167,23 @@ final class HookManager {
 
     @discardableResult
     func refresh() async -> HookStatus {
+        let commandLineTools = await CommandLineTools.status()
         let installation = await inspectInstallation()
         var updated = status
         updated.wechatVersion = installation.version
         updated.wechatBuild = installation.build
         updated.wechatRunning = Self.isWeChatRunning()
 
-        var gadgetInstalled = false
-        if installation.exists {
-            gadgetInstalled = await installation.hasGadgetLoadCommand()
+        // CLT 缺失时 /usr/bin/otool、/usr/bin/python3 只是 xcode-select 的 shim：
+        // 直接执行会触发系统安装弹窗，且 manage_wechat.sh status 也会透传失败。
+        // 因此跳过这两处探测，保留可行动引导，避免启动时惊扰用户。
+        if commandLineTools.isReady {
+            var gadgetInstalled = false
+            if installation.exists {
+                gadgetInstalled = await installation.hasGadgetLoadCommand()
+            }
+            updated.gadgetInstalled = gadgetInstalled
         }
-        updated.gadgetInstalled = gadgetInstalled
 
         let versionConfig = AppResources.versionConfig(
             version: installation.version,
@@ -185,7 +194,7 @@ final class HookManager {
         updated.matchedVersion = versionConfig != nil
 
         // Optional: merge richer state from manage_wechat.sh (signature, backup path).
-        if let scriptStatus = await runManageStatus() {
+        if commandLineTools.isReady, let scriptStatus = await runManageStatus() {
             lastKnownBackupPath = scriptStatus.backupPath
             if scriptStatus.gadgetInstalled { updated.gadgetInstalled = true }
             if updated.wechatVersion.isEmpty { updated.wechatVersion = scriptStatus.version }
@@ -195,7 +204,10 @@ final class HookManager {
             }
         }
 
-        if !installation.exists {
+        if !commandLineTools.isReady {
+            updated.state = .failed
+            updated.detail = "需要安装 Xcode Command Line Tools 才能检测 Hook"
+        } else if !installation.exists {
             updated.state = .notInstalled
             updated.detail = "未找到微信：\(installation.appURL.path)"
         } else if !updated.gadgetInstalled {
@@ -217,7 +229,7 @@ final class HookManager {
             updated.state = .installed
             updated.detail = ""
         }
-        if !updated.matchedVersion, installation.exists, updated.gadgetInstalled {
+        if commandLineTools.isReady, !updated.matchedVersion, installation.exists, updated.gadgetInstalled {
             updated.detail = "Hook 版本文件未就绪：\(updated.versionConfigFile)"
         }
         publish(updated)
@@ -265,6 +277,13 @@ final class HookManager {
         onProgress: ((Double, String) -> Void)? = nil
     ) async throws -> HookStatus {
         onProgress?(0.0, "检查安装环境")
+        guard await CommandLineTools.status().isReady else {
+            var missing = status
+            missing.state = .failed
+            missing.detail = "需要安装 Xcode Command Line Tools 才能安装 Hook"
+            publish(missing)
+            throw HookError.commandLineToolsMissing
+        }
         guard AppResources.root != nil else { throw HookError.resourcesMissing }
         guard let script = AppResources.installScript else { throw HookError.installScriptMissing }
         guard let bridgeRoot = AppResources.root else { throw HookError.resourcesMissing }
@@ -445,6 +464,13 @@ final class HookManager {
         let installation = await inspectInstallation()
         guard installation.exists else { throw HookError.weChatNotInstalled(wechatPath) }
         guard Self.isWeChatRunning() else { throw HookError.weChatNotRunning }
+        guard await CommandLineTools.status().isReady else {
+            var updated = status
+            updated.state = .failed
+            updated.detail = "需要安装 Xcode Command Line Tools 才能启动 Hook"
+            publish(updated)
+            throw HookError.commandLineToolsMissing
+        }
         guard await installation.hasGadgetLoadCommand() else { throw HookError.gadgetNotInstalled }
 
         guard let versionConfig = AppResources.materializedVersionConfig(

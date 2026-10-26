@@ -44,5 +44,12 @@
   "r3QueueUntilSeed": "false",
   "contactDirectory": "true",
   "r3PatSend": "false",
-  "protoParseAddr": "0x5c1245c"
+  "protoParseAddr": "0x5c1245c",
+  "r3VoiceSend": "false",
+  "voiceTaskCtorAddr": "0x3dda314",
+  "voiceTaskSize": "0x168",
+  "voiceTaskVtable": "0x9f6c460",
+  "voiceClosureVtable": "0x9f6c4b8",
+  "voiceOpcode": "0x7f",
+  "voiceUrl": "/cgi-bin/micromsg-bin/uploadvoice"
 }

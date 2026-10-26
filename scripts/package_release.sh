@@ -51,6 +51,10 @@ for required in \
   "Contents/Resources/bridge/script.js" \
   "Contents/Resources/hook/gadget/FridaGadget.dylib" \
   "Contents/Resources/LICENSE" \
+  "Contents/Resources/ThirdPartyNotices.txt" \
+  "Contents/Resources/LICENSES/Apache-2.0.txt" \
+  "Contents/Resources/LICENSES/SILK-SDK.txt" \
+  "Contents/Resources/LICENSES/wxWindows-Library-Licence-3.1.txt" \
   "Contents/Resources/bridge/NOTICE"
 do
   [[ -e "$BUNDLE/$required" ]] || fail "App 包缺少 ${required}"
@@ -79,6 +83,8 @@ cat "$ZIP.sha256"
 say ""
 say "下一步：把 zip 与 .sha256 上传到 GitHub Releases，并在说明中写清"
 say "  - 支持 Apple Silicon / macOS 26+ / 微信 4.2.0.5、4.1.15.55 或 4.1.12.53"
-say "  - ad-hoc 签名、未公证；首次需右键打开或移除 quarantine"
+say "  - 安装 Hook 需要 Xcode Command Line Tools（首启向导可检测与引导安装）"
+say "  - ad-hoc 签名、未公证；macOS 15+ 已取消右键打开，首次需在「系统设置 → 隐私与安全性 → 仍要打开」，"
+say "    或执行 xattr -dr com.apple.quarantine /Applications/WeChat\\ AI.app"
 say "  - 安装 Hook 会修改微信，存在账号风控与签名失效风险"
 say "  - 按 GPL-3.0 提供对应源码（仓库地址）"

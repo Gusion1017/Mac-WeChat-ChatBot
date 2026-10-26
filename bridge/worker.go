@@ -232,7 +232,11 @@ func SendWechatMsg(m *SendMsg) {
 		}
 		return
 	case "send_voice":
-		protoHex, err := BuildVoiceMsgProto(myWechatId, targetId, m.CdnKey, m.AesKey, m.VoiceDuration, m.SilkDataLen, m.Unknown13)
+		voiceHeaderHex := ""
+		if fridaScript != nil {
+			voiceHeaderHex = fmt.Sprint(fridaScript.ExportsCall("r3VoiceHeader"))
+		}
+		protoHex, err := BuildVoiceMsgProtoWithHeader(myWechatId, targetId, m.CdnKey, m.AesKey, m.VoiceDuration, m.SilkDataLen, m.Unknown13, voiceHeaderHex)
 		if err != nil {
 			Error("构建语音protobuf失败", "err", err)
 			sendErr = err
@@ -323,7 +327,7 @@ func SendWechatMsg(m *SendMsg) {
 
 	// R3 原生发送：slot13 已把任务交给微信 mars worker，结果不再走 buf2resp 相关通道。
 	// 继续等待只会 15s 后误报 "send timeout"（消息实际已送达），因此直接返回成功。
-	if r3SendMode.Load() && (m.Type == "text" || m.Type == "reply" || m.Type == "pat") {
+	if r3SendMode.Load() && (m.Type == "text" || m.Type == "reply" || m.Type == "pat" || m.Type == "send_voice") {
 		Info("R3 模式：任务已提交，跳过 buf2resp 等待", "task_id", currTaskId)
 		return
 	}

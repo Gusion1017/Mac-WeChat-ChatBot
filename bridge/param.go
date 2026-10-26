@@ -154,6 +154,14 @@ type SendRequestData struct {
 	QQ           string         `json:"qq,omitempty"`
 	Media        []byte         `json:"media,omitempty"`
 	ReplyMessage *WechatMessage `json:"reply_message,omitempty"`
+
+	// PCM16K / DurationMs 是语音段（type=voice）的出站扩展（2026-10-26）：
+	// App 传 base64 的 16k 单声道 s16le PCM（也兼容 16k WAV base64，bridge 会去
+	// RIFF 头），由 bridge 用 go-silk 编码 Tencent SILK，不依赖 ffmpeg/pilk。
+	// 字段必须显式声明，否则 HandleMsg 反序列化再序列化时会被静默丢弃
+	// （入站语音段的 duration_ms 同理：voice 段无 data.file，只携带 {"duration_ms":N}）。
+	PCM16K     string `json:"pcm16k,omitempty"`
+	DurationMs int    `json:"duration_ms,omitempty"`
 }
 
 type Config struct {

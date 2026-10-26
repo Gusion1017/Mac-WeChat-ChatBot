@@ -6,12 +6,13 @@
 
 | 文档 | 内容 | 类型 |
 | --- | --- | --- |
-| [`install.md`](install.md) | **安装与启动**：Releases App / 源码 ZIP 两种方式、Gatekeeper、菜单栏、首次向导与发布打包 | 操作手册 |
+| [`install.md`](install.md) | **安装与启动**：Releases App（v1.3.0，约 71MB）/ 源码 ZIP 两种方式、**Command Line Tools 前置**、Gatekeeper、菜单栏、首次向导与发布打包 | 操作手册 |
 | [`architecture.md`](architecture.md) | 总体架构、目录边界、OneBot 桥接契约 | 现行契约 |
 | [`core-services.md`](core-services.md) | Swift 核心服务：AppStore、AI/OneBot/记忆/触发判定/调度、防睡眠、并发与错误处理 | 现行契约 |
 | [`bridge.md`](bridge.md) | Go OneBot 桥接：启动参数、HTTP/WS 接口、frida-core 接入 | 现行契约 |
 | [`memory.md`](memory.md) | 记忆系统：10 条短期窗口、8 条批量总结、同会话早期片段召回、记忆文件夹与综合权重 | 现行契约 |
 | [`ui-design.md`](ui-design.md) | SwiftUI 信息架构、设计 token、组件拆分与交互约定 | 现行契约 |
+| [`voice.md`](voice.md) | **语音能力**：入站转写、出站 TTS/克隆、模型下载（首次约 528MB）、系统语音资源、失败降级与 4.2 Hook 限制 | 现行契约 |
 
 根目录另见：[`README.md`](../README.md)（项目介绍与快速开始）、
 [`CHANGELOG.md`](../CHANGELOG.md)（变更日志）、

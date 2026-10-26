@@ -155,7 +155,10 @@ actor MemoryStore {
             is_muted INTEGER NOT NULL DEFAULT 0,
             note TEXT NOT NULL DEFAULT '',
             working_hours TEXT,
-            image_fetch_enabled INTEGER
+            image_fetch_enabled INTEGER,
+            voice_transcription_enabled INTEGER,
+            voice_reply_enabled INTEGER,
+            voice_reply_probability REAL
         );
         CREATE INDEX IF NOT EXISTS idx_conversations_last_message
             ON conversations (is_pinned DESC, last_message_at DESC);
@@ -174,7 +177,12 @@ actor MemoryStore {
             status TEXT NOT NULL DEFAULT 'received',
             reply_to_id TEXT,
             raw_json TEXT,
-            image_description TEXT
+            image_description TEXT,
+            voice_media_path TEXT,
+            voice_duration_ms INTEGER,
+            voice_transcript TEXT,
+            voice_transcript_confidence REAL,
+            voice_transcript_state TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_time
             ON messages (conversation_id, timestamp DESC);
@@ -262,6 +270,34 @@ actor MemoryStore {
             try execute("ALTER TABLE messages ADD COLUMN image_description TEXT;")
         }
 
+        // v7: 入站语音（2026-10-26）。
+        // conversations：会话级语音覆盖（NULL = 跟随全局设置）。
+        if try !columnExists(in: "conversations", column: "voice_transcription_enabled") {
+            try execute("ALTER TABLE conversations ADD COLUMN voice_transcription_enabled INTEGER;")
+        }
+        if try !columnExists(in: "conversations", column: "voice_reply_enabled") {
+            try execute("ALTER TABLE conversations ADD COLUMN voice_reply_enabled INTEGER;")
+        }
+        if try !columnExists(in: "conversations", column: "voice_reply_probability") {
+            try execute("ALTER TABLE conversations ADD COLUMN voice_reply_probability REAL;")
+        }
+        // messages：语音本地路径/时长/转写/置信度/状态（全部 NULL = 旧数据）。
+        if try !columnExists(in: "messages", column: "voice_media_path") {
+            try execute("ALTER TABLE messages ADD COLUMN voice_media_path TEXT;")
+        }
+        if try !columnExists(in: "messages", column: "voice_duration_ms") {
+            try execute("ALTER TABLE messages ADD COLUMN voice_duration_ms INTEGER;")
+        }
+        if try !columnExists(in: "messages", column: "voice_transcript") {
+            try execute("ALTER TABLE messages ADD COLUMN voice_transcript TEXT;")
+        }
+        if try !columnExists(in: "messages", column: "voice_transcript_confidence") {
+            try execute("ALTER TABLE messages ADD COLUMN voice_transcript_confidence REAL;")
+        }
+        if try !columnExists(in: "messages", column: "voice_transcript_state") {
+            try execute("ALTER TABLE messages ADD COLUMN voice_transcript_state TEXT;")
+        }
+
         let version = try userVersion()
         if version < 2 {
             // 已有历史消息不批量补总结（避免升级时产生大量 AI 调用）；
@@ -305,7 +341,8 @@ actor MemoryStore {
         let sql = """
         SELECT id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
                ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours,
-               image_fetch_enabled
+               image_fetch_enabled, voice_transcription_enabled, voice_reply_enabled,
+               voice_reply_probability
         FROM conversations
         ORDER BY is_pinned DESC, COALESCE(last_message_at, 0) DESC
         LIMIT ? OFFSET ?;
@@ -326,7 +363,8 @@ actor MemoryStore {
         let statement = try prepare("""
         SELECT id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
                ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours,
-               image_fetch_enabled
+               image_fetch_enabled, voice_transcription_enabled, voice_reply_enabled,
+               voice_reply_probability
         FROM conversations WHERE id = ? LIMIT 1;
         """)
         defer { sqlite3_finalize(statement) }
@@ -1136,8 +1174,9 @@ actor MemoryStore {
         INSERT INTO conversations (
             id, kind, title, subtitle, unread_count, last_message_at, last_message_preview,
             ai_enabled, provider_id, model, persona_id, is_pinned, is_muted, note, working_hours,
-            image_fetch_enabled
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            image_fetch_enabled, voice_transcription_enabled, voice_reply_enabled,
+            voice_reply_probability
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             kind = excluded.kind,
             title = excluded.title,
@@ -1153,7 +1192,10 @@ actor MemoryStore {
             is_muted = excluded.is_muted,
             note = excluded.note,
             working_hours = excluded.working_hours,
-            image_fetch_enabled = excluded.image_fetch_enabled;
+            image_fetch_enabled = excluded.image_fetch_enabled,
+            voice_transcription_enabled = excluded.voice_transcription_enabled,
+            voice_reply_enabled = excluded.voice_reply_enabled,
+            voice_reply_probability = excluded.voice_reply_probability;
         """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -1176,6 +1218,9 @@ actor MemoryStore {
             try bind(statement, 14, conversation.note)
             try bind(statement, 15, encodeWorkingHours(conversation.workingHours))
             try bind(statement, 16, conversation.imageFetchEnabled.map { Int32($0 ? 1 : 0) })
+            try bind(statement, 17, conversation.voiceTranscriptionEnabled.map { Int32($0 ? 1 : 0) })
+            try bind(statement, 18, conversation.voiceReplyEnabled.map { Int32($0 ? 1 : 0) })
+            try bind(statement, 19, conversation.voiceReplyProbability)
             try stepDone(statement)
         }
     }
@@ -1197,7 +1242,10 @@ actor MemoryStore {
             isMuted: int(statement, 12) != 0,
             note: try text(statement, 13),
             workingHours: decodeWorkingHours(optionalText(statement, 14)),
-            imageFetchEnabled: optionalInt(statement, 15).map { $0 != 0 }
+            imageFetchEnabled: optionalInt(statement, 15).map { $0 != 0 },
+            voiceTranscriptionEnabled: optionalInt(statement, 16).map { $0 != 0 },
+            voiceReplyEnabled: optionalInt(statement, 17).map { $0 != 0 },
+            voiceReplyProbability: optionalDouble(statement, 18)
         )
     }
 
@@ -1238,8 +1286,10 @@ actor MemoryStore {
         let sql = """
         INSERT INTO messages (
             id, conversation_id, sender_id, sender_name, direction, kind, text,
-            media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description,
+            voice_media_path, voice_duration_ms, voice_transcript, voice_transcript_confidence,
+            voice_transcript_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             conversation_id = excluded.conversation_id,
             sender_id = excluded.sender_id,
@@ -1253,7 +1303,12 @@ actor MemoryStore {
             status = excluded.status,
             reply_to_id = excluded.reply_to_id,
             raw_json = excluded.raw_json,
-            image_description = excluded.image_description;
+            image_description = excluded.image_description,
+            voice_media_path = excluded.voice_media_path,
+            voice_duration_ms = excluded.voice_duration_ms,
+            voice_transcript = excluded.voice_transcript,
+            voice_transcript_confidence = excluded.voice_transcript_confidence,
+            voice_transcript_state = excluded.voice_transcript_state;
         """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
@@ -1274,6 +1329,11 @@ actor MemoryStore {
             try bind(statement, 12, message.replyToID)
             try bind(statement, 13, message.rawJSON)
             try bind(statement, 14, message.imageDescription)
+            try bind(statement, 15, message.voiceMediaPath)
+            try bind(statement, 16, message.voiceDurationMs.map { Int32($0) })
+            try bind(statement, 17, message.voiceTranscript)
+            try bind(statement, 18, message.voiceTranscriptConfidence)
+            try bind(statement, 19, message.voiceTranscriptState?.rawValue)
             try stepDone(statement)
         }
     }
@@ -1293,7 +1353,8 @@ actor MemoryStore {
         let sql = """
         SELECT m.id, m.conversation_id, m.sender_id, m.sender_name, m.direction, m.kind, m.text,
                m.media_path, m.media_url, m.timestamp, m.status, m.reply_to_id, m.raw_json,
-               m.image_description
+               m.image_description, m.voice_media_path, m.voice_duration_ms, m.voice_transcript,
+               m.voice_transcript_confidence, m.voice_transcript_state
         FROM messages m
         WHERE m.conversation_id IN (\(placeholders))
           AND m.timestamp >= COALESCE((
@@ -1333,7 +1394,9 @@ actor MemoryStore {
         if before != nil {
             sql = """
             SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
-                   media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description
+                   media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description,
+                   voice_media_path, voice_duration_ms, voice_transcript,
+                   voice_transcript_confidence, voice_transcript_state
             FROM messages WHERE conversation_id = ? AND timestamp < ?
             ORDER BY timestamp DESC LIMIT ?;
             """
@@ -1341,7 +1404,9 @@ actor MemoryStore {
         } else {
             sql = """
             SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
-                   media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description
+                   media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description,
+                   voice_media_path, voice_duration_ms, voice_transcript,
+                   voice_transcript_confidence, voice_transcript_state
             FROM messages WHERE conversation_id = ?
             ORDER BY timestamp DESC LIMIT ?;
             """
@@ -1366,7 +1431,9 @@ actor MemoryStore {
         try ensureOpen()
         let statement = try prepare("""
         SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
-               media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description
+               media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description,
+               voice_media_path, voice_duration_ms, voice_transcript,
+               voice_transcript_confidence, voice_transcript_state
         FROM messages WHERE id = ? LIMIT 1;
         """)
         defer { sqlite3_finalize(statement) }
@@ -1387,7 +1454,8 @@ actor MemoryStore {
         let statement = try prepare("""
         SELECT m.id, m.conversation_id, m.sender_id, m.sender_name, m.direction, m.kind, m.text,
                m.media_path, m.media_url, m.timestamp, m.status, m.reply_to_id, m.raw_json,
-               m.image_description, COALESCE(c.title, '')
+               m.image_description, m.voice_media_path, m.voice_duration_ms, m.voice_transcript,
+               m.voice_transcript_confidence, m.voice_transcript_state, COALESCE(c.title, '')
         FROM messages m
         LEFT JOIN conversations c ON c.id = m.conversation_id
         WHERE m.text LIKE ? ESCAPE '\\'
@@ -1400,7 +1468,7 @@ actor MemoryStore {
         var hits: [MemorySearchHit] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             let message = try decodeMessage(statement)
-            let title = optionalText(statement, 14) ?? ""
+            let title = optionalText(statement, 19) ?? ""
             hits.append(MemorySearchHit(message: message, conversationTitle: title))
         }
         return hits
@@ -1418,6 +1486,23 @@ actor MemoryStore {
         return Int(int(statement, 0))
     }
 
+    /// 启动时修复「上次运行中断」的语音转写：把仍处于 pending 的语音消息标为 failed，
+    /// 气泡显示「重试」，避免永远停在「转写中」。返回被修复的行数（0 表示没有遗留）。
+    ///
+    /// 只在 App 启动、数据库刚打开、运行时尚未开始处理新事件时调用，不会误伤在途任务。
+    @discardableResult
+    func failInterruptedVoiceTranscripts() throws -> Int {
+        try ensureOpen()
+        let statement = try prepare("""
+        UPDATE messages SET voice_transcript_state = 'failed'
+        WHERE kind = 'voice' AND voice_transcript_state = 'pending';
+        """)
+        defer { sqlite3_finalize(statement) }
+        try stepDone(statement)
+        guard let db else { return 0 }
+        return Int(sqlite3_changes(db))
+    }
+
     private func decodeMessage(_ statement: OpaquePointer?) throws -> ChatMessage {
         ChatMessage(
             id: try text(statement, 0),
@@ -1430,6 +1515,11 @@ actor MemoryStore {
             mediaPath: optionalText(statement, 7),
             mediaURL: optionalText(statement, 8),
             imageDescription: optionalText(statement, 13),
+            voiceMediaPath: optionalText(statement, 14),
+            voiceDurationMs: optionalInt(statement, 15).map(Int.init),
+            voiceTranscript: optionalText(statement, 16),
+            voiceTranscriptConfidence: optionalDouble(statement, 17),
+            voiceTranscriptState: optionalText(statement, 18).flatMap(VoiceTranscriptState.init(rawValue:)),
             timestamp: date(statement, 9),
             status: DeliveryStatus(rawValue: try text(statement, 10)) ?? .received,
             replyToID: optionalText(statement, 11),
@@ -1758,7 +1848,9 @@ actor MemoryStore {
 
         let statement = try prepare("""
         SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
-               media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description, rowid
+               media_path, media_url, timestamp, status, reply_to_id, raw_json, image_description,
+               voice_media_path, voice_duration_ms, voice_transcript,
+               voice_transcript_confidence, voice_transcript_state, rowid
         FROM messages
         WHERE conversation_id = ? AND rowid > ? AND rowid < ?
         ORDER BY rowid ASC LIMIT ?;
@@ -1773,7 +1865,7 @@ actor MemoryStore {
         var lastRowID: Int64 = cursor
         while sqlite3_step(statement) == SQLITE_ROW {
             messages.append(try decodeMessage(statement))
-            lastRowID = sqlite3_column_int64(statement, 14)
+            lastRowID = sqlite3_column_int64(statement, 19)
         }
         guard !messages.isEmpty else { return nil }
         return MemoryOverflow(messages: messages, lastRowID: lastRowID)
@@ -2185,6 +2277,12 @@ actor MemoryStore {
     private func optionalInt(_ statement: OpaquePointer?, _ column: Int32) -> Int32? {
         guard sqlite3_column_type(statement, column) != SQLITE_NULL else { return nil }
         return sqlite3_column_int(statement, column)
+    }
+
+    /// NULL-aware double read（语音时长/置信度/概率等可空 REAL 列）。
+    private func optionalDouble(_ statement: OpaquePointer?, _ column: Int32) -> Double? {
+        guard sqlite3_column_type(statement, column) != SQLITE_NULL else { return nil }
+        return sqlite3_column_double(statement, column)
     }
 
     private func date(_ statement: OpaquePointer?, _ column: Int32) -> Date {

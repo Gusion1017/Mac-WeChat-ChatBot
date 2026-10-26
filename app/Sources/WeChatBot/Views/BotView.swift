@@ -1,9 +1,58 @@
 import SwiftUI
 
-/// 机器人：总开关、dry-run、私聊/群聊策略、白/黑名单、频率、工作时段与拟人化。
+/// 「机器人」页的子栏目。2026-10-26 起把原本的单页长列表拆成 6 个子栏目：
+/// 状态与基础开关、触发方式、唤醒与互动、名单、节奏（频率/时段/拟人化）与语音。
+enum BotTab: String, CaseIterable, Identifiable, PageTabItem {
+    case general
+    case trigger
+    case interaction
+    case lists
+    case rhythm
+    case voice
+
+    var id: String { rawValue }
+
+    var tabTitle: String {
+        switch self {
+        case .general: "常规"
+        case .trigger: "触发"
+        case .interaction: "互动"
+        case .lists: "名单"
+        case .rhythm: "节奏"
+        case .voice: "语音"
+        }
+    }
+
+    var tabSymbol: String {
+        switch self {
+        case .general: "slider.horizontal.3"
+        case .trigger: "bolt.fill"
+        case .interaction: "hand.tap.fill"
+        case .lists: "checklist"
+        case .rhythm: "gauge.with.dots.needle.33percent"
+        case .voice: "waveform"
+        }
+    }
+
+    var tabHelp: String? {
+        switch self {
+        case .general: "运行状态、基础开关与默认人格"
+        case .trigger: "群聊触发方式与关键词"
+        case .interaction: "唤醒窗口与拍一拍回复"
+        case .lists: "白名单与黑名单"
+        case .rhythm: "频率、工作时间与拟人化"
+        case .voice: "语音转写、TTS 与音色"
+        }
+    }
+}
+
+/// 机器人：状态、策略、名单、节奏与语音，按子栏目组织，减少单页滚动。
 struct BotView: View {
     @Environment(AppStore.self) private var store
     @Environment(ToastCenter.self) private var toast
+
+    /// 子栏目选择按窗口记忆：切到别的页面再回来仍停留在上次的分栏。
+    @SceneStorage("bot.subTab") private var selectedTabID: String = BotTab.general.rawValue
 
     @State private var newKeyword = ""
 
@@ -11,29 +60,83 @@ struct BotView: View {
     private static let wakeWindowPresets = [1, 3, 5, 10, 30, 60]
 
     var body: some View {
-        ScrollingPage(title: "机器人", subtitle: subtitle) {
-            Button(L("保存设置")) {
-                store.persist()
-                toast.show("机器人设置已保存", tone: .success)
+        VStack(spacing: 0) {
+            GlassToolbar(title: "机器人", subtitle: subtitle) {
+                Button(L("保存设置")) {
+                    store.persist()
+                    toast.show("机器人设置已保存", tone: .success)
+                }
+                .buttonStyle(.glass)
+
+                Button {
+                    toggleBot()
+                } label: {
+                    Label(L(store.isBotRunning ? "停止" : "启动"), systemImage: store.isBotRunning ? "stop.fill" : "play.fill")
+                }
+                .buttonStyle(.glassProminent)
+                .tint(store.isBotRunning ? Theme.danger : Theme.accent)
             }
-            .buttonStyle(.glass)
-            Button {
-                toggleBot()
-            } label: {
-                Label(L(store.isBotRunning ? "停止" : "启动"), systemImage: store.isBotRunning ? "stop.fill" : "play.fill")
+
+            // 分栏条不随内容滚动，始终可切换；`.id(selectedTab)` 让切换后回到顶部。
+            PageTabBar(tabs: BotTab.allCases, selection: selectedTabBinding)
+                .accessibilityLabel(L("机器人子栏目"))
+                .padding(.horizontal, Theme.pagePadding)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
+                    tabContent
+                }
+                .padding(Theme.pagePadding)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.glassProminent)
-            .tint(store.isBotRunning ? Theme.danger : Theme.accent)
-        } content: {
+            .id(selectedTab)
+            .scrollIndicators(.automatic)
+        }
+        .background(PageBackground())
+        .onAppear {
+            // 子栏目 key 被外部改坏时回落到「常规」，避免停留在空白分栏。
+            if BotTab(rawValue: selectedTabID) == nil {
+                selectedTabID = BotTab.general.rawValue
+            }
+        }
+        .onDisappear { store.persist() }
+    }
+
+    // MARK: Sub-tabs
+
+    private var selectedTab: BotTab {
+        BotTab(rawValue: selectedTabID) ?? .general
+    }
+
+    private var selectedTabBinding: Binding<BotTab> {
+        Binding(
+            get: { selectedTab },
+            set: { selectedTabID = $0.rawValue }
+        )
+    }
+
+    @ViewBuilder
+    private var tabContent: some View {
+        switch selectedTab {
+        case .general:
             heroCard
-            replyStrategyCard
+            basicsCard
+            defaultPersonaCard
+        case .trigger:
+            groupTriggerCard
+        case .interaction:
+            wakeAndPatCard
+        case .lists:
             allowListCard
+        case .rhythm:
             limitsCard
             workingHoursCard
             humanizeCard
-            defaultPersonaCard
+        case .voice:
+            VoiceSettingsPanel()
         }
-        .onDisappear { store.persist() }
     }
 
     // MARK: Hero
@@ -99,13 +202,13 @@ struct BotView: View {
         }
     }
 
-    // MARK: Reply strategy
+    // MARK: Basics
 
-    private var replyStrategyCard: some View {
+    private var basicsCard: some View {
         SectionCard(
-            title: "回复策略",
-            subtitle: "何时回复、回复谁",
-            symbol: "arrowshape.turn.up.left.fill",
+            title: "基础开关",
+            subtitle: "演练模式、私聊与忽略规则",
+            symbol: "power",
             tint: Theme.info
         ) {
             VStack(spacing: 0) {
@@ -134,148 +237,6 @@ struct BotView: View {
                 }
                 SettingsDivider()
                 SettingsRow(
-                    title: "群聊触发方式",
-                    subtitle: "可多选；「所有消息」与其他方式互斥；「引用机器人」= 别人引用机器人发的消息时唤醒",
-                    symbol: "person.3.fill",
-                    tint: Theme.violet
-                ) {
-                    HStack(spacing: 6) {
-                        ForEach(TriggerMode.groupOptions) { mode in
-                            FilterChip(
-                                title: mode.groupLabel,
-                                isSelected: selectedGroupTriggers.contains(mode),
-                                tint: mode == .always ? Theme.warning : Theme.violet
-                            ) {
-                                toggleGroupTrigger(mode)
-                            }
-                            .help(mode == .quote
-                                  ? L("引用机器人：别人引用机器人发的消息时唤醒机器人（正文无需 @ 或关键词）")
-                                  : "")
-                        }
-                    }
-                }
-                SettingsDivider()
-                SettingsRow(
-                    title: "唤醒后免唤醒词",
-                    subtitle: "群聊被唤醒后，同一发送者在此时长内继续发言无需再次 @ / 关键词 / 引用；仅群聊生效",
-                    symbol: "hourglass",
-                    tint: Theme.info
-                ) {
-                    Toggle(L("唤醒后免唤醒词"), isOn: wakeWindowBinding)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                }
-                if store.settings.bot.wakeWindowEnabled {
-                    VStack(alignment: .leading, spacing: 9) {
-                        HStack {
-                            Text(L("窗口时长"))
-                                .font(.callout)
-                            Spacer()
-                            Text(Lf("%d 分钟", wakeWindowMinutes))
-                                .font(.callout.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                        Slider(value: wakeWindowSliderBinding, in: 1...60, step: 1)
-                            .tint(Theme.info)
-                            .accessibilityLabel(L("唤醒后免唤醒词"))
-                            .accessibilityValue(Lf("%d 分钟", wakeWindowMinutes))
-                        HStack(spacing: 5) {
-                            ForEach(Self.wakeWindowPresets, id: \.self) { minutes in
-                                FilterChip(
-                                    title: Lf("%d 分钟", minutes),
-                                    isSelected: wakeWindowMinutes == minutes,
-                                    tint: Theme.info
-                                ) {
-                                    setWakeWindowMinutes(minutes)
-                                }
-                            }
-                            Spacer(minLength: 0)
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                }
-                SettingsDivider()
-                SettingsRow(
-                    title: "拍一拍回复",
-                    subtitle: "别人拍机器人时，发送自定义文字和/或 AI 回复，可 @ 拍的人；不再回拍。",
-                    symbol: "hand.tap.fill",
-                    tint: Theme.info
-                ) {
-                    Toggle(L("拍一拍回复"), isOn: patReplyBinding)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                }
-                if store.settings.bot.patReplyEnabled {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Toggle(L("发送自定义文字"), isOn: patFixedTextBinding)
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                        if store.settings.bot.patFixedTextEnabled {
-                            VStack(alignment: .leading, spacing: 8) {
-                                TextField(L("AI 前文字（留空不发送）"), text: patBeforeTextBinding)
-                                TextField(L("AI 后文字（留空不发送）"), text: patAfterTextBinding)
-                                Text(L("自定义文字支持 {name} 占位符（替换为对方昵称）。"))
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .textFieldStyle(.roundedBorder)
-                        }
-                        Toggle(L("附带 AI 回复"), isOn: patAIBinding)
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                        Toggle(L("群聊被拍后 @ 拍的人"), isOn: patMentionBinding)
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                        if store.settings.bot.patMentionPatterEnabled {
-                            Text(L("仅群聊生效；@ 附在第一条回复前（自定义前文字 → AI 首段 → 自定义后文字）。bridge 解析不到群昵称时按普通文本发送。"))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                        if store.settings.bot.patFixedTextEnabled || store.settings.bot.patAIEnabled {
-                            Text(L("发送顺序：自定义文字（前）→ AI 回复 → 自定义文字（后）；AI 失败时仍发送文字。"))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                }
-                SettingsDivider()
-                VStack(alignment: .leading, spacing: 7) {
-                    HStack {
-                        Text(L("群聊关键词"))
-                            .font(.callout)
-                        Spacer()
-                        Text(L(groupKeywordEnabled ? "已启用「关键词」触发" : "勾选「关键词」后生效"))
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                    FlowLayout(spacing: 5, lineSpacing: 5) {
-                        ForEach(store.settings.bot.keywords, id: \.self) { keyword in
-                            TagChip(title: keyword, tint: Theme.info) {
-                                removeKeyword(keyword)
-                            }
-                        }
-                    }
-                    HStack(spacing: 6) {
-                        TextField(L("添加关键词，例如 AI"), text: $newKeyword)
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit { addKeyword() }
-                            .frame(maxWidth: 220)
-                        Button(L("添加"), action: addKeyword)
-                            .buttonStyle(.glass)
-                            .controlSize(.small)
-                            .disabled(newKeyword.trimmingCharacters(in: .whitespaces).isEmpty)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-
-                SettingsDivider()
-                SettingsRow(
                     title: "忽略自己发送的消息",
                     subtitle: "防止机器人回复自己，建议保持开启",
                     symbol: "person.crop.circle.badge.xmark",
@@ -300,6 +261,176 @@ struct BotView: View {
                 }
             }
         }
+    }
+
+    // MARK: Trigger
+
+    private var groupTriggerCard: some View {
+        SectionCard(
+            title: "群聊触发",
+            subtitle: "可多选；「所有消息」与其他方式互斥；「引用机器人」= 别人引用机器人发的消息时唤醒",
+            symbol: "person.3.fill",
+            tint: Theme.violet
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                FlowLayout(spacing: 6, lineSpacing: 6) {
+                    ForEach(TriggerMode.groupOptions) { mode in
+                        FilterChip(
+                            title: mode.groupLabel,
+                            isSelected: selectedGroupTriggers.contains(mode),
+                            tint: mode == .always ? Theme.warning : Theme.violet
+                        ) {
+                            toggleGroupTrigger(mode)
+                        }
+                        .help(mode == .quote
+                              ? L("引用机器人：别人引用机器人发的消息时唤醒机器人（正文无需 @ 或关键词）")
+                              : "")
+                    }
+                }
+
+                Divider().opacity(0.5)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Text(L("群聊关键词"))
+                            .font(.callout.weight(.medium))
+                        Spacer()
+                        Text(L(groupKeywordEnabled ? "已启用「关键词」触发" : "勾选「关键词」后生效"))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    if !store.settings.bot.keywords.isEmpty {
+                        FlowLayout(spacing: 5, lineSpacing: 5) {
+                            ForEach(store.settings.bot.keywords, id: \.self) { keyword in
+                                TagChip(title: keyword, tint: Theme.info) {
+                                    removeKeyword(keyword)
+                                }
+                            }
+                        }
+                    }
+                    HStack(spacing: 6) {
+                        TextField(L("添加关键词，例如 AI"), text: $newKeyword)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { addKeyword() }
+                            .frame(maxWidth: 220)
+                        Button(L("添加"), action: addKeyword)
+                            .buttonStyle(.glass)
+                            .controlSize(.small)
+                            .disabled(newKeyword.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Wake window & pat reply
+
+    private var wakeAndPatCard: some View {
+        SectionCard(
+            title: "唤醒与互动",
+            subtitle: "被唤醒后的免唤醒窗口与拍一拍回复",
+            symbol: "hand.tap.fill",
+            tint: Theme.info
+        ) {
+            VStack(spacing: 0) {
+                SettingsRow(
+                    title: "唤醒后免唤醒词",
+                    subtitle: "群聊被唤醒后，同一发送者在此时长内继续发言无需再次 @ / 关键词 / 引用；仅群聊生效",
+                    symbol: "hourglass",
+                    tint: Theme.info
+                ) {
+                    Toggle(L("唤醒后免唤醒词"), isOn: wakeWindowBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                if store.settings.bot.wakeWindowEnabled {
+                    wakeWindowEditor
+                }
+                SettingsDivider()
+                SettingsRow(
+                    title: "拍一拍回复",
+                    subtitle: "别人拍机器人时，发送自定义文字和/或 AI 回复，可 @ 拍的人；不再回拍。",
+                    symbol: "hand.tap.fill",
+                    tint: Theme.info
+                ) {
+                    Toggle(L("拍一拍回复"), isOn: patReplyBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                if store.settings.bot.patReplyEnabled {
+                    patReplyEditor
+                }
+            }
+        }
+    }
+
+    private var wakeWindowEditor: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text(L("窗口时长"))
+                    .font(.callout)
+                Spacer()
+                Text(Lf("%d 分钟", wakeWindowMinutes))
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: wakeWindowSliderBinding, in: 1...60, step: 1)
+                .tint(Theme.info)
+                .accessibilityLabel(L("唤醒后免唤醒词"))
+                .accessibilityValue(Lf("%d 分钟", wakeWindowMinutes))
+            HStack(spacing: 5) {
+                ForEach(Self.wakeWindowPresets, id: \.self) { minutes in
+                    FilterChip(
+                        title: Lf("%d 分钟", minutes),
+                        isSelected: wakeWindowMinutes == minutes,
+                        tint: Theme.info
+                    ) {
+                        setWakeWindowMinutes(minutes)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private var patReplyEditor: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle(L("发送自定义文字"), isOn: patFixedTextBinding)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            if store.settings.bot.patFixedTextEnabled {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField(L("AI 前文字（留空不发送）"), text: patBeforeTextBinding)
+                    TextField(L("AI 后文字（留空不发送）"), text: patAfterTextBinding)
+                    Text(L("自定义文字支持 {name} 占位符（替换为对方昵称）。"))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .textFieldStyle(.roundedBorder)
+            }
+            Toggle(L("附带 AI 回复"), isOn: patAIBinding)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            Toggle(L("群聊被拍后 @ 拍的人"), isOn: patMentionBinding)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            if store.settings.bot.patMentionPatterEnabled {
+                Text(L("仅群聊生效；@ 附在第一条回复前（自定义前文字 → AI 首段 → 自定义后文字）。bridge 解析不到群昵称时按普通文本发送。"))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            if store.settings.bot.patFixedTextEnabled || store.settings.bot.patAIEnabled {
+                Text(L("发送顺序：自定义文字（前）→ AI 回复 → 自定义文字（后）；AI 失败时仍发送文字。"))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
     }
 
     // MARK: Allow / deny lists

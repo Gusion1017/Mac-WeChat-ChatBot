@@ -175,6 +175,13 @@ final class ChatEngine: @unchecked Sendable {
             + "那是被引用图片的画面描述，不是本轮的新内容。"
             + "如果写成「（引用的图片内容暂不可用）」，说明系统没有拿到该图片的内容，"
             + "不要凭空猜测图片里有什么。")
+        systemLines.append("语音消息的格式为「[语音 Ns] 转写内容」，括号内是语音时长；"
+            + "「（识别可能不准确）」表示转写置信度较低，理解有偏差时以常识为准。"
+            + "「[语音，转写失败]」表示这条语音没有拿到转写内容，不要编造对方说了什么。")
+        systemLines.append("引用语音时，消息末尾会附「（引用语音内容：…）」；"
+            + "那是被引用语音的转写，不是本轮的新内容。"
+            + "如果写成「（引用的语音转写暂不可用）」，说明系统没有拿到该语音的转写，"
+            + "不要凭空猜测语音内容。")
         let note = conversation.note.trimmingCharacters(in: .whitespacesAndNewlines)
         if !note.isEmpty {
             systemLines.append("关于此会话的长期记忆：\(note)")
@@ -248,6 +255,12 @@ final class ChatEngine: @unchecked Sendable {
     }
 
     static func promptText(for message: ChatMessage) -> String {
+        // 语音消息优先用转写结果：桥接正文只有 `[语音]` 占位，直接返回它会让模型
+        // 完全不知道对方说了什么。格式：`[语音 5s] <转写>`；低置信度追加提示；
+        // 转写失败明确写「转写失败」，禁止模型编造内容。
+        if message.kind == .voice {
+            return voicePromptText(for: message)
+        }
         let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty {
             // 图片可能同时带文字；有识图描述时追加，让引用/历史上下文里的图片内容仍可见。
@@ -270,6 +283,40 @@ final class ChatEngine: @unchecked Sendable {
         case .system: return ""
         case .text: return ""
         }
+    }
+
+    /// 语音消息进入提示词的文本（2026-10-26）。
+    ///
+    /// - 已转写：`[语音 5s] 转写内容`；置信度低于 0.6 时追加「（识别可能不准确）」；
+    /// - 转写失败：`[语音，转写失败]`（明确告知，避免模型猜测语音内容）；
+    /// - 转写中/已关闭/静音：只给 `[语音 5s]` 标签（`[语音]` 无时长时）。
+    static func voicePromptText(for message: ChatMessage) -> String {
+        let label = VoiceTranscriptionService.voiceLabel(durationMs: message.voiceDurationMs)
+        switch message.voiceTranscriptState {
+        case .failed:
+            return "[语音，转写失败]"
+        case .pending, .disabled:
+            return label
+        case .done, .none:
+            guard let transcript = normalizedVoiceTranscript(message) else { return label }
+            if VoiceTranscriptionService.isLowConfidence(message.voiceTranscriptConfidence) {
+                return "\(label) \(transcript)（识别可能不准确）"
+            }
+            return "\(label) \(transcript)"
+        }
+    }
+
+    /// 语音转写文本（去空白）；兼容旧数据把转写写在 `text` 里。
+    /// 桥接占位 `[语音]` / `[语音 5s]` 视为「没有内容」。
+    static func normalizedVoiceTranscript(_ message: ChatMessage) -> String? {
+        if let raw = message.voiceTranscript {
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { return value }
+        }
+        let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        if text == "[语音]" || text.hasPrefix("[语音 ") { return nil }
+        return text
     }
 
     /// 图片的识图描述（去空白）；空字符串视为没有描述。
@@ -551,7 +598,10 @@ final class ChatEngine: @unchecked Sendable {
                 : memory.summary
         }
 
-        let transcript = Self.transcript(for: overflow.messages)
+        let transcript = Self.transcript(
+            for: overflow.messages,
+            includeVoiceTranscripts: settings.bot.voiceSettings.saveTranscriptToMemory
+        )
         guard !transcript.isEmpty else {
             try? await memory.markMemorySummarized(
                 conversationID: conversation.id,
@@ -671,13 +721,21 @@ final class ChatEngine: @unchecked Sendable {
         }
     }
 
-    static func transcript(for messages: [ChatMessage]) -> String {
+    static func transcript(for messages: [ChatMessage], includeVoiceTranscripts: Bool = true) -> String {
         var lines: [String] = []
         var total = 0
         for message in messages where message.direction != .system {
-            guard let text = Optional(Self.promptText(for: message)), !text.isEmpty else { continue }
+            let content: String
+            if message.kind == .voice, !includeVoiceTranscripts {
+                // 用户关闭「转写写入记忆」时，长期总结只保留 [语音 Ns] 标签，
+                // 不把转写原文沉淀进记忆库（即时回复上下文仍可用转写）。
+                content = VoiceTranscriptionService.voiceLabel(durationMs: message.voiceDurationMs)
+            } else {
+                content = Self.promptText(for: message)
+            }
+            guard !content.isEmpty else { continue }
             let who = message.direction == .outgoing ? "我" : (message.senderName.isEmpty ? "对方" : message.senderName)
-            let line = "\(who)：\(text)"
+            let line = "\(who)：\(content)"
             if total + line.count > 6_000 { break }
             lines.append(line)
             total += line.count + 1

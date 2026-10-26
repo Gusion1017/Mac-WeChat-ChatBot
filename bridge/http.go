@@ -47,6 +47,7 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 	sendContent := ""
 	atUserID := ""
 	var resultChans []chan error
+	var voiceDurations []int
 	for _, v := range req.Message {
 		if v.Type == "text" {
 			sendContent += v.Data.Text
@@ -57,6 +58,21 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 				atUserID += v.Data.QQ + ","
 			}
 
+		} else if (v.Type == "voice" || v.Type == "record") && v.Data != nil && strings.TrimSpace(v.Data.PCM16K) != "" {
+			// 语音发送契约（_local/voice-impl-spec.md §3.3）：优先复用
+			// /send_private_msg 的 voice 段，data.pcm16k 是 base64 的 16k 单声道 s16le
+			// PCM，bridge 用 go-silk 编码 Tencent SILK（不依赖 ffmpeg/pilk）。
+			// Hook 未支持语音发送时返回 {"ok":false,"error":"voice_send_unsupported"}，
+			// App 据此自动降级为文字；语音段同步处理，不经过发送 worker。
+			durationMs, voiceErr := sendVoicePCM16k(req.UserID, req.GroupID, v.Data.PCM16K, v.Data.DurationMs)
+			if voiceErr != nil {
+				writeVoiceJSON(w, http.StatusOK, map[string]any{
+					"ok":    false,
+					"error": voiceSendErrorCode(voiceErr),
+				})
+				return
+			}
+			voiceDurations = append(voiceDurations, durationMs)
 		} else if v.Type == "image" || v.Type == "video" || v.Type == "record" || v.Type == "voice" || v.Type == "file" {
 			msgType := v.Type
 			if msgType == "record" || msgType == "voice" {
@@ -178,6 +194,17 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+	}
+
+	// 只含语音段的请求：语音已同步处理完（编码/上传触发），按 §3.3 的
+	// {ok:true,duration_ms} 响应；若同一请求还带文本段，文本仍走上面的 worker。
+	if len(voiceDurations) > 0 {
+		writeVoiceJSON(w, http.StatusOK, map[string]any{
+			"ok":          true,
+			"status":      "ok",
+			"duration_ms": voiceDurations[len(voiceDurations)-1],
+		})
+		return
 	}
 
 	json.NewEncoder(w).Encode(map[string]any{

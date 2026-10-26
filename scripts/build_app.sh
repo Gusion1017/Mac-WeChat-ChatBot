@@ -23,6 +23,12 @@ if [ "${SWIFT_DISABLE_SANDBOX:-0}" = "1" ]; then
   say "SwiftPM sandbox disabled (SWIFT_DISABLE_SANDBOX=1)"
 fi
 
+# TTS 静态库（sherpa-onnx，spec §3.1）。app/Vendor 不入库；缺库时按需下载。
+if ! bash "$ROOT_DIR/scripts/fetch_sherpa.sh" --check >/dev/null 2>&1; then
+  say "sherpa-onnx static libs missing; fetching (network)…"
+  bash "$ROOT_DIR/scripts/fetch_sherpa.sh" || fail "sherpa-onnx fetch failed (run scripts/fetch_sherpa.sh)"
+fi
+
 say "compiling SwiftUI app (release)"
 cd "$ROOT_DIR/app"
 swift build -c release --scratch-path "$SCRATCH" $SWIFT_EXTRA_FLAGS
@@ -82,6 +88,13 @@ cp "$ROOT_DIR/tools/install_gadget.sh" "$RES/tools/install_gadget.sh"
 chmod +x "$RES/tools/manage_wechat.sh" "$RES/tools/install_gadget.sh"
 cp "$ROOT_DIR/LICENSE" "$RES/LICENSE" 2>/dev/null || true
 cp "$ROOT_DIR/ThirdPartyNotices.txt" "$RES/ThirdPartyNotices.txt" 2>/dev/null || true
+# 第三方许可全文：随二进制分发（Apache-2.0 / SILK SDK / Frida wxWindows 等）。
+if [ -d "$ROOT_DIR/LICENSES" ]; then
+  mkdir -p "$RES/LICENSES"
+  cp "$ROOT_DIR"/LICENSES/* "$RES/LICENSES/" 2>/dev/null || true
+else
+  say "WARNING: LICENSES/ missing; binary may violate third-party license terms"
+fi
 # GPL 合规：bridge 是上游衍生，随包附带 NOTICE 与上游许可证。
 cp "$ROOT_DIR/bridge/NOTICE" "$RES/bridge/NOTICE" 2>/dev/null || true
 cp "$ROOT_DIR/bridge/LICENSE" "$RES/bridge/LICENSE" 2>/dev/null || true

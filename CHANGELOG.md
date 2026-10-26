@@ -6,8 +6,34 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-10-26
+
 ### 新增
 
+- **首启向导环境检查：CLT 检测与安装引导 + Hook 预检（2026-10-26）**：首启向导与「设置 → Hook」
+  新增环境检查卡，显示 Xcode Command Line Tools 状态（已安装 / 未安装 / 检测中 / 检测失败），
+  提供「安装 Command Line Tools」（执行 `xcode-select --install`）与「重新检测」；安装完成后自动轮询刷新。
+  CLT 未就绪时禁用「备份并安装 Hook」并说明原因；Hook 预检（CLT / 微信版本 / 运行状态）
+  在进入备份与注入前返回可行动错误，避免安装到一半才失败。CLT 仅用于 `/usr/bin/python3` 与
+  `/usr/bin/otool`，不需要 Apple 开发者账号。
+- **语音能力：本地转写 + 本地 TTS/克隆（2026-10-26）**：新增入站语音事件归一化
+  （`[语音]` → `{"type":"voice","data":{"duration_ms":N}}`）、`POST /fetch_voice`（AES 解密 +
+  SILK 校验 + 16k WAV）、Apple `SpeechAnalyzer` 本地转写（气泡/上下文/记忆/引用语音，可关闭）、
+  `POST /send_voice`（官方 SILK SDK 静态编码，无 ffmpeg/pilk 运行时依赖）、sherpa-onnx 静态链接 + Kokoro/ZipVoice
+  本地 TTS 与克隆音色、语音时长/概率/对等/每会话设置及失败自动降级文字。模型按需下载
+  （Kokoro≈365MB、ZipVoice≈109MB、vocoder≈54MB），音频/转写/参考音频均只存本机。
+  **真机验证（2026-10-26，4.2.0.5）**：入站语音下载使用 `triggerDownload(fileType=15)`，3 条真实
+  语音全部成功解密/解码；出站走官方 SILK SDK（`silk-v3-decoder`，`-tencent`，24kHz）编码 + CDN 上传 +
+  R3 `uploadvoice` 任务（opcode 0x7F），TTS 5.1s 语音在测试账号正常播放、内容正确、可停止。
+  go-silk 输出能被自身解码但微信无声，是本次定位的关键。
+  **使用限制**：首次启用或微信重启后需手动发一条文字 + 一条语音捕获句柄；bridge 启动 60 秒内
+  CdnManager 未就绪时会降级文字。Swift 304 项测试通过；Go 测试通过（新增 `/voice_status` 与官方
+  SILK 编码依赖）。
+- **语音转写修复 + 语音设置移入机器人页（2026-10-26）**：系统语音资源状态为
+  `supported` 时 App 原先误判为不可用；现在 `.supported` 也会实际尝试转写，并在
+  语音设置中提供「下载中文语音资源」按钮（直接调用 `AssetInventory`，无需手动去
+  系统设置）。完整语音设置面板同时加入「机器人」页，设置页的「语音」分类复用同一面板；
+  会话详情里冗余的「语音转写/语音回复/回复概率」覆盖已移除，统一使用机器人页的全局设置。
 - **引用图片时让 AI 知道是哪张图（2026-10-23）**：微信引用消息只带 `<svrid>` 与 `[图片]` 摘要，
   回复模型看不到被引用图片。现在解析 refermsg 的 `svrid`（与 `ChatMessage.id` 的
   `ob-<svrid>` 精确对应），生成回复前按 ID 找回原图：已有识图描述直接复用；尚未描述但
@@ -102,6 +128,22 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ### 变更
 
+- **第三方许可合规与仓库清洁（2026-10-26）**：新增 `LICENSES/`（Apache-2.0、MIT、BSD-3-Clause、
+  ISC、Frida wxWindows Library Licence 3.1、Skype SILK SDK），并在打包时随 App 分发；修正
+  `ThirdPartyNotices.txt` 中 SILK SDK（Skype 许可，而非 MIT）、Frida（wxWindows 3.1，而非 LGPL）、
+  go-silk（BSD-3-Clause）、Vocos（MIT）等表述；`bridge/testdata` 补充合成样本出处与 SHA256；
+  `.gitignore` 补齐音频/模型规则，`.gitattributes` 标记 vendored 源码与二进制；移除公开文件中
+  的本机研究目录引用。
+- **安装文档修正（2026-10-26）**：重写 `README.md` 与 `docs/install.md` 的环境要求与安装步骤，
+  补充 Xcode Command Line Tools 前置与 `xcode-select --install`、macOS 15+（含 26）已取消
+  「右键 → 打开」后的正确 Gatekeeper 流程（系统设置 → 隐私与安全性 → 仍要打开，或
+  `xattr -dr com.apple.quarantine`，区分 `~/Applications` 与 `/Applications` 两种路径）、
+  默认显示 Dock 图标、App 数据/App 管理授权、微信版本与属主/写权限、备份约 665MB 与磁盘 ≥2.5GB、
+  R3 首次手发消息、还原入口与语音模型约 528MB；`docs/README.md` 索引描述同步。
+- **机器人页拆分子栏目（2026-10-26）**：机器人页由单页长列表改为 6 个子栏目
+  （常规 / 触发 / 互动 / 名单 / 节奏 / 语音），工具栏下方新增 sticky 分栏条（`PageTabBar`），
+  切换子栏目时内容回到顶部，子栏目选择按窗口记忆（`@SceneStorage`）。
+  「保存设置」与启动/停止仍在页面顶部；所有设置项、默认值与存储结构不变。
 - **「获取图片」改为按会话设置（2026-10-23）**：删除设置页的全局开关，改为
   `Conversation.imageFetchEnabled`（会话详情 → 菜单 →「媒体」）；数据库 `conversations`
   新增 `image_fetch_enabled INTEGER`（NULL=跟随旧全局默认、0=关、1=开，启动时幂等补列）。
@@ -135,6 +177,10 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - **发布打包**：新增 `scripts/package_release.sh`（构建 + 校验签名 + 生成
   `dist/WeChat-AI-<version>.zip` / `.sha256`）与 `make release`；
   `build_app.sh` 随包附带 `bridge/NOTICE` 与上游许可证，满足 GPL 合规。
+- **发布 1.3.0（build 11，2026-10-26）**：发布包约 71MB；构建按
+  `fetch_gadget → build_bridge → fetch_sherpa → build_app → package_release` 顺序执行，
+  产出 `dist/WeChat-AI-1.3.0.zip` 与 `.sha256`（`shasum -a 256 -c` 校验）。
+  README 下载链接、体积与测试数字同步为 v1.3.0；旧 `dist/WeChat-AI-1.2.5.zip` 不再作为发布包。
 - **GitHub 仓库配置**：本地研究证据（截图 / 数据库备份 / 探针日志）移出仓库；新增
   `.github/release.yml` 与 Linux CI 仓库卫生检查（阻止构建产物、日志、DB、截图入库）。
 
@@ -330,7 +376,8 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.2.4...HEAD
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.3.0
 [1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.0
