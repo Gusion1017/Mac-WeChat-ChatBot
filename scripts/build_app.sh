@@ -40,6 +40,11 @@ say "assembling $APP_NAME.app"
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 cp "$EXECUTABLE" "$BUNDLE/Contents/MacOS/WeChatAI"
+
+# 移除 release 二进制里的 DWARF/调试符号，避免把编译机的绝对源码路径
+# （/Users/<user>/.../WeChatAI.build/.../*.o）带进发布包，泄露本地用户名与目录。
+# strip 之后必须重新签名（下方 codesign 会统一处理整个 bundle）。
+/usr/bin/strip -S "$BUNDLE/Contents/MacOS/WeChatAI" || fail "strip app executable failed"
 cp "$ROOT_DIR/app/Packaging/Info.plist" "$BUNDLE/Contents/Info.plist"
 cp "$ROOT_DIR/assets/AppIcon.icns" "$BUNDLE/Contents/Resources/AppIcon.icns"
 

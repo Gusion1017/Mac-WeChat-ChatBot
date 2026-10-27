@@ -243,7 +243,8 @@ enum AppResources {
         add(Bundle.main.bundleURL, ancestors: 8)
         add(URL(fileURLWithPath: CommandLine.arguments.first ?? "").deletingLastPathComponent(), ancestors: 8)
         add(URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true), ancestors: 8)
-        add(URL(fileURLWithPath: #filePath).deletingLastPathComponent(), ancestors: 8)
+        // 不要使用 #filePath：Swift 会把编译机的绝对路径嵌入二进制，泄露本地用户名/目录。
+        // Bundle、进程参数与当前目录已覆盖打包运行与源码运行两种入口。
         return roots
     }
 }
