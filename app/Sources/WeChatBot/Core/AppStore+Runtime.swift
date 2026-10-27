@@ -61,6 +61,13 @@ enum RuntimeBootstrap {
 
 // MARK: - Coordinator
 
+/// 一次回复计划投递的结果：成功段数与实际等待的拟人化延迟。
+/// 语音回复默认跳过拟人化延迟，日志用 `appliedDelayMs = 0` 如实反映。
+private struct PlanDeliveryOutcome {
+    var sentCount: Int
+    var appliedDelayMs: Int
+}
+
 /// Owns all long-lived services and the event pipeline:
 /// OneBot event → conversation/message persistence → RuleEngine → ChatEngine → send.
 @MainActor
@@ -2386,13 +2393,14 @@ final class RuntimeCoordinator {
             return
         }
 
-        let sentCount = await sendPlanSegments(plan, conversation: conversation, mention: mention, incomingWasVoice: incomingWasVoice)
+        let outcome = await sendPlanSegments(plan, conversation: conversation, mention: mention, incomingWasVoice: incomingWasVoice)
 
-        guard sentCount > 0 else {
+        guard outcome.sentCount > 0 else {
             failReplyProgress(conversationID: conversation.id, error: "消息发送失败，详见运行日志")
             return
         }
         let segmentCount = plan.segments.count
+        let sentCount = outcome.sentCount
         let note = sentCount == segmentCount
             ? "已发送 \(sentCount) 段"
             : "已发送 \(sentCount)/\(segmentCount) 段（部分失败）"
@@ -2402,19 +2410,21 @@ final class RuntimeCoordinator {
         store.stats.lastReplyAt = Date()
         recordReplyLatency(plan.latencyMs)
         let endToEndMs = Int(Date().timeIntervalSince(receivedAt) * 1000)
-        log(.info, "Bot", "回复投递完成：端到端 \(endToEndMs)ms（AI \(Int(plan.latencyMs))ms，拟人化 \(plan.delaysMs.first ?? 0)ms，bridge 环节见上一条）")
+        log(.info, "Bot", "回复投递完成：端到端 \(endToEndMs)ms（AI \(Int(plan.latencyMs))ms，拟人化 \(outcome.appliedDelayMs)ms，bridge 环节见上一条）")
         scheduleStatsPersist()
     }
 
-    /// 按拟人化设置发送一段 AI 回复计划，返回成功段数。
+    /// 按拟人化设置发送一段 AI 回复计划，返回成功段数与实际等待的拟人化延迟。
     /// 由普通回复和「拍一拍 AI 回复」共用，保留进度条阶段与分段延迟。
+    /// 本次确定改发语音时默认跳过拟人化延迟（可在语音设置中关闭），
+    /// 避免「TTS 合成 + 随机延迟」让用户等太久。
     /// `mention` 只作用于第一条真正发出的消息（拍一拍回复 @ 拍的人）。
     private func sendPlanSegments(
         _ plan: ChatReplyPlan,
         conversation: Conversation,
         mention: PatMention? = nil,
         incomingWasVoice: Bool = false
-    ) async -> Int {
+    ) async -> PlanDeliveryOutcome {
         let humanize = store.settings.bot.humanize
         let segmentCount = plan.segments.count
         var sentCount = 0
@@ -2441,9 +2451,19 @@ final class RuntimeCoordinator {
         } else if useVoice {
             log(.debug, "Voice", "本次回复改发语音：\(voiceDecision.reason)")
         }
+        // 语音回复免拟人化延迟：已确定语音后直接进入合成，不再等随机延迟。
+        // 关闭该设置时保持原节奏（`effectiveDelaysMs` 原样返回）。
+        let delaysMs = VoiceReplyPacing.effectiveDelaysMs(
+            plan.delaysMs,
+            useVoice: useVoice,
+            settings: voiceSettings
+        )
+        if useVoice, humanize.enabled, delaysMs != plan.delaysMs {
+            log(.debug, "Humanize", "语音回复跳过拟人化延迟 \(plan.delaysMs.first ?? 0)ms")
+        }
         for (index, segment) in plan.segments.enumerated() {
-            if humanize.enabled, index < plan.delaysMs.count, plan.delaysMs[index] > 0 {
-                let delaySeconds = Double(plan.delaysMs[index]) / 1000
+            if humanize.enabled, index < delaysMs.count, delaysMs[index] > 0 {
+                let delaySeconds = Double(delaysMs[index]) / 1000
                 updateReplyProgress(
                     conversationID: conversation.id,
                     stage: .waitingToSend,
@@ -2451,8 +2471,8 @@ final class RuntimeCoordinator {
                     segmentIndex: index + 1,
                     segmentCount: segmentCount
                 )
-                log(.debug, "Humanize", "分段 \(index + 1)/\(segmentCount) 延迟 \(plan.delaysMs[index])ms")
-                try? await Task.sleep(nanoseconds: UInt64(plan.delaysMs[index]) * 1_000_000)
+                log(.debug, "Humanize", "分段 \(index + 1)/\(segmentCount) 延迟 \(delaysMs[index])ms")
+                try? await Task.sleep(nanoseconds: UInt64(delaysMs[index]) * 1_000_000)
             }
             if humanize.enabled && humanize.typingIndicator && index == 0 {
                 log(.debug, "Humanize", "输入端「正在输入」指示由微信客户端展示，bridge 暂未暴露接口")
@@ -2480,7 +2500,7 @@ final class RuntimeCoordinator {
             }
             if sent { sentCount += 1 }
         }
-        return sentCount
+        return PlanDeliveryOutcome(sentCount: sentCount, appliedDelayMs: delaysMs.first ?? 0)
     }
 
     /// 别人拍一拍机器人后的回复：自定义文字（前）→ AI → 自定义文字（后）。
@@ -2545,7 +2565,7 @@ final class RuntimeCoordinator {
                     conversation: conversation,
                     mention: pendingMention
                 )
-                if sent > 0 {
+                if sent.sentCount > 0 {
                     pendingMention = nil
                     sentAny = true
                 }

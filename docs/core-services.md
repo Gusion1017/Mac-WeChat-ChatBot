@@ -107,7 +107,7 @@ RuntimeCoordinator.handle(event)
   3. BotStats.receivedToday++
   4. RuleEngine.evaluate（白/黑名单 → 触发方式 → 冷却/频率/工作时段）
   5. 命中：取 provider/persona → ChatEngine.generateReply（含重试、记忆召回）
-  6. ChatReplyPlan：按拟人化延迟/分段逐条 HTTP 发送
+  6. ChatReplyPlan：文字按拟人化延迟/分段逐条 HTTP 发送；已确定改发语音时默认跳过延迟
   7. 发送成功：消息状态 pending→sent、会话预览、冷却记账、统计/日志
 ```
 
@@ -119,7 +119,8 @@ RuntimeCoordinator.handle(event)
   `AppStore.replyProgress[conversationID]`（`ReplyProgress`，仅内存、不持久化）：
   - 进入 AI 请求前 → `.generating`（记录通道名 / 模型，UI 正向计时「已等待 N 秒」）；
   - 每段发送前若启用拟人化 → `.waitingToSend`，同时写入 `countdownEnd` / `countdownTotal`，
-    UI 据此渲染真实的「N 秒后发送」倒计时与收缩进度条；
+    UI 据此渲染真实的「N 秒后发送」倒计时与收缩进度条；本次已确定改发语音且开启
+    「语音回复免拟人化延迟」时跳过该阶段，直接进入 `.sending`；
   - 提交 OneBot HTTP 前 → `.sending`（UI 显示回执等待时长；R3 未就绪时由 UI 叠加提示）；
   - 投递完成 → `.completed`（约 3 秒后自动清理）；AI / 发送失败 → `.failed`（保留错误，可手动关闭，
     60 秒后兜底清理）。
@@ -383,6 +384,8 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 - 拟人化：`humanize.enabled && splitMessages` 时按句末标点/长度切分，
   合并过短片段，`maxSegments` 封顶，单段最长 600 字；每段随机延迟
   `[minDelayMs, maxDelayMs]`（`ChatReplyPlan.delaysMs`，由运行时执行）。
+  若本次确定改发语音且 `voice.skipHumanizeDelayForVoiceReply` 为真（默认），
+  运行时把延迟归零（`VoiceReplyPacing`），避免在 TTS 合成耗时之外再等一遍。
 - dry-run 时不分段/不延迟，只产出计划文本。
 - 长期记忆召回：只注入「当前会话 + 全局」记忆，核心记忆同样遵守作用域
   （其它会话的核心记忆不注入）；按核心 → 手写 → 自动总结的优先级、同层按**综合权重**降序，
@@ -519,17 +522,18 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 测试 target 位于 `app/Tests/WeChatAITests/`（`CoreServicesTests.swift`（48）、
 `SleepPreventionTests.swift`（9）、`MessageRoutingTests.swift`（12）、
 `NativeSendConfigTests.swift`（5）、`ConversationNameTests.swift`（8）、`WorkingHoursStatusTests.swift`（5）、
-`ContactDirectoryTests.swift`（15）、`PatMessageTests.swift`（20）、`PatReplySettingsTests.swift`（7）、
+`MenuBarClickTests.swift`（9）、`ContactDirectoryTests.swift`（15）、`PatMessageTests.swift`（20）、
+`PatReplySettingsTests.swift`（7）、
 `HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（26）、`AppmsgRoutingTests.swift`（20）、
 `WakeWindowTests.swift`（6）、`ImageFetchTests.swift`（16）、`OneBotEventParserTests.swift`（5）、
 `DataRepairTrustTests.swift`（2）、`VisionTests.swift`（12）、`SystemVitalsTests.swift`（16），
 以及 `VoiceReadTests` / `VoiceSynthesisTests` / `VoiceRuntimeStatusTests` / `VoiceCatalogTests` 等语音测试；
-2026-10-27 实测共 396 项）：
+2026-10-27 实测共 407 项）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 396 tests, with 8 skipped, 0 failures（2026-10-27）
+# Executed 407 tests, with 8 skipped, 0 failures（2026-10-27）
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值

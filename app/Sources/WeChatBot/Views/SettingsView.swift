@@ -212,11 +212,11 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
             SettingsSection(
                 title: "启动与窗口",
-                footer: "登录项需要 App 以 .app 形式安装后生效；Dock 图标切换会立即生效。关闭 Dock 图标后会保留菜单栏入口。"
+                footer: "登录项需要 App 以 .app 形式安装后生效；Dock 图标切换会立即生效。关闭 Dock 图标后会保留菜单栏入口（左键打开状态面板）。"
             ) {
                 SettingsRow(
                     title: "显示菜单栏图标",
-                    subtitle: "在菜单栏快速查看状态、启停机器人",
+                    subtitle: "左键打开状态面板",
                     symbol: "menubar.rectangle",
                     tint: Theme.accent
                 ) {

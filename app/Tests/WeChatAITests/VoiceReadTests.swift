@@ -359,6 +359,7 @@ final class VoiceReadTests: XCTestCase {
         XCTAssertEqual(voice.engine, .kokoro, "未知引擎回退默认")
         XCTAssertFalse(voice.modelDownloadConsent)
         XCTAssertTrue(voice.transcriptionEnabled, "缺失字段用默认值")
+        XCTAssertTrue(voice.skipHumanizeDelayForVoiceReply, "缺失字段用默认值：语音回复默认免拟人化延迟")
         XCTAssertEqual(voice.kokoroSpeakerID, 0)
     }
 
@@ -371,6 +372,7 @@ final class VoiceReadTests: XCTestCase {
         voice.replyEnabled = true
         voice.replyProbability = 0.42
         voice.mirrorIncomingVoice = true
+        voice.skipHumanizeDelayForVoiceReply = false
         voice.shortReplyOnly = false
         voice.shortReplyMaxChars = 120
         voice.maxVoiceSeconds = 45
@@ -605,11 +607,11 @@ final class VoiceReadTests: XCTestCase {
     func testPromptTextKeepsOutgoingVoiceUnlabelled() {
         // AI 自己的 TTS 语音回复也会进短期历史。如果它也带「[语音 Ns]」标注，
         // 模型会误以为这是自己的回复格式并照抄（真机复现：文字回复以「[语音 8s]」开头）。
-        var spoken = voiceMessage(transcript: nil, state: .disabled, durationMs: 9_680, text: "@老大爷 我在呢")
+        var spoken = voiceMessage(transcript: nil, state: .disabled, durationMs: 9_680, text: "@测试昵称 我在呢")
         spoken.direction = .outgoing
         spoken.senderID = "self"
         spoken.senderName = "我"
-        XCTAssertEqual(ChatEngine.promptText(for: spoken), "@老大爷 我在呢")
+        XCTAssertEqual(ChatEngine.promptText(for: spoken), "@测试昵称 我在呢")
 
         // 自消息回显只有桥接占位「[语音]」：整条跳过，不能变成只有标注的 assistant 轮次。
         var echo = voiceMessage(transcript: nil, state: .disabled, durationMs: 9_680, text: "[语音]")
@@ -734,6 +736,48 @@ final class VoiceReadTests: XCTestCase {
         // NaN rng 视为不命中，不崩溃。
         settings.replyProbability = 1
         XCTAssertFalse(decideVoiceReply(replyContext(global: settings, rng: .nan)).isVoice)
+    }
+
+    // MARK: - 12. 语音回复发送节奏
+
+    func testVoiceReplyPacingSkipsHumanizeDelayWhenVoice() {
+        let delays = [900, 1_200]
+        var settings = VoiceSettings()
+        XCTAssertTrue(settings.skipHumanizeDelayForVoiceReply, "默认开启免延迟")
+
+        XCTAssertEqual(
+            VoiceReplyPacing.effectiveDelaysMs(delays, useVoice: true, settings: settings),
+            [0, 0],
+            "已确定改发语音时不再等待拟人化延迟"
+        )
+        // 文字回复保持原有拟人化节奏。
+        XCTAssertEqual(
+            VoiceReplyPacing.effectiveDelaysMs(delays, useVoice: false, settings: settings),
+            delays
+        )
+        // 用户关闭优化后，语音回复也回到原节奏。
+        settings.skipHumanizeDelayForVoiceReply = false
+        XCTAssertEqual(
+            VoiceReplyPacing.effectiveDelaysMs(delays, useVoice: true, settings: settings),
+            delays
+        )
+        // 空计划与零延迟不产生额外元素。
+        XCTAssertEqual(
+            VoiceReplyPacing.effectiveDelaysMs([], useVoice: true, settings: settings),
+            []
+        )
+        XCTAssertEqual(
+            VoiceReplyPacing.effectiveDelaysMs([0], useVoice: true, settings: settings),
+            [0]
+        )
+    }
+
+    func testLegacyVoiceSettingsMissingSkipHumanizeDelayDefaultsOn() throws {
+        // 旧 config.json 的 voice 段没有该键：解码后按默认开启，升级后即享受该优化；
+        // 仍可在语音设置里关闭，回到原来的拟人化节奏。
+        let json = #"{"replyEnabled":true,"replyProbability":0.4}"#.data(using: .utf8)!
+        let settings = try JSONDecoder().decode(VoiceSettings.self, from: json)
+        XCTAssertTrue(settings.skipHumanizeDelayForVoiceReply)
     }
 }
 

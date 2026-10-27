@@ -5,8 +5,7 @@ import SwiftUI
 struct WeChatAIApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var store: AppStore
-    @State private var toastCenter = ToastCenter()
-    @State private var showMenuBar: Bool
+    @State private var toastCenter: ToastCenter
 
     init() {
         // 稳定性：布局安全阀必须早于任何 SwiftUI 场景 / AppKit 窗口出现，
@@ -24,9 +23,14 @@ struct WeChatAIApp: App {
 
         let store = AppStore()
         _store = State(initialValue: store)
-        _showMenuBar = State(initialValue: store.settings.general.showInMenuBar)
+        let toastCenter = ToastCenter()
+        _toastCenter = State(initialValue: toastCenter)
 
         attachStabilityHooks(to: store)
+        // 菜单栏不再使用 MenuBarExtra（无法区分左右键）：由 AppKit 状态栏条目承载，
+        // 左键开合 NSPopover 状态面板，右键不执行操作。这里注入依赖，
+        // AppDelegate 启动完成后再创建条目。
+        MenuBarController.shared.configure(store: store)
     }
 
     /// 把主线程现场快照与看门狗回调挂到会话 store 上。
@@ -70,17 +74,15 @@ struct WeChatAIApp: App {
     }
 
     var body: some Scene {
-        Window("WeChat AI", id: "main") {
+        Window("WeChat AI", id: MainWindowRegistry.mainWindowID) {
             RootView()
                 .syncActivationPolicy()
+                .captureMainWindowOpenAction()
                 .environment(store)
                 .environment(toastCenter)
                 .environment(\.locale, appLocale)
                 .frame(minWidth: 1100, minHeight: 720)
                 .background(Theme.pageGradient)
-                .onChange(of: store.settings.general.showInMenuBar) { _, newValue in
-                    showMenuBar = newValue
-                }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
@@ -98,9 +100,6 @@ struct WeChatAIApp: App {
                 .frame(minWidth: 880, minHeight: 640)
                 .toastOverlay()
                 .preferredColorScheme(colorScheme(for: store.settings.general.appearance))
-                .onChange(of: store.settings.general.showInMenuBar) { _, newValue in
-                    showMenuBar = newValue
-                }
                 // Environment modifiers must stay OUTERMOST on the Settings scene:
                 // `toastOverlay()` and `syncActivationPolicy()` are views too, and when
                 // `.environment(...)` was applied inside them the settings-window toast
@@ -110,30 +109,6 @@ struct WeChatAIApp: App {
                 .environment(store)
                 .environment(toastCenter)
         }
-
-        MenuBarExtra(
-            "WeChat AI",
-            systemImage: "bubble.left.and.bubble.right",
-            isInserted: menuBarInserted
-        ) {
-            MenuBarView()
-                .environment(store)
-                .environment(toastCenter)
-                .environment(\.locale, appLocale)
-        }
-        .menuBarExtraStyle(.window)
-    }
-
-    private var menuBarInserted: Binding<Bool> {
-        Binding(
-            get: { showMenuBar },
-            set: { newValue in
-                guard showMenuBar != newValue else { return }
-                showMenuBar = newValue
-                store.settings.general.showInMenuBar = newValue
-                store.persist()
-            }
-        )
     }
 
     private var appLocale: Locale {

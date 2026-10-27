@@ -38,6 +38,8 @@ final class CosyVoiceTests: XCTestCase {
         // Kokoro 默认语速改为 1.25（三档快捷的中间档）。
         XCTAssertEqual(settings.kokoroSpeed, 1.25, accuracy: 0.0001)
         XCTAssertEqual(settings.effectiveKokoroSpeed, 1.25, accuracy: 0.0001)
+        // 语音回复默认跳过拟人化延迟。
+        XCTAssertTrue(settings.skipHumanizeDelayForVoiceReply)
     }
 
     func testLegacyVoiceSettingsJSONWithoutNewKeysUsesDefaults() throws {
@@ -61,6 +63,7 @@ final class CosyVoiceTests: XCTestCase {
         XCTAssertEqual(settings.cosyVoiceEndpoint, "http://127.0.0.1:5051")
         XCTAssertTrue(settings.cosyVoiceAutoStart)
         XCTAssertEqual(settings.cosyVoiceSpeed, 1.0, accuracy: 0.0001)
+        XCTAssertTrue(settings.skipHumanizeDelayForVoiceReply, "旧配置缺键时默认跳过拟人化延迟")
     }
 
     func testCosyVoiceSettingsRoundTripAndClamp() throws {
@@ -1444,10 +1447,10 @@ final class CosyVoiceTests: XCTestCase {
                 client: client,
                 serviceReady: { runtime.isServiceReadySnapshot }
             )
-            // 用真实内置参考音当新增音色素材（保证是可用的真人语音）。
+            // 用本机已有音色当新增素材（保证是可解码的参考音频）。
             let sourceAudio = home.appendingPathComponent("voices/girl/prompt.wav")
             try XCTSkipUnless(
-                fileManager.fileExists(atPath: sourceAudio.path), "缺少内置参考音")
+                fileManager.fileExists(atPath: sourceAudio.path), "缺少本机参考音")
             let audio = Self.makeTempDirectory().appendingPathComponent("e2e-voice.wav")
             addTeardownBlock { try? FileManager.default.removeItem(at: audio) }
             try fileManager.copyItem(at: sourceAudio, to: audio)

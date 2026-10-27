@@ -49,11 +49,11 @@
 | 目录 | 说明 |
 | --- | --- |
 | `app/Sources/WeChatBot/Models/` | 共享数据模型 / 设置 |
-| `app/Sources/WeChatBot/Core/` | AppStore、运行时编排、服务协议 |
+| `app/Sources/WeChatBot/Core/` | AppStore、运行时编排、生命周期与菜单栏控制器 |
 | `app/Sources/WeChatBot/Services/` | OneBot / AI / 记忆 / 触发判定 / 调度 / Hook 服务 |
 | `app/Sources/WeChatBot/DesignSystem/` | 主题、组件、玻璃效果 |
 | `app/Sources/WeChatBot/Views/` | 所有页面与弹窗 |
-| `app/Sources/WeChatBot/WeChatBotApp.swift` | App 场景（窗口 / 菜单栏 / 设置） |
+| `app/Sources/WeChatBot/WeChatBotApp.swift` | App 场景（窗口 / 设置 / 命令）与菜单栏控制器装配 |
 | `app/Tests/WeChatAITests/` | 核心服务单元测试 |
 | `bridge/` | OneBot Go 源码与脚本（`proto/` 为微信协议定义） |
 | `hook/` | script.js、版本 JSON 与 Gadget 配置 |

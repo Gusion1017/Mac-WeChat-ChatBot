@@ -7,12 +7,24 @@ import SwiftUI
 /// or the Dock without tearing down SwiftUI scene state.
 @MainActor
 enum MainWindowRegistry {
+    static let mainWindowID = "main"
+
     static weak var window: NSWindow?
+
+    /// 主窗口内容捕获的 SwiftUI `openWindow` 动作。
+    ///
+    /// 菜单栏快捷面板由 `NSPopover` + `NSHostingController` 承载，不在 SwiftUI Scene
+    /// 层级内，环境里的 `openWindow` 不可用；这里复用主场景在 `onAppear` 时捕获的动作，
+    /// 以便主窗口尚未创建（或被释放）时仍能从菜单栏打开。
+    static var openWindowAction: OpenWindowAction?
 
     /// Brings the remembered main window back. Returns `false` when the window has
     /// never been created (or was released), letting callers fall back to `openWindow`.
     @discardableResult
     static func show() -> Bool {
+        // 主窗口出现时收起菜单栏面板，避免面板悬在刚打开的窗口上方
+        // （也覆盖 Dock 重开与 ⌘1…⌘0 页面快捷键）。
+        MenuBarController.shared.dismissPanel()
         guard let window else { return false }
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
@@ -21,8 +33,36 @@ enum MainWindowRegistry {
         return true
     }
 
+    /// 菜单栏面板 / Dock 重开的统一入口：优先唤回已有窗口，其次重建主场景窗口。
+    static func showOrOpen() {
+        if show() { return }
+        guard let openWindowAction else { return }
+        openWindowAction(id: mainWindowID)
+        NSApp.activate(ignoringOtherApps: true)
+        ActivationPolicyController.reapplyCurrent()
+    }
+
     static func hide() {
         window?.orderOut(nil)
+    }
+}
+
+/// Captures the main scene's `openWindow` action for AppKit-side entry points
+/// (the menu bar panel lives outside the SwiftUI scene graph).
+private struct MainWindowOpenActionCapture: ViewModifier {
+    @Environment(\.openWindow) private var openWindow
+
+    func body(content: Content) -> some View {
+        content.onAppear {
+            MainWindowRegistry.openWindowAction = openWindow
+        }
+    }
+}
+
+extension View {
+    /// Installs the `openWindow` capture used by `MainWindowRegistry.showOrOpen()`.
+    func captureMainWindowOpenAction() -> some View {
+        modifier(MainWindowOpenActionCapture())
     }
 }
 
@@ -138,6 +178,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Re-assert the persisted Dock preference once the run loop is up; AppKit can
         // briefly re-register a menu-bar agent as `.regular` during launch.
         ActivationPolicyController.reapplyCurrent()
+        // 菜单栏条目依赖 AppKit 完成启动后再创建（依赖已由 `WeChatAIApp.init` 注入）。
+        MenuBarController.shared.start()
         closeShortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             Self.handleCloseShortcut(event)
         }

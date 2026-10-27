@@ -6,6 +6,46 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-10-27
+
+### 变更
+
+- **菜单栏交互、图标与首开性能重构（2026-10-27）**：菜单栏继续使用自绘 `NSStatusItem`
+  （不使用 SwiftUI `MenuBarExtra`），本轮重新定义点击语义并移除旧的启发式逻辑。
+  - **交互**：左键单击（按下即响应）开合 272pt 的 `NSPopover` 状态面板，打开主窗口、
+    启停机器人、会话/机器人/设置与退出全部收进左键面板；**右键 / Control-左键不再执行
+    操作，原生 `NSMenu` 右键菜单已移除**。左右键都由常驻 local 鼠标监视器在分发前拦截并
+    吞掉事件：左键直接开合面板，右键/Control-左键吞掉后什么都不做。
+    面板使用 `.transient`：点面板外（其它 App / 桌面 / 其它状态栏图标）由系统自动收起，
+    不依赖需要辅助功能权限的全局事件监视器；本 App 其它窗口由 local 点击监视器立即收起；
+    Esc、应用失活、应用隐藏与系统菜单开始跟踪也会收起。**删除 `clickCount`、双击时间窗、
+    同次点击抑制等启发式**（`MenuBarPanelToggleDecision` 及其单测一并移除），点击意图改由
+    纯映射 `MenuBarClickIntent` 决定（左键 → 开合；右键/Control-左键 → 忽略；其它修饰键
+    保持左键语义；未知事件兜底为左键）。
+    主窗口的其它打开路径（Dock 重开、⌘1…⌘0、面板入口）也会先收起面板。
+  - **图标与提示**：模板 SF Symbol 随机器人运行状态切换填充/轮廓
+    （`bubble.left.and.bubble.right.fill` ↔ `bubble.left.and.bubble.right`），不叠加颜色、
+    不跑状态动画；状态栏图标不显示鼠标悬停 tooltip，仅保留无障碍值与 VoiceOver 帮助，
+    在启停或界面语言切换时刷新。
+  - **首开与渲染性能**：状态栏图标出现后延迟预构建并缓存 `NSPopover` +
+    `NSHostingController`，预热阶段用 `sizeThatFits(in:)` 预先量出面板高度；
+    固定 contentSize（`sizingOptions = []`；离屏 `fittingSize` 恒为 0，不用它），
+    余额/统计/电量等数据刷新不再触发 popover 自动重排；
+    语言切换或关闭菜单栏图标时丢弃缓存。内容层不再叠加 `regularMaterial`（popover 自带材质），
+    移除品牌图标阴影；悬停只对 `opacity` 做 ≤0.15s 过渡，「减少动态效果」时不做动画。
+  - **视觉与操作层级**：面板宽度 272pt，头部彩色运行状态胶囊、带描边玻璃卡片的状态区、
+    带分隔线的三列统计条；操作区重排为「启动/停止 → 打开主窗口 → 会话/机器人/设置」，
+    底部保留版本与退出。面板内导航/打开主窗口后自动收起。
+  - 新增 `MenuBarClickTests` 覆盖点击意图分流与图标状态映射；2026-10-27 已在 macOS 26.7.1
+    本机安装版走查左键开合、右键确认不再弹菜单、Esc、点其它窗口/其它 App 收起与面板内导航；
+    首开耗时未用 Instruments 量化，相关性能描述仅为实现方式，不包含实测数字。
+- **语音回复免拟人化延迟（2026-10-27）**：当本条回复已确定改发语音时，默认跳过
+  「节奏 → 拟人化」的随机延迟，直接进入 TTS 合成与发送，避免「合成耗时 + 延迟」让用户
+  等两次；文字回复节奏不变。新增语音设置「语音回复免拟人化延迟」
+  （`VoiceSettings.skipHumanizeDelayForVoiceReply`，默认开启，可关闭回到原节奏）；
+  发送日志改为记录实际等待的拟人化延迟，语音回复的进度条不再显示等待倒计时。
+  新增发送节奏单测与旧配置缺键默认值断言。
+
 ## [1.5.0] — 2026-10-27
 
 ### 新增
@@ -510,10 +550,11 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.5.1...HEAD
 [1.3.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.3.0
 [1.4.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.4.0
 [1.5.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.5.0
+[1.5.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.5.1
 [1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.0

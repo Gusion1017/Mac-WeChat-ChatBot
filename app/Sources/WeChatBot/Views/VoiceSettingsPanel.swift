@@ -378,6 +378,21 @@ struct VoiceSettingsPanel: View {
                     .labelsHidden()
                     .frame(width: 210)
                 }
+                SettingsDivider()
+                SettingsRow(
+                    title: "语音回复免拟人化延迟",
+                    subtitle: "改为语音时直接发送，不再等待「拟人化」随机延迟，避免整体等待过久",
+                    symbol: "bolt",
+                    tint: Theme.accent
+                ) {
+                    Toggle(
+                        L("语音回复免拟人化延迟"),
+                        isOn: bind(\.bot.voiceSettings.skipHumanizeDelayForVoiceReply)
+                    )
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                }
             }
         }
     }

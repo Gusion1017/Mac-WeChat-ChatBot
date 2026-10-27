@@ -1037,6 +1037,9 @@ struct VoiceSettings: Codable, Hashable {
     var replyProbability: Double = 0.3
     /// 对等：只有收到语音时才回语音（默认关闭）。
     var mirrorIncomingVoice: Bool = false
+    /// 语音回复跳过拟人化延迟（默认开启）：本条已确定改发语音时直接合成发送，
+    /// 不再叠加随机延迟，避免「TTS 合成 + 拟人化等待」让用户等太久。
+    var skipHumanizeDelayForVoiceReply: Bool = true
     /// 仅短回复发语音（默认开启）。
     var shortReplyOnly: Bool = true
     /// 「短回复」的字符阈值。
@@ -1140,6 +1143,7 @@ extension VoiceSettings {
         case replyEnabled
         case replyProbability
         case mirrorIncomingVoice
+        case skipHumanizeDelayForVoiceReply
         case shortReplyOnly
         case shortReplyMaxChars
         case maxVoiceSeconds
@@ -1170,6 +1174,9 @@ extension VoiceSettings {
             ?? defaults.replyProbability
         mirrorIncomingVoice = try container.decodeIfPresent(Bool.self, forKey: .mirrorIncomingVoice)
             ?? defaults.mirrorIncomingVoice
+        skipHumanizeDelayForVoiceReply = try container.decodeIfPresent(
+            Bool.self, forKey: .skipHumanizeDelayForVoiceReply)
+            ?? defaults.skipHumanizeDelayForVoiceReply
         shortReplyOnly = try container.decodeIfPresent(Bool.self, forKey: .shortReplyOnly)
             ?? defaults.shortReplyOnly
         shortReplyMaxChars = try container.decodeIfPresent(Int.self, forKey: .shortReplyMaxChars)
@@ -1216,6 +1223,7 @@ extension VoiceSettings {
         try container.encode(replyEnabled, forKey: .replyEnabled)
         try container.encode(effectiveReplyProbability, forKey: .replyProbability)
         try container.encode(mirrorIncomingVoice, forKey: .mirrorIncomingVoice)
+        try container.encode(skipHumanizeDelayForVoiceReply, forKey: .skipHumanizeDelayForVoiceReply)
         try container.encode(shortReplyOnly, forKey: .shortReplyOnly)
         try container.encode(effectiveShortReplyMaxChars, forKey: .shortReplyMaxChars)
         try container.encode(effectiveMaxVoiceSeconds, forKey: .maxVoiceSeconds)

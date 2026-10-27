@@ -59,8 +59,8 @@ final class VoiceSynthesisTests: XCTestCase {
 
     func testSanitizeStripsLeadingWeChatMention() {
         XCTAssertEqual(
-            VoiceTextSanitizer.sanitizeForSpeech("@我的枪很长 老大爷嘛，今天怎么样？"),
-            "老大爷嘛，今天怎么样？")
+            VoiceTextSanitizer.sanitizeForSpeech("@测试昵称 测试消息，今天怎么样？"),
+            "测试消息，今天怎么样？")
         XCTAssertEqual(
             VoiceTextSanitizer.sanitizeForSpeech("@张三，你好呀。"),
             "你好呀。")
@@ -597,7 +597,7 @@ final class VoiceSynthesisTests: XCTestCase {
     }
 
     /// ZipVoice 克隆测试的参考音频：优选用模型自带的官方 `test_wavs/leijun-1.wav`
-    /// （24 kHz 真人语音 + 官方 prompt 文本），缺失时回退到系统 `say`。
+    /// （24 kHz 参考语音 + 官方 prompt 文本），缺失时回退到系统 `say`。
     private static func makeCloneReference() throws -> (url: URL, text: String) {
         let official = VoiceModelStore.modelsDirectory.appendingPathComponent(
             "sherpa-onnx-zipvoice-distill-int8-zh-en-emilia/test_wavs/leijun-1.wav")

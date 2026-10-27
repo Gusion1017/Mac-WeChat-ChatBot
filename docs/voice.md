@@ -43,6 +43,7 @@
 
 ```
 AI 回复文本 → decideVoiceReply（开关/概率/对等/短回复/模型就绪）
+ → 已确定语音：跳过拟人化随机延迟（「语音回复免拟人化延迟」，默认开）
  → VoiceSynthesisService（Kokoro / ZipVoice / CosyVoice）→ 24k WAV
  → POST /send_voice {"user_id"/"group_id","pcm16k","duration_ms"}
  → bridge 官方 SILK SDK（`bridge/silkenc`）编码 24k Tencent SILK → uploadvoice → send_voice
@@ -111,7 +112,8 @@ AI 回复文本 → decideVoiceReply（开关/概率/对等/短回复/模型就�
 ### 4.1 界面（2026-10-27 精简）
 
 - **语音转写**：三个开关 + 「转写资源」行；资源未安装时在行内直接「下载」，不再额外占一块提醒。
-- **语音回复**：默认只显示总开关；开启后才展开概率、对等、短回复阈值、最长时长与超限处理。
+- **语音回复**：默认只显示总开关；开启后才展开概率、对等、短回复阈值、最长时长、超限处理
+  与「语音回复免拟人化延迟」。
 - **语音引擎与音色**（原「语音引擎（TTS）」+「语音模型与克隆音色」合并）：
   - 引擎：Kokoro / ZipVoice 克隆 / CosyVoice3（本地旁路，可选下载）；Kokoro 仍为默认；
   - 音色：Kokoro 使用官方 103 个内置音色的 **sid → name** 映射（中文女声 55 / 中文男声 45 /
@@ -137,7 +139,8 @@ AI 回复文本 → decideVoiceReply（开关/概率/对等/短回复/模型就�
 
 - 入站：`transcriptionEnabled`（默认开）、`showTranscriptInBubble`（开）、`saveTranscriptToMemory`（开）
 - 回复：`replyEnabled`（默认关）、`replyProbability`（0.3）、`mirrorIncomingVoice`、`shortReplyOnly`（开）、
-  `shortReplyMaxChars`（80）、`maxVoiceSeconds`（30，5–60）、`overLimit`（text/truncate）
+  `shortReplyMaxChars`（80）、`maxVoiceSeconds`（30，5–60）、`overLimit`（text/truncate）、
+  `skipHumanizeDelayForVoiceReply`（默认开）
 - 引擎：`engine`（kokoro/zipvoiceClone/cosyVoice）、`kokoroSpeakerID`（0–102，读取/保存时收敛）、
   `kokoroSpeed`（默认 1.25）、`cloneID`、`modelDownloadConsent`
 - CosyVoice3：`cosyVoiceVoiceID`（本机 voices.json 中的音色 id；未导入时为空）、`cosyVoiceEndpoint`
@@ -147,6 +150,10 @@ AI 回复文本 → decideVoiceReply（开关/概率/对等/短回复/模型就�
 语音开关全部为全局设置（`BotSettings.voice.transcriptionEnabled` / `replyEnabled` 等）：
 关闭转写后不再发起新的语音下载与转写，已有转写仍可显示并参与上下文；关闭语音回复后只发文字。
 概率、对等、短回复、引擎与音色同样由全局设置控制。
+
+`skipHumanizeDelayForVoiceReply` 默认开启：`decideVoiceReply` 命中语音后直接进入 TTS 合成，
+不再叠加 `[minDelayMs, maxDelayMs]` 的随机等待（否则「合成耗时 + 拟人化延迟」会让用户等两次）；
+关闭后恢复与文字回复一致的拟人化节奏。文字回复不受该设置影响。
 
 ## 5. 语音模型
 

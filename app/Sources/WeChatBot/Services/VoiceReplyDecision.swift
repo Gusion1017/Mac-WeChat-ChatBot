@@ -73,6 +73,25 @@ func decideVoiceReply(_ ctx: VoiceReplyContext) -> VoiceReplyDecision {
     return .text(reason: String(format: "未命中语音回复概率（%.2f ≥ %.2f）", rng, probability))
 }
 
+/// 语音回复的发送节奏：本次已经确定改发语音时，默认不再叠加拟人化随机延迟。
+///
+/// 语音合成本身已有耗时；若再等满 `[minDelayMs, maxDelayMs]`，端到端等待会明显变长，
+/// 而这段等待并不会让「语音」更像真人（文字气泡的节奏感已经不适用）。
+/// 该优化可在「机器人 → 语音 → 语音回复」里关闭，回到与文字回复一致的节奏。
+enum VoiceReplyPacing {
+    /// 返回实际生效的分段延迟；`useVoice` 为 true 且用户未关闭优化时全部归零。
+    ///
+    /// 只改发送节奏，不影响分段/文本与语音决策本身；关闭优化时原样返回。
+    static func effectiveDelaysMs(
+        _ delaysMs: [Int],
+        useVoice: Bool,
+        settings: VoiceSettings
+    ) -> [Int] {
+        guard useVoice, settings.skipHumanizeDelayForVoiceReply else { return delaysMs }
+        return Array(repeating: 0, count: delaysMs.count)
+    }
+}
+
 /// 引用语音时附加到本轮用户消息末尾的说明（与引用图片的 `VisionSupport` 同构）。
 ///
 /// 微信引用只带 `svrid` 与 `[语音]` 摘要，主回复模型看不到语音本体；把被引用语音的

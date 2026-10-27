@@ -32,7 +32,8 @@
 
 附加入口：
 
-- 菜单栏 `MenuBarExtra`（可在设置中关闭）：状态、快捷启停、打开主窗口、页面直达、退出（⌥⌘Q）。
+- 菜单栏图标（可在设置中关闭）：**左键开合状态面板**（含打开主窗口、快捷启停、会话 / 机器人 /
+  设置直达与退出）；右键 / Control-左键不执行操作。
 - 首次启动向导：4 步 sheet，可从设置或菜单重新打开。
 - App 设置场景（⌘,）：复用 `SettingsView`。
 
@@ -47,7 +48,7 @@ Window("WeChat AI", id: "main")
 │  │  └─ 底部状态胶囊（机器人 + 微信/Hook/AI）+ 版本/设置
 │  └─ PageRouter → 9 个页面（首次向导另计）
 ├─ Settings scene → SettingsView (880×640)
-└─ MenuBarExtra (window 样式, 304pt)
+└─ MenuBarController：NSStatusItem + 左键 NSPopover (272pt)
 ```
 
 - 侧边栏选中高亮使用系统语义色 `Color.accentColor`，行高 30pt、圆角 7pt；悬停为 4.5% 主色。
@@ -229,7 +230,8 @@ Window("WeChat AI", id: "main")
   - 「拟人化」：开关、随机延迟双 Slider（自动保持 min ≤ max）、分段开关/段数、输入中状态。
 - 「语音」：复用 `VoiceSettingsPanel`（与「设置 → 语音」同一面板）。
   - 转写：三个开关 + 「转写资源」行内状态/下载/刷新。
-  - 回复：总开关默认收起策略项（概率、对等、短回复阈值、最长时长、超限处理）。
+  - 回复：总开关默认收起策略项（概率、对等、短回复阈值、最长时长、超限处理、
+    语音回复免拟人化延迟）。
   - 引擎与音色：Kokoro / ZipVoice 克隆 / CosyVoice3（本地旁路，可选）分段选择；Kokoro 用官方
     103 音色（中文女声 55 / 中文男声 45 / 英文女声 3）的选择 sheet（搜索 + 分组 + 逐行试听），
     ZipVoice 用克隆档案菜单，CosyVoice3 用本地服务 `/voices` 返回的本机音色。
@@ -385,7 +387,8 @@ Window("WeChat AI", id: "main")
 - 首次开启「允许语音回复」时自动检测文本/语音发送句柄，未就绪则弹出捕获引导；
   bridge 启动后若已开启语音回复且句柄缺失，也会自动提示一次。弹窗展示当前状态与原因
   （bridge 未连接、R3 原生发送未开启、微信版本不支持、登录预热中）。
-- 概率、对等、仅短回复、TTS 引擎与音色均由全局语音设置控制。
+- 概率、对等、仅短回复、TTS 引擎与音色均由全局语音设置控制；已确定改发语音时默认
+  跳过拟人化随机延迟（可在语音设置关闭），语音回复的进度条不再出现「N 秒后发送」倒计时。
 
 ### 5.10 首次启动向导
 
@@ -405,15 +408,40 @@ Window("WeChat AI", id: "main")
 
 ### 5.11 菜单栏
 
-`MenuBarExtra` window 风格（304pt）：
+自绘 `NSStatusItem` + SwiftUI `NSPopover`（272pt，`Core/MenuBarController.swift`）：
 
-- 头部：品牌、运行状态、状态点。
-- 状态：微信、Hook、AI、电量、DeepSeek 余额、今日收到/回复/延迟。
-- 操作：启动/停止、打开主窗口、总览/会话/AI 模型/设置、退出（⌥⌘Q）。
-- `isInserted` 由 `store.settings.general.showInMenuBar` 驱动；写回加相等性 guard，
-  避免 MenuBarExtra 场景循环（实测会导致 100% CPU）。
-- 主窗口关闭按钮与 ⌘W 改为隐藏窗口（`orderOut`），可从菜单栏（或 Dock，若启用）重新显示；
-  退出不再绑定 ⌘Q，仅保留 ⌥⌘Q 与菜单栏「退出」。
+- **左键单击图标（按下即响应）：开合状态面板**（不再打开主窗口，也不再提供右键菜单）；
+  **右键 / Control-左键不执行操作**。左键由常驻 local 鼠标监视器在事件分发前拦截并吞掉事件，
+  避免与 `.transient` 的系统自动收起重复处理；右键事件同样被吞掉且不触发任何动作。
+  面板内导航或「打开主窗口」后自动收起。
+- 收起由系统与本 App 分工：面板使用 `.transient`，点击面板外（其它 App、桌面、其它状态栏
+  图标）由系统自动收起，不依赖需要辅助功能权限的全局事件监视器；本 App 其它窗口上的点击
+  由 local 点击监视器立即收起。Esc、应用失活（Cmd-Tab）、应用隐藏与系统菜单开始跟踪也会收起。
+  **不再使用 `clickCount`、双击时间窗或同次点击抑制启发式**；
+  点击意图由纯映射 `MenuBarClickIntent` 决定：左键 → 开合，右键 / Control-左键 → 忽略，
+  其它修饰键不改变左键语义，未知/合成事件按左键兜底（VoiceOver 场景）。
+- 主窗口的其它打开路径（Dock 重开、⌘1…⌘0、面板内入口）走 `MainWindowRegistry.show()`，
+  会先调用 `MenuBarController.shared.dismissPanel()` 收起面板，避免主窗口与弹层同时出现。
+- 面板内容：头部品牌与运行状态胶囊；带描边的状态卡（微信、Hook、AI、电量、DeepSeek 余额、
+  今日收到/回复/延迟）；快捷操作按「启动/停止 → 打开主窗口 → 会话 / 机器人 / 设置」分层；
+  底部版本与退出（⌥⌘Q）。启停不收起面板，导航/打开主窗口后收起。
+- 图标：模板 SF Symbol 随机器人运行状态切换填充/轮廓
+  （`bubble.left.and.bubble.right.fill` / `bubble.left.and.bubble.right`），不叠加颜色或状态点，
+  也不为图标跑动画；状态栏图标不显示鼠标悬停 tooltip，仅保留无障碍值（`机器人运行中` /
+  `机器人已停止`）与 VoiceOver 帮助，在启停与界面语言切换时刷新。
+- 性能：`NSPopover` + `NSHostingController` 首次构建后缓存复用；状态栏图标出现后延迟（约 1s）
+  预热，预热阶段用 `sizeThatFits(in:)` 量出面板高度并固定 `contentSize`
+  （`sizingOptions = []`；离屏 `fittingSize` 恒为 0，不用它），
+  余额/统计/电量等数据刷新不再触发 popover 自动重排；语言切换或关闭「显示菜单栏图标」时
+  释放缓存。内容层不叠加 `regularMaterial`（popover 自带材质），悬停只对 `opacity` 做
+  ≤0.15s 过渡，「减少动态效果」开启时不做动画。
+- 显示/隐藏由 `store.settings.general.showInMenuBar` 驱动：`MenuBarController` 用
+  Observation 监听该项，实时增删状态栏条目并关闭可能残留的面板。不再使用
+  `MenuBarExtra` 场景，因此也没有 `isInserted` 写回循环。
+- 主窗口关闭按钮与 ⌘W 改为隐藏窗口（`orderOut`），可从菜单栏左键（面板内「打开主窗口」）或
+  Dock（若启用）重新显示；退出不再绑定 ⌘Q，仅保留 ⌥⌘Q 与菜单/面板的退出入口。
+- 辅助功能：状态栏条目保留 `WeChat AI` 无障碍标签/值与 VoiceOver 帮助（不显示鼠标悬停
+  tooltip）；面板内状态行合并 label/value，按钮带 accessibility 标签与 help。
 
 ### 5.12 设置场景
 
@@ -514,7 +542,11 @@ app/Sources/WeChatBot/
 │  ├─ OnboardingView.swift
 │  ├─ MenuBarView.swift
 │  └─ Components/               # 13 个复用组件/编辑 sheet（含 ReplyProgressBar、DashboardSystemVitalsCard）
-└─ WeChatBotApp.swift           # Window / Settings / MenuBarExtra / Commands
+├─ Core/
+│  ├─ AppStore.swift / AppStore+Runtime.swift
+│  ├─ AppLifecycle.swift        # 主窗口注册表、关闭即隐藏、AppDelegate
+│  └─ MenuBarController.swift   # NSStatusItem：左键开合状态面板（右键不执行操作）
+└─ WeChatBotApp.swift           # Window / Settings / Commands / MenuBarController 装配
 ```
 
 ## 10. 与 Core 的边界
@@ -531,7 +563,7 @@ UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网�
 
 已验证：
 
-- `cd app && swift build --scratch-path .build-verify` 通过；`swift test` **396 项通过**（8 项按环境跳过：模型未下载/联网/真实 E2E）
+- `cd app && SWIFT_DISABLE_SANDBOX=1 swift test` **407 项通过**（8 项按环境跳过：模型未下载/联网/真实 E2E）
   （含批量记忆、压缩器、权重强化、旧库迁移、防睡眠配置兼容与三档决策、回复进度倒计时、
   自消息路由修复、通讯录标题补全、拍一拍回复、唤醒后免唤醒词窗口、appmsg 引用/链接/文件等分类与历史文本修复、
   入站帧单次解析与历史修复 trusted 语义、微信 4.2.0.5 R3 版本门禁/运行期配置合并、识图设置/多模态请求/图片编码与描述落库/引用图片说明）。
@@ -539,7 +571,14 @@ UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网�
   gadget 27042 监听；私聊/自消息入站、通讯录解密读取、R3 文本发送（含 bridge 重启后句柄恢复）
   通过；群聊 @ / 拍一拍沿用既有逻辑，本轮未单独复测；图片获取链路已实现（CDN 触发下载待复测）。
 - 9 个侧边栏页面、首次向导、设置场景、菜单栏均可导航；浅色/深色截图核对通过。
-- 空闲 CPU（关闭脉冲动画后）约 2–3%；修复前 MenuBarExtra `isInserted` 写回循环会导致 100%。
+- 菜单栏点击语义：左键开合状态面板，右键 / Control-左键不执行操作（不弹右键菜单）；
+  面板内导航/打开主窗口后收起，关闭「显示菜单栏图标」时条目与面板一起移除。
+  2026-10-27 在 macOS 26.7.1 本机安装版（`~/Applications/WeChat AI.app`）走查：左键开合、
+  右键确认不再弹菜单、Esc、点本 App 其它窗口、点其它 App 均能收起；面板内「设置」快捷条
+  可导航并收起；272pt 面板的位置/尺寸/浅色外观正常。`MenuBarClickTests` 覆盖左键、右键/
+  Control 忽略、其它修饰键、未知事件兜底与图标状态映射；**首开耗时尚未用 Instruments 量化**。
+- 空闲 CPU（关闭脉冲动画后）约 2–3%；旧版 MenuBarExtra `isInserted` 写回循环曾导致 100%，
+  改为 `NSStatusItem` 后不再存在该循环。
 - 会话三栏、全部气泡类型、过滤/暂停/导出、表单校验均已人工走查。
 - 回复进度倒计时：`ReplyProgress` 的倒计时剩余/比例/计时格式化有单测覆盖；会话页在不同阶段
   （AI 生成 / 拟人化等待 / 发送中 / 完成 / 失败）渲染状态条、头部徽标与会话行计时，构建通过。
