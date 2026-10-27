@@ -33,7 +33,7 @@ final class AppStore {
     var lastError: String?
 
     /// 语音发送运行时状态（bridge /voice_status；登录稳定倒计时/句柄）。
-    /// 由 Runtime 刷新；设置页只读展示，语音回复决策用它拦截未就绪状态。
+    /// 由 Runtime 刷新；「机器人 → 语音」与句柄捕获引导只读展示，语音回复决策用它拦截未就绪状态。
     var voiceRuntimeStatus: VoiceRuntimeStatus = .unavailable
 
     /// 首次启用语音回复 / 运行时启动后检测到发送句柄缺失时，由 RootView 弹出的捕获引导。

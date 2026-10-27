@@ -7,8 +7,8 @@ import Observation
 /// 与真实回复共用同一个 `VoiceSynthesisService`（同一引擎、音色、语速与 16k WAV 链路），
 /// 合成完成后在本机用 `AVAudioPlayer` 播放，不发往微信、不联网。
 ///
-/// 全局只保留一个播放器（由 `AppStore` 持有），避免「机器人 → 语音」与
-/// 「设置 → 语音」两个入口同时出声。切换音色/语速、离开页面或再点一次即停止。
+/// 全局只保留一个播放器（由 `AppStore` 持有），切换音色/语速、离开页面或
+/// 再点一次即停止，避免重复试听与跨页面残留播放。
 @MainActor
 @Observable
 final class VoicePreviewController {

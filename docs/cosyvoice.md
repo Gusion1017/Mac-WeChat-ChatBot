@@ -9,7 +9,7 @@
 - **不是默认引擎**：Kokoro 仍是默认（365 MB、零 Python 依赖、启动快）。
 - CosyVoice3 是**可选高保真引擎**：`Fun-CosyVoice3-0.5B-2512`（Apache-2.0，24 kHz，零样本克隆），
   音色更自然、可克隆，但需要 Python 3.10 + PyTorch 运行环境和约 5–7 GB 模型。
-- 首次使用由用户在设置页显式下载/安装；未安装、服务未启动或合成失败时**自动回退 Kokoro**，
+- 首次使用由用户在「机器人 → 语音」显式下载/安装；未安装、服务未启动或合成失败时**自动回退 Kokoro**，
   Kokoro 也失败才改发文字。
 - **App 包不内置任何音色**：不打包参考音频、`prompt.txt`、`voices.json`。普通用户安装后
   音色列表为空，需要在 App 内「管理音色」导入自己的 5–30s 参考音。
@@ -195,7 +195,7 @@ curl -s -X POST http://127.0.0.1:5051/tts \
 
 | 现象 | 排查 |
 | --- | --- |
-| 设置页显示“未安装” | 看安装日志尾部；确认 `uv`/`conda`、`ffmpeg`、磁盘 ≥10 GB、网络可达 Hugging Face |
+| 「机器人 → 语音」显示“未安装” | 看安装日志尾部；确认 `uv`/`conda`、`ffmpeg`、磁盘 ≥10 GB、网络可达 Hugging Face |
 | `/health` 一直 503 | 模型仍在加载；首次 30–90 s 正常；查 sidecar stderr |
 | 端口 5051 被占 | 换端口或停掉旧进程：`lsof -nP -iTCP:5051 -sTCP:LISTEN` |
 | 安装脚本找不到 | 源码运行需 `scripts/`；打包 App 看 `Contents/Resources/cosyvoice/`；可用环境变量覆盖 |

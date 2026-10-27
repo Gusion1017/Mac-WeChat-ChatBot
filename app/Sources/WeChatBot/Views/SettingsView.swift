@@ -24,7 +24,6 @@ struct SettingsView: View {
         case notifications
         case hook
         case onebot
-        case voice
         case data
         case about
 
@@ -37,7 +36,6 @@ struct SettingsView: View {
             case .notifications: "通知"
             case .hook: "Hook"
             case .onebot: "OneBot"
-            case .voice: "语音"
             case .data: "数据与备份"
             case .about: "关于"
             }
@@ -50,7 +48,6 @@ struct SettingsView: View {
             case .notifications: "bell"
             case .hook: "link"
             case .onebot: "network"
-            case .voice: "waveform"
             case .data: "externaldrive"
             case .about: "info.circle"
             }
@@ -63,7 +60,6 @@ struct SettingsView: View {
             case .notifications: Theme.warning
             case .hook: Theme.info
             case .onebot: Theme.accent
-            case .voice: Theme.violet
             case .data: Theme.info
             case .about: .secondary
             }
@@ -137,7 +133,7 @@ struct SettingsView: View {
 
     private var categorySidebar: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sidebarGroup("应用", items: [.general, .appearance, .notifications, .voice])
+            sidebarGroup("应用", items: [.general, .appearance, .notifications])
             sidebarGroup("集成", items: [.hook, .onebot])
             sidebarGroup("数据", items: [.data, .about])
             Spacer()
@@ -200,7 +196,6 @@ struct SettingsView: View {
         case .notifications: notificationSettings
         case .hook: hookSettings
         case .onebot: oneBotSettings
-        case .voice: VoiceSettingsPanel()
         case .data: dataSettings
         case .about: aboutSettings
         }

@@ -83,8 +83,8 @@ WeChatAI.app (SwiftUI)          bridge/onebot (Go)              WeChat.app
 
 ### 快速开始
 
-- **普通用户**：下载 [`WeChat-AI-1.5.1.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.5.1/WeChat-AI-1.5.1.zip)
-  （约 72 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.5.1/WeChat-AI-1.5.1.zip.sha256)），
+- **普通用户**：下载 [`WeChat-AI-1.5.2.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.5.2/WeChat-AI-1.5.2.zip)
+  （约 72 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.5.2/WeChat-AI-1.5.2.zip.sha256)），
   按下面步骤安装；历史版本见 [Tags](https://github.com/Gusion1017/Mac-WeChat-ChatBot/tags)。
 
   1. 解压得到 `WeChat AI.app`，拖到 `~/Applications`（当前用户，无需管理员）或 `/Applications`（所有用户）。
@@ -166,9 +166,9 @@ bash scripts/package_release.sh     # Releases 用 zip + sha256
 make release                        # 同上：构建 → 打包 → 签名校验 → sha256
 ```
 
-发布产物为 `dist/WeChat-AI-1.5.1.zip`（约 72MB）与 `.sha256`。打包脚本会自动
+发布产物为 `dist/WeChat-AI-1.5.2.zip`（约 72MB）与 `.sha256`。打包脚本会自动
 `codesign --verify --strict`；`spctl -a -vv` 对 ad-hoc 未公证包预期返回 `rejected`（属正常），
-分发前在 `dist/` 内用 `shasum -a 256 -c WeChat-AI-1.5.1.zip.sha256` 校验。
+分发前在 `dist/` 内用 `shasum -a 256 -c WeChat-AI-1.5.2.zip.sha256` 校验。
 
 改了 `hook/script.js` 记得跑 `bash scripts/sync_hook_script.sh`。接口 / 行为变更先改 `docs/` 再改代码。
 GitHub Actions 只跑 Linux 可完成的检查（文档链接、脚本语法、副本一致、无构建产物）。
@@ -287,8 +287,8 @@ Contracts in [`docs/architecture.md`](docs/architecture.md); document index in
 ### Quick Start
 
 - **Regular users**: download
-  [`WeChat-AI-1.5.1.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.5.1/WeChat-AI-1.5.1.zip)
-  (~72 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.5.1/WeChat-AI-1.5.1.zip.sha256))
+  [`WeChat-AI-1.5.2.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.5.2/WeChat-AI-1.5.2.zip)
+  (~72 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.5.2/WeChat-AI-1.5.2.zip.sha256))
   and follow these steps; older versions are on [Tags](https://github.com/Gusion1017/Mac-WeChat-ChatBot/tags).
 
   1. Unzip `WeChat AI.app` and drag it to `~/Applications` (current user, no admin) or
@@ -376,10 +376,10 @@ bash scripts/package_release.sh     # release zip + sha256
 make release                        # same: build → package → signature check → sha256
 ```
 
-The release artifacts are `dist/WeChat-AI-1.5.1.zip` (~72MB) and `.sha256`. Packaging runs
+The release artifacts are `dist/WeChat-AI-1.5.2.zip` (~72MB) and `.sha256`. Packaging runs
 `codesign --verify --strict`; `spctl -a -vv` reports `rejected` for an ad-hoc, non-notarized bundle
 (that is expected). Verify before publishing with
-`cd dist && shasum -a 256 -c WeChat-AI-1.5.1.zip.sha256`.
+`cd dist && shasum -a 256 -c WeChat-AI-1.5.2.zip.sha256`.
 
 After editing `hook/script.js`, run `bash scripts/sync_hook_script.sh`. Change `docs/` before code
 for interface or behaviour changes. GitHub Actions only runs Linux-friendly checks (docs links,

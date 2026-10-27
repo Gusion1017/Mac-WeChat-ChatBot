@@ -1556,7 +1556,7 @@ final class RuntimeCoordinator {
             let title = conversation?.displayTitle ?? conversationID
             if let voiceError = error as? VoiceTranscriptionError, voiceError.isAssetUnavailable {
                 log(.warning, "Voice", "语音转写不可用（\(title)）：\(errorText)；"
-                    + "可在「机器人 → 语音」或「设置 → 语音」直接下载中文语音资源")
+                    + "可在「机器人 → 语音」直接下载中文语音资源")
             } else {
                 log(.warning, "Voice", "语音转写失败（\(title)）：\(errorText)")
             }
@@ -3522,13 +3522,13 @@ extension AppStore {
         await coordinator.retryVoiceTranscription(messageID: messageID)
     }
 
-    /// 刷新 bridge `/voice_status`（语音发送句柄 / 登录稳定倒计时），供设置页展示与决策门禁。
+    /// 刷新 bridge `/voice_status`（语音发送句柄 / 登录稳定倒计时），供「机器人 → 语音」展示与决策门禁。
     func refreshVoiceStatus() async {
         let coordinator = RuntimeRegistry.coordinator(for: self)
         await coordinator.refreshVoiceStatus()
     }
 
-    /// 查询本机中文语音识别资源状态（设置页「语音」区展示下载引导）。
+    /// 查询本机中文语音识别资源状态（「机器人 → 语音」区展示下载引导）。
     func voiceAssetStatus() async -> VoiceAssetStatus {
         await voiceTranscription.assetStatus()
     }

@@ -6,6 +6,15 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ## [Unreleased]
 
+## [1.5.2] — 2026-10-27
+
+### 变更
+
+- **移除设置页「语音」分类（2026-10-27）**：设置页不再提供「语音」分类，消除与「机器人 → 语音」的
+  重复入口；语音转写、语音回复、引擎与音色等全局设置统一在「机器人 → 语音」，「机器人」页继续复用
+  共用组件 `VoiceSettingsPanel`，面板行为与语音功能本身未改动。设置分类现为
+  通用 / 外观 / 通知 / Hook / OneBot / 数据与备份 / 关于。
+
 ## [1.5.1] — 2026-10-27
 
 ### 变更
@@ -550,11 +559,12 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.5.2...HEAD
 [1.3.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.3.0
 [1.4.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.4.0
 [1.5.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.5.0
 [1.5.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.5.1
+[1.5.2]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.5.2
 [1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.0
