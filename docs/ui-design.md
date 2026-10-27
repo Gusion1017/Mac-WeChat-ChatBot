@@ -28,7 +28,7 @@
 | 自动化 | 定时任务 `schedules` | 任务列表、下次执行时间、新建/编辑 |
 | 系统 | 记忆库 `memory` | 长期记忆文件夹、搜索、编辑/核心记忆、聊天记录浏览与清理 |
 | 系统 | 运行日志 `logs` | 实时流、级别/来源过滤、暂停、清空、导出 |
-| 系统 | 设置 `settings` | 通用/外观/通知/Hook/OneBot/数据备份/关于 |
+| 系统 | 设置 `settings` | 通用/外观/通知/Hook/OneBot/数据与备份（当前微信账号、已保存账号、重新检测）/关于 |
 
 附加入口：
 
@@ -129,6 +129,10 @@ Window("WeChat AI", id: "main")
 - 双栏 `SectionCard`：最近活动（日志）与最近会话（点击跳转会话页）。
 - 运行中安装 Hook 显示 `ProgressPanel`（onProgress 回调）。
 - 未连接 OneBot 时底部显示 warning `InlineNotice`。
+- **微信账号已切换提示**（2026-10-27）：`store.accountSwitchNotice` 非空时，在页面顶部显示
+  `InlineNotice(kind: .info, title: "微信账号已切换")`，正文说明当前账号或旧数据归入哪个账号；
+  右侧「知道了」调用 `store.dismissAccountSwitchNotice()` 关闭。运行中切号会同时停止机器人，
+  用户需要重新启动机器人；提示不阻塞其它操作。
 
 ### 5.2 会话
 
@@ -286,7 +290,10 @@ Window("WeChat AI", id: "main")
 
 ### 5.6 记忆库
 
-- 顶部分段：**长期记忆** / **聊天记录**；搜索、在 Finder 显示数据库；聊天记录模式提供清理。
+- 顶部分段：**长期记忆** / **聊天记录**；搜索、在 Finder 显示数据库（当前微信账号的
+  `accounts/<id>/chatbot.sqlite`）；聊天记录模式提供清理。
+- 记忆页只展示**当前微信账号**的记忆与聊天记录；换账号后文件夹、搜索与数据库路径都切到该账号，
+  「全局记忆」只在该账号内对所有会话生效。账号切换与数据隔离见 [`accounts.md`](accounts.md)。
 - 长期记忆模式：左侧「文件夹」栏 + 右侧记忆列表（双栏，与聊天记录模式一致）：
   - 文件夹：全部记忆（默认）、全局记忆、按会话类型分节（私聊/群聊/公众号）的会话文件夹、
     「未关联会话」兜底；每行显示记忆条数与核心星标，选中高亮。
@@ -312,7 +319,7 @@ Window("WeChat AI", id: "main")
   - 自动记忆每会话一条滚动摘要，批量总结上限 600 字；历史多条自动记忆会先合并清理。
 - 聊天记录模式：左栏会话列表（消息数/最后时间），搜索时按命中过滤；
   右栏消息浏览（发送者、会话、时间、内容；`textSelection`），搜索时跨会话展示命中消息。
-- 数据库路径、消息总数、复制路径。
+- 当前账号数据库路径、消息总数、复制路径；路径展示当前账号库，避免用户误以为所有账号共用一个库。
 - 长期记忆卡片的删除菜单会弹出 `confirmationDialog`（显示记忆摘要前 40 字），确认后才删除；
   编辑弹窗内的删除同样二次确认，避免误触。
 - `MemoryCleanupSheet`：仅当前会话 / 清空全部，二次确认 + 风险说明，调用
@@ -349,8 +356,39 @@ Window("WeChat AI", id: "main")
 | 通知 | 通知开关、声音开关、系统权限说明 |
 | Hook | 微信版本/进程/Gadget/Bridge/网关/版本匹配、**CLT 状态/安装/重新检测**、**R3 发送句柄状态**、安装/还原/刷新、进度、风险提示、路径/端口/自动启动/**R3 原生发送开关（4.1.15.55 / 4.2.0.5 / 4.2.0.9，默认开；首次需本机手动发一条消息）** |
 | OneBot | Host/Port/连接类型/Token（安全显示+复制）、Bridge 路径、图片目录、WS 地址 |
-| 数据与备份 | 数据目录/配置/数据库/日志/备份/媒体路径（Finder 跳转）、导出配置、打开目录、重新加载、日志清空 |
+| 数据与备份 | **当前微信账号（mask/账号数据目录/账号配置/记忆数据库/媒体目录）**、**已保存的账号**、**重新检测微信账号**；全局配置 `config.json`、备份目录、运行日志目录（`~/Library/Logs/WeChatAI/`）；导出配置、打开目录、重新加载、日志清空 |
 | 关于 | 图标、版本/Build、Bundle ID、系统版本、架构、资源路径、**运行信息**、**技术栈与许可**（每项写明本项目中的用途）、**自研能力概述**（版本适配、收发送、通讯录读取、安全边界与分析工具链；不展示地址、结构偏移或密钥细节）、上游开源项目 GitHub 链接与许可（重新打开向导只在「通用」页提供） |
+
+「数据与备份」多微信账号区域（2026-10-27）：
+
+- **当前微信账号**卡片（只读，值来自 `AccountProfile` / `AppStore`）：
+  - 账号：`store.activeAccountID` 的 mask（`AccountProfile.maskedActiveID`）；未识别时显示
+    「未识别（等待微信登录）」并显示 warning「临时档案」徽标，已识别显示「当前」徽标；
+  - 账号数据目录：`accounts/<id>/`；账号配置：`accounts/<id>/profile.json`；
+    记忆数据库：`accounts/<id>/chatbot.sqlite`；媒体目录：`accounts/<id>/media/`；
+  - 全局配置：`config.json`；备份目录：`backups/`；运行日志目录：
+    `~/Library/Logs/WeChatAI/`（崩溃与 bridge 日志同级）；
+  - 每个路径提供复制与「在 Finder 中显示」，路径用 `.monospaced`；
+  - 卡片下方用 `InlineNotice(kind: .info, title: "数据隔离")` 说明账号级与全局数据的边界。
+- **已保存的账号**列表：
+  - 数据来自 `store.savedWeChatAccounts`（`AccountProfile.savedAccounts(limit:)`，按最近使用倒序；
+    不含 `_unassigned`）；
+  - 行显示 mask、最近使用时间、当前账号徽标与「在 Finder 中显示」；
+  - 不提供点击切号——切号只跟随微信登录；help 说明「换微信账号后会自动切到对应数据」；
+  - 无账号档案时显示空状态；只有当前账号时追加「登录其他微信后点『重新检测微信账号』即可建立
+    独立档案」的说明，不伪造历史账号。
+- **「重新检测微信账号」按钮**：
+  - 调用 `await store.refreshWeChatAccount()`；`store.isSwitchingAccount` 为 true 时显示
+    ProgressView 并禁用；总览/菜单栏的启动按钮在切号期间同样禁用；
+  - 完成切换 → toast「已切换到当前微信账号的数据」；
+  - 仍未识别到账号 → error toast「仍未识别到微信账号，请先登录微信后重试」；
+  - 检测到但切换未生效 → error toast（展示 `store.lastAccountSwitchError` 的失败原因，并回退到原账号）；
+  - 机器人启动中检测到变化 → info toast「机器人正在启动，完成后会自动切换账号数据」；
+  - 没有变化 → info toast「未检测到账号变化」；
+  - 不提供「手动选择数据库/账号档案」入口：UI 不直接调用 `AccountProfile` 的切换接口。
+- 说明文案（与 [`accounts.md`](accounts.md) §1–§2 一致）：聊天、长期记忆、会话设置、机器人配置、
+  人格、定时任务与新媒体随微信账号切换；AI 通道/Keychain、Hook、OneBot、语音模型与日志文件全局共享；
+  旧版媒体保留在原目录。删除当前账号的聊天不会影响其它账号，也不能在 App 内删除账号档案。
 
 「Hook 安装前置」交互（设置页与首启向导共用同一张环境检查卡）：
 
@@ -553,9 +591,13 @@ app/Sources/WeChatBot/
 
 UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网络/进程：
 
-- 状态：`settings/providers/personas/schedules/conversations/messages/logs/hookStatus/stats/batteryStatus/deepSeekBalance/isBalanceRefreshing`
+- 状态：`settings/providers/personas/schedules/conversations/messages/logs/hookStatus/stats/batteryStatus/deepSeekBalance/isBalanceRefreshing/activeAccountID/activeAccountIsUnassigned/accountSwitchNotice/savedWeChatAccounts/isSwitchingAccount`
 - 运行时：`startBot/stopBot/refreshStatus/refreshSystemVitals/installHook(onProgress:)/restoreWeChatBackup/testProvider/
-  sendManualMessage/clearMessages/deleteMessage/saveAPIKey/apiKey/deleteAPIKey/persist/reload/appendLog/clearLogs`
+  sendManualMessage/clearMessages/deleteMessage/saveAPIKey/apiKey/deleteAPIKey/persist/reload/appendLog/clearLogs/
+  refreshWeChatAccount/dismissAccountSwitchNotice`
+- 账号：设置页只调用 `store.refreshWeChatAccount()` 与 `store.dismissAccountSwitchNotice()`，
+  不直接调用 `AccountProfile.activate` / `MemoryStore.switchDatabase`，也不提供手动切库入口；
+  账号路径只读展示。契约见 [`accounts.md`](accounts.md)。
 - 配置集合（providers/personas/schedules）由 UI 修改数组后调用 `persist()`；Core 不提供
   冲突的 CRUD，避免重复实现。
 
@@ -563,7 +605,7 @@ UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网�
 
 已验证：
 
-- `cd app && SWIFT_DISABLE_SANDBOX=1 swift test` **407 项通过**（8 项按环境跳过：模型未下载/联网/真实 E2E）
+- `cd app && SWIFT_DISABLE_SANDBOX=1 swift test` **470 项通过**（8 项按环境跳过：模型未下载/联网/真实 E2E）
   （含批量记忆、压缩器、权重强化、旧库迁移、防睡眠配置兼容与三档决策、回复进度倒计时、
   自消息路由修复、通讯录标题补全、拍一拍回复、唤醒后免唤醒词窗口、appmsg 引用/链接/文件等分类与历史文本修复、
   入站帧单次解析与历史修复 trusted 语义、微信 4.2.0.5 R3 版本门禁/运行期配置合并、识图设置/多模态请求/图片编码与描述落库/引用图片说明）。
@@ -631,6 +673,9 @@ UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网�
 - 从源码直接启动（非 `.app`）时 `Bundle` 版本号为开发回退值；正式版本由打包脚本注入。
 - 观察到的 Core `ProcessRunner` 启动/退出偶发异常
   （`-[NSConcreteTask terminationStatus]: task still running`）与 UI 无关，已同步 swift-core。
+- 多账号 UI（设置 → 数据与备份的「当前微信账号 / 已保存的账号 / 重新检测」，总览切号提示）
+  随 2026-10-27 功能新增；窗口内真实切号走查、成功/未变化/失败三种 toast 与英文文案
+  待集成后补验，不把界面截图写入仓库。
 - 开发期截图位于 `/tmp/wechatai-*.png`、`/tmp/shot-*.png`、`/tmp/demo-*.png`，不纳入仓库。
 
 > 语音设置统一在「机器人 → 语音」提供，复用共用组件 `VoiceSettingsPanel`；设置页已不再提供「语音」分类。

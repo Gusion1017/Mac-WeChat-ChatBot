@@ -29,9 +29,24 @@ struct DashboardView: View {
             .buttonStyle(.glassProminent)
             .tint(store.isBotRunning ? Theme.danger : Theme.accent)
             .controlSize(.regular)
-            .accessibilityHint(store.isBotRunning ? "停止接收与自动回复" : "开始接收消息并按触发设置自动回复")
+            .disabled(store.isSwitchingAccount)
+            .accessibilityHint(store.isSwitchingAccount
+                ? "正在切换微信账号数据，请稍候"
+                : (store.isBotRunning ? "停止接收与自动回复" : "开始接收消息并按触发设置自动回复"))
         } content: {
             statusGrid
+
+            if let notice = store.accountSwitchNotice, !notice.isEmpty {
+                HStack(alignment: .center, spacing: 10) {
+                    InlineNotice(kind: .info, title: "微信账号已切换", message: notice)
+                    Button(L("知道了")) {
+                        store.dismissAccountSwitchNotice()
+                    }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
+                }
+            }
+
             DashboardSystemVitalsCard()
             metricsGrid
 

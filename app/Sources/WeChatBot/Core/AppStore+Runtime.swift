@@ -10,6 +10,9 @@ enum RuntimeError: LocalizedError {
     case providerCredentialUnreadable(String, OSStatus)
     case conversationNotFound(String)
     case notRunning
+    case accountSwitchFailed(String)
+    case accountSwitching
+    case accountImagePathUnavailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -22,6 +25,13 @@ enum RuntimeError: LocalizedError {
                 + "\(AppPaths.bundleID) 下的条目，再在「AI 模型」里重新填写 Key。"
         case .conversationNotFound(let id): return "未找到会话：\(id)"
         case .notRunning: return "机器人未运行"
+        case .accountSwitchFailed(let masked):
+            return "切换微信账号数据失败（\(masked)），请查看日志或重启 App 后重试"
+        case .accountSwitching:
+            return "正在切换微信账号数据，请稍候再启动机器人"
+        case .accountImagePathUnavailable(let masked):
+            return "未找到微信账号 \(masked) 的图片临时目录；请先在微信里打开任意聊天图片，"
+                + "或在设置 → OneBot 中确认图片目录后重试"
         }
     }
 }
@@ -111,6 +121,8 @@ final class RuntimeCoordinator {
     /// 运行时启动后等待 hook 就绪的句柄检测任务（bridge 刚启动时 /voice_status 可能暂不可用）。
     private var voiceSetupWatchTask: Task<Void, Never>?
     private var memoryMaintenanceInFlight: Set<String> = []
+    /// 已发起的长记忆总结任务；切号前必须 cancel + await，避免跨账号写 memories。
+    private var memoryMaintenanceTasks: [String: Task<Void, Never>] = [:]
     private var lastSchedulerTasks: [ScheduledTask] = []
     /// 最近一次可用的通讯录目录（内存副本）；数据库缓存由 `MemoryStore` 负责。
     /// nil / `ok == false` 时行为与没有该功能完全一致：会话标题继续走 `ConversationName` 兜底。
@@ -145,13 +157,23 @@ final class RuntimeCoordinator {
     /// 通道配置指纹：AI 模型页新增通道、填写 Key 或改 baseURL 后立即重查余额。
     private var lastProviderFingerprint: String?
 
+    /// `startRuntime` 正在逐段启动（bridge → WS → scheduler）。
+    /// 这期间若 bridge 回报的登录账号与当前档案不一致，不能立刻拆运行时，
+    /// 先记到 `pendingAccountSwitch`，等启动收尾后再切换。
+    private var runtimeStarting = false
+    private var pendingAccountSwitch: String?
+    /// 账号数据代次：每次真正开始切号 +1。回复流水线在关键 await 之后比对代次，
+    /// 避免切库前发起的生成/发送把消息或统计写进新账号的库（跨账号污染）。
+    private var accountEpoch: UInt64 = 0
+
     init(store: AppStore) {
         self.store = store
         self.hookManager = HookManager(wechatPath: store.settings.hook.wechatPath)
         self.chatEngine = ChatEngine(memory: memory, aiClient: aiClient)
 
-        // Single coalescing sink for UI + database log writes (batched every 200 ms).
-        LogPipeline.shared.attach(store: store, memory: memory)
+        // 注意：LogPipeline 不在这里 attach。attach 后日志会立即 flush 到 SQLite，
+        // 可能在 bootstrap 的旧库迁移/账号认领完成前把目标库提前创建出来；
+        // 改为 performBootstrap 打开最终账号库之后再 attach（之前日志在管道内缓冲）。
 
         hookManager.onStatusChange = { [weak self] status in
             guard let self else { return }
@@ -210,21 +232,70 @@ final class RuntimeCoordinator {
         defer { bootstrapping = false }
 
         AppPaths.ensureDirectories()
+        if store.managesAccountProfiles {
+            // 旧版单库/单配置一次性归位：owner 取旧库 self_id，只 copy 不删除。
+            // 放后台执行，避免在启动主线程上开 SQLite / 复制文件。
+            let previousID = store.activeAccountID
+            let outcome = await Task.detached(priority: .utility) {
+                AccountProfile.runLegacyMigrationIfNeeded()
+            }.value
+            if outcome.activeAccountID != previousID {
+                // 迁移把档案从 provisional（或 _unassigned）改到了旧库 owner：
+                // 重新读该账号的 profile，再把 UI 状态切过去。
+                store.applyLoadedSettings(SettingsStore.load())
+                store.refreshAccountObservables(notice: outcome.notice)
+                selfID = ""
+            } else if outcome.didMigrate {
+                // active 没变，但旧 config.json 里的 bot/personas/schedules 刚刚被
+                // 种子成 profile.json；AppStore.init 时 profile 还不存在，这里补读。
+                store.applyLoadedSettings(SettingsStore.load())
+                store.refreshAccountObservables(notice: outcome.notice)
+            } else {
+                store.refreshAccountObservables(notice: outcome.notice)
+            }
+            if outcome.didMigrate {
+                log(.info, "Account", outcome.notice ?? "已把旧版本数据归入对应微信账号档案")
+            }
+        }
+        if store.managesAccountProfiles {
+            // `_unassigned` → 已识别账号的认领也必须在 open 之前完成：
+            // preparePaths 在 state 仍是 _unassigned 时会保持 active 不变，等这里处理。
+            let detected = AccountProfile.detectedAccountID()
+            let claim = await Task.detached(priority: .utility) {
+                AccountProfile.claimUnassignedForStartup(detectedAccountID: detected)
+            }.value
+            if claim.didClaim || claim.activeAccountID != store.activeAccountID {
+                store.applyLoadedSettings(SettingsStore.load())
+                store.refreshAccountObservables(notice: claim.notice)
+                selfID = ""
+            } else if let notice = claim.notice {
+                store.accountSwitchNotice = notice
+            }
+        }
         prewarmWeChatVersion()
         log(.info, "Runtime", "正在启动服务层…")
-        do {
-            try await memory.open()
-        } catch {
-            log(.error, "Database", "无法打开数据库：\(error.localizedDescription)")
+        if store.managesAccountProfiles {
+            do {
+                try await memory.open()
+            } catch {
+                log(.error, "Database", "无法打开数据库：\(error.localizedDescription)")
+            }
+            // 迁移/认领完成、最终账号库打开后再接日志落库，避免提前创建目标库。
+            LogPipeline.shared.attach(store: store, memory: memory)
+        } else {
+            // 注入 settings 的 AppStore（测试/工具）不解析账号、也不打开真实账号库。
+            log(.debug, "Runtime", "注入设置模式：跳过账号数据库打开")
         }
         await ensureFirstRunDefaults()
-        await loadPersistedState()
-        await loadStats()
+        if store.managesAccountProfiles {
+            await loadPersistedState()
+            await loadStats()
+        }
         autoStartCosyVoiceIfNeeded()
         log(.debug, "Runtime", "本地状态已加载，正在检测微信与 Hook 状态…")
         await refreshStatus()
         bootstrapped = true
-        log(.info, "Runtime", "服务层就绪 · 数据库 \(memory.path)")
+        log(.info, "Runtime", "服务层就绪 · 账号 \(store.activeAccountIsUnassigned ? "_unassigned" : AppAccount.maskedID(store.activeAccountID)) · 数据库 \(await memory.path)")
 
         if ProcessInfo.processInfo.environment["WECHATAI_SELFTEST"] == "1" {
             let code = await Diagnostics.runAll()
@@ -439,7 +510,7 @@ final class RuntimeCoordinator {
             // 旧事件可能把 selfID 污染成好友 wxid；历史事件反推的账号更可信。
             selfID = inferred
             try? await memory.setSetting(key: "onebot.self_id", value: inferred)
-            log(.warning, "Database", "self_id 已按历史事件自动校正为 \(inferred)")
+            log(.warning, "Database", "self_id 已按历史事件自动校正为 \(AppAccount.maskedID(inferred))")
             scheduleSelfMentionBackfill()
         }
         guard result.didChange else { return }
@@ -512,6 +583,30 @@ final class RuntimeCoordinator {
     private func adoptSelfID(_ raw: String) async {
         let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !id.isEmpty else { return }
+        guard AppAccount.isValidID(id) else {
+            log(.warning, "Bot", "忽略无法作为账号目录的登录账号：\(AppAccount.maskedID(id))")
+            return
+        }
+
+        // 权威账号与当前档案不一致时，第一优先级是切到该账号自己的库/配置，
+        // 绝不能把另一个账号的历史数据按本账号 selfID 做“修复”（会污染两边）。
+        let activeID = AccountProfile.activeID
+        if id != activeID || AccountProfile.isUnassigned {
+            if AccountProfile.isUnassigned {
+                log(.info, "Bot", "已识别微信账号 \(AppAccount.maskedID(id))，准备建立该账号的独立数据档案")
+            } else {
+                log(.warning, "Bot", "登录账号 \(AppAccount.maskedID(id)) 与当前数据档案 "
+                    + "\(AppAccount.maskedID(activeID)) 不一致，准备切换账号数据")
+            }
+            if runtimeStarting {
+                // startRuntime 还在逐段启动；等它收尾后再拆运行时，避免状态交错。
+                pendingAccountSwitch = id
+                return
+            }
+            _ = await switchAccount(to: id, reason: .loginMismatch)
+            return
+        }
+
         // 来源标记必须在 early-return 之前写：即使 id 与已有 selfID 相同（例如上次启动
         // 已从设置恢复），也要让下次启动知道这是 get_login_info 的权威值，从而跳过反推。
         try? await memory.setSetting(key: Self.selfIDSourceKey, value: Self.selfIDSourceLogin)
@@ -519,7 +614,7 @@ final class RuntimeCoordinator {
         let previous = selfID
         selfID = id
         try? await memory.setSetting(key: "onebot.self_id", value: id)
-        log(.info, "Bot", "已确认登录账号：\(id)")
+        log(.info, "Bot", "已确认登录账号：\(AppAccount.maskedID(id))")
         // selfID 从空/错误值变成正确值时，补跑一次修复并刷新 UI。
         // 这里的 selfID 来自 get_login_info，修复可以信任它、不再反推历史事件。
         var repaired = false
@@ -581,18 +676,21 @@ final class RuntimeCoordinator {
             .map(\.id)
         guard !remaining.isEmpty else { return }
         backgroundPrefetchTask?.cancel()
+        let epoch = accountEpoch
         backgroundPrefetchTask = Task { [weak self] in
             guard let self else { return }
             // Give the first frame + hook detection a chance to finish first.
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             var index = 0
             while index < remaining.count, !Task.isCancelled {
+                guard epoch == self.accountEpoch else { return }
                 let upper = min(index + 32, remaining.count)
                 let chunk = Array(remaining[index..<upper])
                 if let page = try? await self.memory.fetchLatestMessages(
                     conversationIDs: chunk,
                     perConversation: Self.preloadedMessagePageSize
                 ) {
+                    guard epoch == self.accountEpoch else { return }
                     for (conversationID, messages) in page
                     where self.store.messages[conversationID]?.isEmpty ?? true {
                         self.store.messages[conversationID] = messages
@@ -844,7 +942,22 @@ final class RuntimeCoordinator {
 
     func startRuntime() async throws {
         await bootstrapIfNeeded()
+        guard !store.isSwitchingAccount else { throw RuntimeError.accountSwitching }
         guard !store.isBotRunning, oneBotClient == nil else { return }
+        runtimeStarting = true
+        defer { runtimeStarting = false }
+
+        // 微信可能在上次 App 启动后才换号：启动 bridge 前再检测一次，
+        // 先把 DB / profile / 媒体目录切到当前账号，再拿它的 selfID 启 bridge。
+        if store.managesAccountProfiles,
+           let detected = AccountProfile.detectedAccountID(),
+           detected != AccountProfile.activeID {
+            log(.info, "Account", "启动机器人前检测到微信账号变化，先切换账号数据档案")
+            let switched = await switchAccount(to: detected, reason: .detectedBeforeStart)
+            guard switched, AccountProfile.activeID == detected else {
+                throw RuntimeError.accountSwitchFailed(AppAccount.maskedID(detected))
+            }
+        }
 
         guard let provider = store.settings.defaultProvider else { throw RuntimeError.noProvider }
         // Keychain 读取放到后台：签名变化时 macOS 可能弹授权框/阻塞调用线程，
@@ -869,6 +982,13 @@ final class RuntimeCoordinator {
             store.persist()
         }
 
+        let identity = bridgeIdentity()
+        if store.settings.hook.autoStartBridge,
+           store.managesAccountProfiles,
+           !AccountProfile.isUnassigned,
+           identity.imagePath.isEmpty {
+            throw RuntimeError.accountImagePathUnavailable(AppAccount.maskedID(AccountProfile.activeID))
+        }
         if store.settings.hook.autoStartBridge {
             let overrides = await nativeSendConfigOverrides()
             do {
@@ -878,8 +998,8 @@ final class RuntimeCoordinator {
                     token: token,
                     gadgetPort: store.settings.hook.gadgetPort,
                     explicitVersionConfigPath: store.settings.hook.versionConfigPath,
-                    explicitImagePath: store.settings.onebot.imagePath,
-                    selfID: selfID,
+                    explicitImagePath: identity.imagePath,
+                    selfID: identity.selfID,
                     configOverrides: overrides
                 )
             } catch {
@@ -896,9 +1016,12 @@ final class RuntimeCoordinator {
             token: token
         )
         let client = OneBotClient(configuration: configuration)
-        client.onEvent = { [weak self] event in
-            Task { @MainActor [weak self] in
-                await self?.handle(event: event)
+        // 事件回调绑定到当前 client 实例：切号/重启后旧 client 的排队事件直接丢弃，
+        // 不会把 A 账号的消息写进 B 账号刚打开的库。
+        client.onEvent = { [weak self, weak client] event in
+            Task { @MainActor [weak self, weak client] in
+                guard let self, let client, self.oneBotClient === client else { return }
+                await self.handle(event: event)
             }
         }
         client.onStateChange = { [weak self] state in
@@ -911,14 +1034,16 @@ final class RuntimeCoordinator {
                 self?.log(level, "OneBot", message)
             }
         }
-        client.onLoginInfo = { [weak self] userID in
-            Task { @MainActor [weak self] in
-                await self?.adoptSelfID(userID)
+        client.onLoginInfo = { [weak self, weak client] userID in
+            Task { @MainActor [weak self, weak client] in
+                guard let self, let client, self.oneBotClient === client else { return }
+                await self.adoptSelfID(userID)
             }
         }
-        client.onContactDirectory = { [weak self] snapshot in
-            Task { @MainActor [weak self] in
-                await self?.handleContactDirectory(snapshot)
+        client.onContactDirectory = { [weak self, weak client] snapshot in
+            Task { @MainActor [weak self, weak client] in
+                guard let self, let client, self.oneBotClient === client else { return }
+                await self.handleContactDirectory(snapshot)
             }
         }
         oneBotClient = client
@@ -984,6 +1109,16 @@ final class RuntimeCoordinator {
         log(.info, "Bot", "机器人运行时已启动（\(configuration.host):\(configuration.port)）")
     }
 
+    /// 处理启动阶段挂起的账号切换（adoptSelfID 在 startRuntime 中段发现账号不一致）。
+    func consumePendingAccountSwitchIfNeeded() async {
+        guard !runtimeStarting, let pending = pendingAccountSwitch else { return }
+        pendingAccountSwitch = nil
+        store.accountSwitchPending = false
+        if !(await switchAccount(to: pending, reason: .loginMismatch)) {
+            log(.error, "Account", "启动阶段检测到登录账号与档案不一致，但切换账号数据失败")
+        }
+    }
+
     func stopRuntime() async {
         voiceSetupWatchTask?.cancel()
         voiceSetupWatchTask = nil
@@ -1009,6 +1144,214 @@ final class RuntimeCoordinator {
         await LogPipeline.shared.flushNow()
         await persistStats()
         await SettingsPersistence.shared.flush()
+    }
+
+    // MARK: 微信账号切换
+
+    /// 切换原因；决定提示文案与是否把 selfID 当作权威登录信息写入新库。
+    private enum AccountSwitchReason {
+        case detectedBeforeStart
+        case loginMismatch
+        case manualRefresh
+
+        var isAuthoritativeLogin: Bool { self == .loginMismatch }
+    }
+
+    /// 启动 bridge 时使用的账号身份与图片临时目录。
+    ///
+    /// 已识别账号时优先用 `AccountProfile.activeID`（当前档案的权威身份），
+    /// 不再把历史 DB 里可能被污染的 `selfID` 传给 bridge；未识别时保持旧行为。
+    /// 图片目录默认取当前账号在 `xwechat_files/<wxid>_*/temp` 的目录，
+    /// 避免多账号目录下 bridge 按 mtime 选错账号（发送方向/自消息判定会全错）。
+    private func bridgeIdentity() -> (selfID: String, imagePath: String) {
+        let managedAccount = store.managesAccountProfiles && !AccountProfile.isUnassigned
+        let bridgeSelfID = managedAccount ? AccountProfile.activeID : selfID
+
+        if managedAccount {
+            // 账号隔离启用后，图片目录必须与当前账号一致：忽略全局 onebot.imagePath
+            // （它可能是上一个账号手工填写的路径，传错会把 bridge 的 self_id 也带错）。
+            return (bridgeSelfID, AccountProfile.activeImageDirectory()?.path ?? "")
+        }
+        let imagePath: String
+        if !store.settings.onebot.imagePath.isEmpty {
+            imagePath = store.settings.onebot.imagePath
+        } else if let detected = AccountProfile.activeImageDirectory() {
+            imagePath = detected.path
+        } else {
+            imagePath = ""
+        }
+        return (bridgeSelfID, imagePath)
+    }
+
+    /// 设置页「重新检测微信账号」：微信最近登录账号与当前档案不同则切库。
+    /// - Returns: 是否真的切换了账号档案。
+    func reconcileWeChatAccount() async -> Bool {
+        guard store.managesAccountProfiles else { return false }
+        guard !store.isSwitchingAccount else { return false }
+        guard let detected = AccountProfile.detectedAccountID() else { return false }
+        guard detected != AccountProfile.activeID else {
+            store.lastAccountSwitchError = nil
+            store.refreshAccountObservables()
+            return false
+        }
+        if runtimeStarting {
+            // 机器人正在启动：记录意图，等 startRuntime 收尾后由 startBot 消费。
+            pendingAccountSwitch = detected
+            store.accountSwitchPending = true
+            return false
+        }
+        let switched = await switchAccount(to: detected, reason: .manualRefresh)
+        if !switched {
+            let message = RuntimeError.accountSwitchFailed(AppAccount.maskedID(detected)).localizedDescription
+            store.lastError = message
+            store.lastAccountSwitchError = message
+        } else {
+            store.lastAccountSwitchError = nil
+        }
+        return switched
+    }
+
+    /// 关闭旧库 → 认领/激活新账号档案 → 打开新库 → 重新载入会话/记忆/日志/统计。
+    /// 调用方负责：账号相同时不要调用；不要与 startRuntime 的逐段启动交错。
+    /// - Returns: 是否成功切到目标账号。
+    private func switchAccount(to rawID: String, reason: AccountSwitchReason) async -> Bool {
+        let id = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard AppAccount.isValidID(id) else {
+            log(.warning, "Account", "忽略无法作为账号目录的账号：\(AppAccount.maskedID(rawID))")
+            return false
+        }
+        if id == AccountProfile.activeID, !AccountProfile.isUnassigned { return true }
+        if store.isSwitchingAccount {
+            pendingAccountSwitch = id
+            return false
+        }
+        store.isSwitchingAccount = true
+        defer {
+            store.isSwitchingAccount = false
+            store.accountSwitchPending = false
+        }
+        accountEpoch &+= 1
+
+        let previousID = AccountProfile.activeID
+        let wasRunning = oneBotClient != nil
+        log(.info, "Account", wasRunning
+            ? "检测到微信账号变化，先停止机器人并切换账号数据…"
+            : "正在切换微信账号数据档案…")
+        if wasRunning { await stopRuntime() }
+        // 先取消并等待旧账号的后台写入任务（记忆总结/群昵称回填/统计落盘），
+        // 再 suspend 数据库；否则它们在切库后恢复执行会把 A 的数据写进 B 的库。
+        await drainBackgroundWorkForAccountSwitch()
+        // 旧账号的日志/设置必须先落盘，再关库。
+        await LogPipeline.shared.flushNow()
+        await SettingsPersistence.shared.flush()
+        await memory.suspend()
+
+        do {
+            if AccountProfile.isUnassigned {
+                // _unassigned 只是“还没识别账号”的临时档案：先 copy 到目标账号目录，
+                // 再 activate 目标账号（两者分开，claim 本身不改 activeID）。
+                _ = try AccountProfile.claimUnassigned(by: id)
+            }
+            try AccountProfile.activate(id)
+            try await memory.switchToActiveAccountDatabase()
+        } catch {
+            log(.error, "Account", "切换账号数据失败：\(error.localizedDescription)")
+            // 尽力回到原账号，避免 App 停在一个“半切换”状态。
+            try? AccountProfile.activate(previousID)
+            try? await memory.switchToActiveAccountDatabase()
+            store.isBotRunning = false
+            store.settings.bot.enabled = false
+            store.lastAccountSwitchError = "切换微信账号数据失败：\(error.localizedDescription)"
+            store.refreshAccountObservables()
+            store.persist()
+            return false
+        }
+
+        resetInMemoryStateForAccountSwitch()
+        // 全局 config.json + 新账号 profile.json 一起应用（providers 等全局字段不变）。
+        store.applyLoadedSettings(SettingsStore.load())
+        selfID = ""
+        await ensureFirstRunDefaults()
+        if reason.isAuthoritativeLogin {
+            // get_login_info 是账号身份的权威来源：先写进新库，后续启动修复可以信任它。
+            selfID = id
+            try? await memory.setSetting(key: "onebot.self_id", value: id)
+            try? await memory.setSetting(key: Self.selfIDSourceKey, value: Self.selfIDSourceLogin)
+        }
+        await loadPersistedState()
+        await loadStats()
+
+        store.isBotRunning = false
+        store.settings.bot.enabled = false
+        let masked = AppAccount.maskedID(AccountProfile.activeID)
+        let needsRestart = wasRunning || reason.isAuthoritativeLogin
+        let notice = needsRestart
+            ? "已切换到微信账号 \(masked) 的数据档案；机器人已停止，请确认微信登录稳定后重新启动。"
+            : "已切换到微信账号 \(masked) 的数据档案。"
+        store.refreshAccountObservables(notice: notice)
+        store.persist()
+        log(.info, "Account", "已切换到微信账号 \(masked) 的数据档案（数据库 \(await memory.path)）")
+        return true
+    }
+
+    /// 切库前 drain：取消并等待所有会写数据库/profile 的后台任务。
+    /// 这些 Task 在旧实现里只被清集合、仍在运行，切库后会把 A 账号的数据写进 B。
+    private func drainBackgroundWorkForAccountSwitch() async {
+        if let task = backgroundPrefetchTask {
+            task.cancel()
+            await task.value
+            backgroundPrefetchTask = nil
+        }
+        let maintenance = Array(memoryMaintenanceTasks.values)
+        memoryMaintenanceTasks.removeAll()
+        memoryMaintenanceInFlight.removeAll()
+        maintenance.forEach { $0.cancel() }
+        for task in maintenance { await task.value }
+
+        if let task = selfMentionBackfillTask {
+            task.cancel()
+            await task.value
+            selfMentionBackfillTask = nil
+        }
+        if let task = statsFlushTask {
+            task.cancel()
+            await task.value
+            statsFlushTask = nil
+        }
+    }
+
+    /// 切库前清掉所有按会话/消息缓存的内存状态，避免把 A 账号的会话带进 B 账号界面。
+    private func resetInMemoryStateForAccountSwitch() {
+        backgroundPrefetchTask?.cancel()
+        backgroundPrefetchTask = nil
+        selfMentionBackfillTask?.cancel()
+        selfMentionBackfillTask = nil
+        statsFlushTask?.cancel()
+        statsFlushTask = nil
+        voiceSetupWatchTask?.cancel()
+        voiceSetupWatchTask = nil
+        inFlightConversations.removeAll()
+        visionAttempted.removeAll()
+        pendingImageFetchIDs.removeAll()
+        pendingVoiceFetchIDs.removeAll()
+        pendingVoiceTranscriptionIDs.removeAll()
+        voiceTranscriptionAttempted.removeAll()
+        memoryMaintenanceInFlight.removeAll()
+        lastSchedulerTasks = []
+        lastVoiceTranscriptionEnabled = nil
+        didAutoPromptVoiceSetup = false
+        contactDirectory = nil
+        lastContactDirectoryFailureReason = nil
+        pendingAccountSwitch = nil
+        clearReplyProgresses()
+        store.conversations = []
+        store.messages = [:]
+        store.longTermMemories = []
+        store.replaceLogs([])
+        store.selectedConversationID = nil
+        store.stats = .zero
+        store.voiceRuntimeStatus = .unavailable
+        statsDay = Self.dayKey()
     }
 
     // MARK: OneBot state / events
@@ -1045,6 +1388,7 @@ final class RuntimeCoordinator {
     /// 收到 bridge 目录快照。成功时更新内存/DB 缓存并补会话标题；
     /// 失败时只记一条去重日志（同一 reason 不重复刷屏），消息链路完全不受影响。
     private func handleContactDirectory(_ snapshot: ContactDirectorySnapshot) async {
+        let epoch = accountEpoch
         guard snapshot.ok else {
             let reason = snapshot.reason ?? "unknown"
             guard lastContactDirectoryFailureReason != reason else { return }
@@ -1052,9 +1396,11 @@ final class RuntimeCoordinator {
             log(.debug, "Directory", "通讯录目录暂不可用（\(reason)），继续使用兜底名称")
             return
         }
+        guard epoch == accountEpoch else { return }
         lastContactDirectoryFailureReason = nil
         guard contactDirectory != snapshot else { return }
         let isFirstSnapshot = contactDirectory?.ok != true
+        guard epoch == accountEpoch else { return }
         contactDirectory = snapshot
         do {
             try await memory.replaceContactDirectory(snapshot)
@@ -1067,6 +1413,7 @@ final class RuntimeCoordinator {
         } else {
             log(.debug, "Directory", "通讯录目录已刷新：\(summary)")
         }
+        guard epoch == accountEpoch else { return }
         await applyContactDirectoryToConversationTitles()
     }
 
@@ -1108,6 +1455,8 @@ final class RuntimeCoordinator {
         let conversationID = event.conversationID
         guard !conversationID.isEmpty else { return }
         let receivedAt = Date()
+        let epoch = accountEpoch
+        guard epoch == accountEpoch else { return }
         rolloverStatsIfNeeded()
 
         // 当前账号的权威来源是 bridge get_login_info（onLoginInfo）。只有在还没有
@@ -1116,6 +1465,11 @@ final class RuntimeCoordinator {
         if selfID.isEmpty,
            !event.selfID.isEmpty,
            event.selfID != event.groupID,
+           // 已识别账号档案时，只接受与当前档案一致的 self_id：事件里的 self_id
+           // 可能是旧 bridge/测试/历史回放带来的别的账号，写进当前库会污染身份。
+           !store.managesAccountProfiles
+               || AccountProfile.isUnassigned
+               || event.selfID == AccountProfile.activeID,
            // 旧 bridge 的自消息可能把 self_id 写成对方 wxid；不要把它学成自己。
            !store.conversations.contains(where: { $0.id == event.selfID && $0.kind == .direct }) {
             selfID = event.selfID
@@ -1156,6 +1510,8 @@ final class RuntimeCoordinator {
         } catch {
             log(.warning, "Database", "写入消息失败：\(error.localizedDescription)")
         }
+        // 写库期间可能已开始切号：不能再用旧事件触发图片/语音获取、统计或回复。
+        guard epoch == accountEpoch else { return }
 
         // 图片获取与自动回复共用同一个「历史回放」门禁：只处理实时入站图片。
         scheduleImageFetchIfNeeded(
@@ -1201,7 +1557,9 @@ final class RuntimeCoordinator {
                 fallback: chatMessage
             )
         }
-        await evaluateAndReply(conversation: conversation, message: replyMessage, receivedAt: receivedAt)
+        guard epoch == accountEpoch else { return }
+        await evaluateAndReply(conversation: conversation, message: replyMessage, receivedAt: receivedAt, epoch: epoch)
+        guard epoch == accountEpoch else { return }
         scheduleMemoryMaintenance(conversationID: conversationID)
     }
 
@@ -1370,9 +1728,12 @@ final class RuntimeCoordinator {
     /// 图片获取成功：更新该消息的 `mediaPath` 并写库，气泡随即显示图片。
     /// 消息可能已被内存裁剪/会话已删除：此时跳过内存更新，仍按 ID 从库里补写。
     private func applyFetchedImage(request: ImageFetcher.Request, path: String) async {
+        let accountID = AccountProfile.activeID
+        let epoch = accountEpoch
         pendingImageFetchIDs.remove(request.chatMessageID)
         let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPath.isEmpty else { return }
+        guard !store.isSwitchingAccount, epoch == accountEpoch, accountID == AccountProfile.activeID else { return }
 
         var updated: ChatMessage?
         if var list = store.messages[request.conversationID],
@@ -1388,6 +1749,7 @@ final class RuntimeCoordinator {
             log(.debug, "Media", "图片已获取，但消息已不存在，跳过更新（\(request.chatMessageID)）")
             return
         }
+        guard !store.isSwitchingAccount, epoch == accountEpoch, accountID == AccountProfile.activeID else { return }
         do {
             try await memory.upsertMessages([updated])
         } catch {
@@ -1438,6 +1800,9 @@ final class RuntimeCoordinator {
     /// 语音获取成功：写入 16k WAV 路径与时长并落库，随后在独立任务里转写，
     /// 不阻塞 `VoiceFetcher` 队列（下一条语音可以继续下载）。
     private func applyFetchedVoice(request: VoiceFetcher.Request, result: VoiceFetchResult) async {
+        let accountID = AccountProfile.activeID
+        let epoch = accountEpoch
+        guard !store.isSwitchingAccount else { return }
         pendingVoiceFetchIDs.remove(request.chatMessageID)
         let path = result.path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty else {
@@ -1481,11 +1846,13 @@ final class RuntimeCoordinator {
     /// 语音获取失败（含队列内重试后仍失败）：气泡显示「转写失败 · 重试」。
     /// 只记 debug 日志，不影响自动回复（等待方会按失败继续）。
     private func handleVoiceFetchFailure(request: VoiceFetcher.Request, reason: String) {
+        let epoch = accountEpoch
         pendingVoiceFetchIDs.remove(request.chatMessageID)
         pendingVoiceTranscriptionIDs.remove(request.chatMessageID)
         log(.debug, "Media", "语音获取失败（\(request.chatMessageID)）：\(reason)")
         Task { [weak self] in
-            _ = await self?.updateVoiceMessage(
+            guard let self, epoch == self.accountEpoch else { return }
+            _ = await self.updateVoiceMessage(
                 conversationID: request.conversationID,
                 messageID: request.chatMessageID
             ) { $0.voiceTranscriptState = .failed }
@@ -1836,6 +2203,7 @@ final class RuntimeCoordinator {
         canWaitForImage: Bool,
         imageWaitDeadline: Date?
     ) async -> String? {
+        let epoch = accountEpoch
         if let existing = ChatEngine.normalizedImageDescription(message) {
             return existing
         }
@@ -1878,6 +2246,7 @@ final class RuntimeCoordinator {
                 log(.debug, "Vision", "识图返回空描述（\(message.id)）")
                 return nil
             }
+            guard epoch == accountEpoch else { return nil }
             await applyImageDescription(
                 conversationID: conversation.id,
                 messageID: message.id,
@@ -2031,6 +2400,7 @@ final class RuntimeCoordinator {
         }
         guard !groupPayloads.isEmpty else { return }
         let existing = store.settings.bot.selfMentionNames ?? [:]
+        let epoch = accountEpoch
         selfMentionBackfillTask?.cancel()
         selfMentionBackfillTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -2038,14 +2408,14 @@ final class RuntimeCoordinator {
             let learned = await Task.detached(priority: .utility) {
                 Self.learnSelfMentionNames(fromJSON: groupPayloads, selfID: selfID, existing: existing)
             }.value
-            guard let self, !learned.isEmpty else { return }
+            guard let self, !learned.isEmpty, epoch == self.accountEpoch else { return }
             var names = self.store.settings.bot.selfMentionNames ?? [:]
             var changed = 0
             for (conversationID, name) in learned where names[conversationID] != name {
                 names[conversationID] = name
                 changed += 1
             }
-            guard changed > 0 else { return }
+            guard changed > 0, epoch == self.accountEpoch else { return }
             self.store.settings.bot.selfMentionNames = names
             self.store.persist()
             self.log(.info, "Bot", "已从历史消息回填机器人群昵称：\(changed) 个群")
@@ -2098,7 +2468,11 @@ final class RuntimeCoordinator {
         list[index].status = .sent
         store.messages[event.conversationID] = list
         let updated = list[index]
-        Task { try? await self.memory.upsertMessages([updated]) }
+        let epoch = accountEpoch
+        Task { [weak self] in
+            guard let self, epoch == self.accountEpoch else { return }
+            try? await self.memory.upsertMessages([updated])
+        }
         return true
     }
 
@@ -2218,7 +2592,13 @@ final class RuntimeCoordinator {
 
     // MARK: AI pipeline
 
-    private func evaluateAndReply(conversation: Conversation, message: ChatMessage, receivedAt: Date) async {
+    private func evaluateAndReply(
+        conversation: Conversation,
+        message: ChatMessage,
+        receivedAt: Date,
+        epoch: UInt64
+    ) async {
+        guard epoch == accountEpoch else { return }
         guard store.settings.bot.enabled else { return }
         let evaluation = ruleEngine.evaluate(RuleEngine.Context(
             conversation: conversation,
@@ -2262,7 +2642,8 @@ final class RuntimeCoordinator {
                 message: message,
                 evaluation: evaluation,
                 receivedAt: receivedAt,
-                mention: patMention
+                mention: patMention,
+                epoch: epoch
             ) {
                 return
             }
@@ -2313,6 +2694,7 @@ final class RuntimeCoordinator {
         let quotedImageNote = await prepareQuotedImageNote(conversation: conversation, incoming: message)
         // 引用语音：按 svrid 找回被引用语音的转写，附加「（引用语音内容：…）」。
         let quotedVoiceNote = await prepareQuotedVoiceNote(conversation: conversation, incoming: message)
+        guard epoch == accountEpoch else { return }
         // 描述写回 store.messages 后，用最新副本作为 incoming（避免提示词读到旧值）。
         let replyMessage = store.messages[conversation.id]?.first(where: { $0.id == message.id }) ?? message
         var promptMessage = replyMessage
@@ -2338,16 +2720,20 @@ final class RuntimeCoordinator {
                 history: history,
                 dryRun: store.settings.bot.dryRun
             )
+            guard epoch == accountEpoch else { return }
             await deliver(
                 plan: plan,
                 conversation: conversation,
                 receivedAt: receivedAt,
                 mention: patMention,
-                incomingWasVoice: replyMessage.kind == .voice
+                incomingWasVoice: replyMessage.kind == .voice,
+                epoch: epoch
             )
+            guard epoch == accountEpoch else { return }
             ruleEngine.noteReply(conversationID: conversation.id)
             log(.info, "AI", "\(conversation.displayTitle) 生成回复（\(Int(plan.latencyMs))ms，tokens \(plan.usage.totalTokens)，\(evaluation.triggerLabel)）")
         } catch {
+            guard epoch == accountEpoch else { return }
             store.stats.failedToday += 1
             scheduleStatsPersist()
             store.lastError = error.localizedDescription
@@ -2361,8 +2747,10 @@ final class RuntimeCoordinator {
         conversation: Conversation,
         receivedAt: Date,
         mention: PatMention? = nil,
-        incomingWasVoice: Bool = false
+        incomingWasVoice: Bool = false,
+        epoch: UInt64
     ) async {
+        guard epoch == accountEpoch else { return }
         if plan.dryRun {
             var text = "（dry-run）将回复：\(plan.fullText)"
             if mention != nil { text += "（第一条回复会 @ 拍的人）" }
@@ -2393,7 +2781,14 @@ final class RuntimeCoordinator {
             return
         }
 
-        let outcome = await sendPlanSegments(plan, conversation: conversation, mention: mention, incomingWasVoice: incomingWasVoice)
+        let outcome = await sendPlanSegments(
+            plan,
+            conversation: conversation,
+            mention: mention,
+            incomingWasVoice: incomingWasVoice,
+            epoch: epoch
+        )
+        guard epoch == accountEpoch else { return }
 
         guard outcome.sentCount > 0 else {
             failReplyProgress(conversationID: conversation.id, error: "消息发送失败，详见运行日志")
@@ -2423,7 +2818,8 @@ final class RuntimeCoordinator {
         _ plan: ChatReplyPlan,
         conversation: Conversation,
         mention: PatMention? = nil,
-        incomingWasVoice: Bool = false
+        incomingWasVoice: Bool = false,
+        epoch: UInt64? = nil
     ) async -> PlanDeliveryOutcome {
         let humanize = store.settings.bot.humanize
         let segmentCount = plan.segments.count
@@ -2462,6 +2858,7 @@ final class RuntimeCoordinator {
             log(.debug, "Humanize", "语音回复跳过拟人化延迟 \(plan.delaysMs.first ?? 0)ms")
         }
         for (index, segment) in plan.segments.enumerated() {
+            if let epoch, epoch != accountEpoch { break }
             if humanize.enabled, index < delaysMs.count, delaysMs[index] > 0 {
                 let delaySeconds = Double(delaysMs[index]) / 1000
                 updateReplyProgress(
@@ -2473,6 +2870,7 @@ final class RuntimeCoordinator {
                 )
                 log(.debug, "Humanize", "分段 \(index + 1)/\(segmentCount) 延迟 \(delaysMs[index])ms")
                 try? await Task.sleep(nanoseconds: UInt64(delaysMs[index]) * 1_000_000)
+                if let epoch, epoch != accountEpoch { break }
             }
             if humanize.enabled && humanize.typingIndicator && index == 0 {
                 log(.debug, "Humanize", "输入端「正在输入」指示由微信客户端展示，bridge 暂未暴露接口")
@@ -2488,14 +2886,16 @@ final class RuntimeCoordinator {
                 sent = await sendOutgoingVoice(
                     segment,
                     conversation: conversation,
-                    settings: voiceSettings
+                    settings: voiceSettings,
+                    epoch: epoch
                 )
             }
             if !sent {
                 sent = await sendOutgoingText(
                     segment,
                     conversation: conversation,
-                    mention: sentCount == 0 ? mention : nil
+                    mention: sentCount == 0 ? mention : nil,
+                    epoch: epoch
                 )
             }
             if sent { sentCount += 1 }
@@ -2511,8 +2911,10 @@ final class RuntimeCoordinator {
         message: ChatMessage,
         evaluation: RuleEvaluation,
         receivedAt: Date,
-        mention: PatMention?
+        mention: PatMention?,
+        epoch: UInt64
     ) async -> Bool {
+        guard epoch == accountEpoch else { return true }
         let bot = store.settings.bot
         let patName = message.displaySender
         let fixedEnabled = bot.patFixedTextEnabled
@@ -2546,7 +2948,8 @@ final class RuntimeCoordinator {
             let sent = await sendOutgoingText(
                 beforeText,
                 conversation: conversation,
-                mention: pendingMention
+                mention: pendingMention,
+                epoch: epoch
             )
             if sent { pendingMention = nil }
             sentAny = sent || sentAny
@@ -2556,14 +2959,16 @@ final class RuntimeCoordinator {
         if aiEnabled {
             updateReplyProgress(conversationID: conversation.id, stage: .generating)
             if let plan = await generatePatAIReply(
-                conversation: conversation, message: message, evaluation: evaluation
+                conversation: conversation, message: message, evaluation: evaluation, epoch: epoch
             ) {
+                guard epoch == accountEpoch else { return true }
                 aiLatency = plan.latencyMs
                 updateReplyProgress(conversationID: conversation.id, stage: .sending)
                 let sent = await sendPlanSegments(
                     plan,
                     conversation: conversation,
-                    mention: pendingMention
+                    mention: pendingMention,
+                    epoch: epoch
                 )
                 if sent.sentCount > 0 {
                     pendingMention = nil
@@ -2576,12 +2981,14 @@ final class RuntimeCoordinator {
             let sent = await sendOutgoingText(
                 afterText,
                 conversation: conversation,
-                mention: pendingMention
+                mention: pendingMention,
+                epoch: epoch
             )
             sentAny = sent || sentAny
         }
 
         if sentAny {
+            guard epoch == accountEpoch else { return true }
             finishPatReply(
                 conversation: conversation,
                 receivedAt: receivedAt,
@@ -2600,7 +3007,8 @@ final class RuntimeCoordinator {
     private func generatePatAIReply(
         conversation: Conversation,
         message: ChatMessage,
-        evaluation: RuleEvaluation
+        evaluation: RuleEvaluation,
+        epoch: UInt64
     ) async -> ChatReplyPlan? {
         guard let settingsProvider = store.settings.provider(id: evaluation.providerID) else {
             log(.warning, "AI", "拍一拍 AI 回复：未找到可用 AI 服务")
@@ -2633,6 +3041,7 @@ final class RuntimeCoordinator {
                 dryRun: false
             )
         } catch {
+            guard epoch == accountEpoch else { return nil }
             store.stats.failedToday += 1
             scheduleStatsPersist()
             log(.error, "AI", "拍一拍 AI 回复生成失败：\(error.localizedDescription)")
@@ -2690,8 +3099,10 @@ final class RuntimeCoordinator {
     private func sendOutgoingVoice(
         _ text: String,
         conversation: Conversation,
-        settings: VoiceSettings
+        settings: VoiceSettings,
+        epoch: UInt64? = nil
     ) async -> Bool {
+        if let epoch, epoch != accountEpoch { return false }
         if !store.voiceRuntimeStatus.canSendVoice() {
             await refreshVoiceStatus()
             guard store.voiceRuntimeStatus.canSendVoice() else {
@@ -2758,6 +3169,7 @@ final class RuntimeCoordinator {
             log(.warning, "Voice", "语音合成不可用（\(reason)）；本条改发文字")
             return false
         }
+        if let epoch, epoch != accountEpoch { return false }
         guard let client = oneBotClient else {
             log(.debug, "Voice", "bridge 未运行，语音改发文字")
             return false
@@ -2769,6 +3181,7 @@ final class RuntimeCoordinator {
                 wavURL: synthesis.wavURL,
                 durationHintMs: Int(synthesis.duration * 1000)
             )
+            if let epoch, epoch != accountEpoch { return false }
             let durationMs = sent.durationMs > 0
                 ? sent.durationMs
                 : Int(synthesis.duration * 1000)
@@ -2931,8 +3344,10 @@ final class RuntimeCoordinator {
     func sendOutgoingText(
         _ text: String,
         conversation: Conversation,
-        mention: PatMention? = nil
+        mention: PatMention? = nil,
+        epoch: UInt64? = nil
     ) async -> Bool {
+        if let epoch, epoch != accountEpoch { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         // bridge 会把 at 段拼成「@群昵称\u2005正文」；本地记录只在不伪造昵称时保留原文。
@@ -2948,8 +3363,11 @@ final class RuntimeCoordinator {
             timestamp: Date(),
             status: .pending
         )
+        if let epoch, epoch != accountEpoch { return false }
         appendMessage(message)
+        if let epoch, epoch != accountEpoch { return false }
         await persistMessage(message)
+        if let epoch, epoch != accountEpoch { return false }
 
         do {
             guard let client = oneBotClient else { throw OneBotError.notRunning }
@@ -2971,6 +3389,7 @@ final class RuntimeCoordinator {
                     text: trimmed
                 )
             }
+            if let epoch, epoch != accountEpoch { return false }
             message.status = .sent
             updateMessage(message)
             let updatedConversation = updateConversationAfterSend(conversation: conversation, message: message)
@@ -2984,11 +3403,13 @@ final class RuntimeCoordinator {
             } catch {
                 log(.warning, "Database", "写入消息失败：\(error.localizedDescription)")
             }
+            if let epoch, epoch != accountEpoch { return false }
             let bridgeRTT = Int(Date().timeIntervalSince(sendStartedAt) * 1000)
             log(.info, "Bot", "已发送 \(conversation.kind.label)消息 → \(conversation.displayTitle)：\(displayText.prefix(60))（bridge 往返 \(bridgeRTT)ms）")
             scheduleMemoryMaintenance(conversationID: conversation.id)
             return true
         } catch {
+            if let epoch, epoch != accountEpoch { return false }
             message.status = .failed
             updateMessage(message)
             await persistMessage(message)
@@ -3075,7 +3496,7 @@ final class RuntimeCoordinator {
             return
         }
         log(.info, "Scheduler", "执行定时任务「\(task.name)」→ \(conversation.displayTitle)")
-        await sendOutgoingText(task.content, conversation: conversation)
+        await sendOutgoingText(task.content, conversation: conversation, epoch: accountEpoch)
     }
 
     private func schedulesDidChange(_ tasks: [ScheduledTask]) {
@@ -3162,7 +3583,7 @@ final class RuntimeCoordinator {
             log(.error, "Bot", "手动发送失败：\(error.localizedDescription)")
             return
         }
-        let sent = await sendOutgoingText(text, conversation: conversation)
+        let sent = await sendOutgoingText(text, conversation: conversation, epoch: accountEpoch)
         if sent {
             ruleEngine.noteReply(conversationID: conversationID)
         }
@@ -3371,18 +3792,25 @@ final class RuntimeCoordinator {
             ?? settings.ai.defaultProviderID
         let provider = providerID.flatMap { settings.provider(id: $0) }
         memoryMaintenanceInFlight.insert(conversationID)
-        Task { [weak self] in
+        let epoch = accountEpoch
+        let task = Task { [weak self] in
             guard let self else { return }
+            defer {
+                self.memoryMaintenanceInFlight.remove(conversationID)
+                self.memoryMaintenanceTasks.removeValue(forKey: conversationID)
+            }
+            guard epoch == self.accountEpoch else { return }
             let count = await self.chatEngine.summarizeOverflow(
                 conversation: conversation,
                 provider: provider,
                 settings: settings
             )
+            guard epoch == self.accountEpoch else { return }
             if count > 0 {
                 await self.loadLongTermMemories()
             }
-            self.memoryMaintenanceInFlight.remove(conversationID)
         }
+        memoryMaintenanceTasks[conversationID] = task
     }
 
     // MARK: Logs / stats
@@ -3396,14 +3824,16 @@ final class RuntimeCoordinator {
 
     private func scheduleStatsPersist() {
         statsFlushTask?.cancel()
+        let epoch = accountEpoch
         statsFlushTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             guard !Task.isCancelled else { return }
-            await self?.persistStats()
+            await self?.persistStats(expectedEpoch: epoch)
         }
     }
 
-    private func persistStats() async {
+    private func persistStats(expectedEpoch: UInt64? = nil) async {
+        if let expectedEpoch, expectedEpoch != accountEpoch { return }
         guard let data = try? JSONEncoder().encode(store.stats),
               let text = String(data: data, encoding: .utf8) else { return }
         try? await memory.setSetting(key: "stats.json", value: text)
@@ -3478,6 +3908,10 @@ extension AppStore {
     // MARK: Bot lifecycle
 
     func startBot() async {
+        guard !isSwitchingAccount else {
+            lastError = RuntimeError.accountSwitching.localizedDescription
+            return
+        }
         guard !isBotRunning else { return }
         isBusy = true
         defer { isBusy = false }
@@ -3485,6 +3919,15 @@ extension AppStore {
         await coordinator.bootstrapIfNeeded()
         do {
             try await coordinator.startRuntime()
+            // startRuntime 期间若 bridge 回报的登录账号与档案不一致，切号会停掉
+            // 刚启动的运行时；此时不能把 isBotRunning 标成 true。
+            await coordinator.consumePendingAccountSwitchIfNeeded()
+            guard coordinator.isRuntimeRunning() else {
+                isBotRunning = false
+                settings.bot.enabled = false
+                persist()
+                return
+            }
             isBotRunning = true
             settings.bot.enabled = true
             persist()
@@ -3492,6 +3935,7 @@ extension AppStore {
         } catch {
             isBotRunning = false
             settings.bot.enabled = false
+            accountSwitchPending = false
             lastError = error.localizedDescription
             coordinator.log(.error, "Bot", "启动失败：\(error.localizedDescription)")
         }

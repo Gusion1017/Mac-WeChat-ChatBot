@@ -8,7 +8,12 @@
 - **本会话早期片段召回**：当轮消息关键词命中本会话窗口外的旧消息时，
   最多注入 3 条带说话人标注的片段，并明确提示可能已过时。
 
-数据全部保存在本地 SQLite（`AppPaths.databaseFile`），不依赖云端。
+数据全部保存在本地 SQLite（当前微信账号的 `accounts/<wxid>/chatbot.sqlite`），不依赖云端。
+
+> **多微信账号（2026-10-27）**：短期窗口、长期记忆、`memory_state` 游标与记忆页都绑定
+> **当前微信账号的账号库**；换一个微信账号登录后，看到的是该账号自己的记忆，不会串号。
+> 旧版单库在首次升级时复制到旧 `self_id` 对应的账号档案（只 copy 不删）；旧媒体仍保留在根
+> `media/`。隔离矩阵、识别与切号流程见 [`accounts.md`](accounts.md)。
 
 ## 1. 短期记忆窗口
 
@@ -211,6 +216,8 @@ timeWeight       = max(0.0001, baseWeight × importanceFactor × usageFactor
 ## 6. 记忆文件夹（记忆页 · 长期记忆模式）
 
 - 页面为**左侧文件夹栏 + 右侧记忆列表**（与「聊天记录」模式的双栏结构一致）。
+- 记忆页只读取当前微信账号的账号库：换账号后文件夹、搜索、聊天记录都切到该账号；
+  「全部记忆」= 该账号内的全部记忆，不跨微信账号。
 - 文件夹：
   - **全部记忆**：所有长期记忆；默认选中；
   - **全局记忆**：`conversation_id` 为空的全局记忆；
@@ -272,6 +279,20 @@ memory_state(conversation_id, last_summarized_rowid, updated_at)
   - 迁移结束 `PRAGMA user_version=4;`。
 - 会话 `working_hours` 仍用列探测的方式补列，不需要单独的版本号。
 
+### 7.1 按微信账号的数据库与旧版迁移
+
+- 每个微信账号有自己的 `accounts/<id>/chatbot.sqlite`，`user_version`、`memories`、`memory_state`
+  与 `settings` KV 都在各自库内。`MemoryStore.open()` 打开当前账号库时才执行 `migrate`；
+  A 账号的迁移不会影响 B 账号。
+- 旧版单库升级时，`AccountProfile.runLegacyMigrationIfNeeded()` 先用 SQLite Backup API 把旧
+  `chatbot.sqlite` 复制成一致快照（含 WAL 已提交内容）到旧库 `settings.onebot.self_id` 对应的
+  账号目录，再打开该库并跑同样的 schema 迁移；旧库原文件（含 `-wal`/`-shm`）保留，不移动、不重命名。
+- 旧记忆里的 `mediaPath` 是**绝对路径**：旧版根目录 `media/` 原样保留，旧图片/语音继续可读；
+  升级后新产生的媒体写入 `accounts/<id>/media/`，不迁移旧文件。手动移动/删除根 `media/`
+  会让旧记忆对应媒体失效。
+- 删除聊天/会话只作用于当前账号库；不会删除其它账号的长期记忆或 `memory_state`。
+  账号级隔离与切号见 [`accounts.md`](accounts.md) §5、§8。
+
 ## 8. 验证
 
 单元测试（`app/Tests/WeChatAITests/CoreServicesTests.swift`，使用临时目录/独立
@@ -313,6 +334,9 @@ memory_state(conversation_id, last_summarized_rowid, updated_at)
   按综合权重保留前 6 条。
 - **迁移**：手工创建无 `access_count` 的旧表（`user_version = 2`），
   `open()` 后补列、旧数据可读写，`user_version` 变为 4。
+- **账号库切换**：用临时目录建立 A/B 两个 `MemoryStore` 库，写入各自的会话/消息/长期记忆/
+  `memory_state`/日志/KV 后切换 `switchDatabase(to:)`，断言互不可见；切回 A 数据仍在。
+  旧单库复制到账号目录后，会话/消息/长期记忆条数与旧库一致（只 copy，不删除旧库）。
 - **模型页总开关**：`ChatEngine.forceStream(for:)` 在「流式回复」关闭时返回
   `false`（所有通道非流式），开启时返回 `nil`（按各 provider 的 `stream`）。
 
@@ -341,6 +365,12 @@ cd app && swift build --build-tests --scratch-path .build-memory
   不能当作最新事实，也不会召回其它会话的原文。
 - 其它会话的原文不会进入当前对话；需要多个会话共享的信息请写成**全局记忆**
   或当前会话的手写记忆。
+- **记忆按微信账号隔离**：所谓「全局记忆」只在**当前微信账号**内对所有会话生效，
+  不会跨微信账号共享；换账号后看到的是该账号自己的记忆库。
+- **旧媒体路径不迁移**：旧记忆里的图片来源仍是根 `media/` 绝对路径；换账号或升级都不会
+  移动这些文件，删除旧媒体会让对应记忆的媒体失效。
+- **账号删除/切走不会删除记忆**：旧账号的记忆仍保留在 `accounts/<旧账号>/chatbot.sqlite`；
+  需要时切回该微信账号查看，App 不提供跨账号查看或迁移记忆的入口。
 - 核心记忆只注入「当前会话 + 全局」，并非所有会话都可见；
   需要多个会话生效的核心设定应设为全局记忆。
 - 核心记忆优先占用注入名额，但总数仍受 `ChatEngine.longTermMemoryLimit`

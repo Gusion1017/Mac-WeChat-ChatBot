@@ -10,7 +10,9 @@
 | --- | --- |
 | `Core/AppStore.swift` | 共享状态骨架（`@MainActor @Observable`，UI 只读；运行时方法在扩展中） |
 | `Core/AppStore+Runtime.swift` | 运行时编排 + 对 UI 暴露的全部运行时 API |
-| `Services/SettingsPersistence.swift` | 配置 JSON 原子写、串行化、合并写入 |
+| `Services/SettingsPersistence.swift` | 配置 JSON 原子写、串行化、合并写入（全局 `config.json` + 当前账号 `profile.json` 双写） |
+| `Services/WeChatAccountResolver.swift` | 识别微信客户端当前登录账号（登录标记 mtime → 账号目录活动），返回账号 ID 与图片临时目录；mask/校验 |
+| `Services/AccountProfile.swift` | 账号档案布局、`account-state.json`、启动早期 `preparePaths`、切号激活、`_unassigned` 认领、旧版单库迁移 |
 | `Services/KeychainStore.swift` | API Key 的 Keychain 读写/删除/存在性 |
 | `Services/MemoryStore.swift` | SQLite（WAL）持久化：会话/消息/日志/定时任务/长期记忆/KV |
 | `Services/SleepPreventionService.swift` | 通用防睡眠：IOKit 空闲睡眠断言 + 电源适配器监听（事件驱动，不轮询） |
@@ -77,6 +79,15 @@ func isRuntimeConnected() -> Bool
 // 设备与账户（2026-10-26）
 func refreshSystemVitals() async
 // 只读状态：store.batteryStatus / store.deepSeekBalance / store.isBalanceRefreshing
+
+// 微信账号档案（2026-10-27）
+var activeAccountID: String
+var activeAccountIsUnassigned: Bool
+var accountSwitchNotice: String?
+var savedWeChatAccounts: [SavedWeChatAccount]
+var isSwitchingAccount: Bool
+func dismissAccountSwitchNotice()
+func refreshWeChatAccount() async -> Bool   // 仅检测到不同账号才切库；返回是否真的切换
 ```
 
 约定：
@@ -92,6 +103,71 @@ func refreshSystemVitals() async
 - `clearMessages(nil)` 清空全部消息并重置所有会话预览；指定会话时仅清该会话。
 - 已删除 `AppStore.swift` 里的运行时 stub；所有运行时方法在 `AppStore+Runtime.swift`
   通过扩展实现，公开属性语义不变（`isBotRunning` 仅在启动成功后为 true）。
+
+### 2.1 启动顺序与账号档案（2026-10-27）
+
+多微信账号隔离后，启动顺序与旧版不同，**账号路径必须在读配置/开库之前确定**：
+
+```
+AppStore.init
+  ├─ AccountProfile.preparePaths()     # 仅 stat/JSON，不打开 SQLite；决定 provisional active
+  ├─ SettingsStore.load()              # config.json（全局）+ 当前 active 的 profile.json
+  └─ activeAccountID / accountSwitchNotice / savedWeChatAccounts → observable
+
+RuntimeCoordinator.performBootstrap
+  1. AppPaths.ensureDirectories()      # root + accounts/<id>/{media,logs} + bridgeLog/backups/runtime
+  2. await Task.detached { AccountProfile.runLegacyMigrationIfNeeded() }   # 旧版迁移，阻塞 IO
+  3. active 变化或迁移写入了 profile 种子时：
+                     store.applyLoadedSettings(SettingsStore.load())
+                     store.refreshAccountObservables(notice: outcome.notice)
+                     active 变化时 selfID = ""（等 bridge 重新确认）
+  4. await Task.detached { AccountProfile.claimUnassignedForStartup(...) }
+                     # _unassigned 有数据且已识别账号：开库前认领并切到该账号
+  5. memory.open()                     # 打开最终 active 的 accounts/<id>/chatbot.sqlite
+  6. LogPipeline.attach(store:memory:) # 迁移/认领完成后才接日志落库
+  7. 启动期历史修复（自消息/伪群/appmsg/引用）只在当前账号库内执行
+  8. loadPersistedState / loadStats / refreshStatus
+
+RuntimeCoordinator.startRuntime
+  0. bootstrapIfNeeded
+  1. resolver 再检测：detected != active → switchAccount(to:reason:.detectedBeforeStart)
+  2. bridgeIdentity()：-self_id / -image_path / -media_dir 全部取当前账号
+  3. bridge 回报 get_login_info → adoptSelfID：与 active 不一致 → switchAccount(.loginMismatch)
+```
+
+不变式：
+
+- `preparePaths()` 早于 `SettingsStore.load()`，且不读 SQLite；旧库 owner 只在迁移时读取。
+  `state.lastAccountID == _unassigned` 且临时档案有数据时保持 `_unassigned`，等 bootstrap 认领，
+  不能提前改 active/state。
+- 旧版迁移与 `_unassigned` 认领都早于 `memory.open()`，放在后台线程（`Task.detached`）；
+  `MemoryStore.shared` 在 bootstrap 前禁止隐式 open，`LogPipeline` 延后 attach。
+- 注入 `AppSettings` 的测试/诊断（`AppStore(settings:)`）不触碰本机账号目录：
+  `managesAccountProfiles == false`，不打开真实账号库、不 attach 日志落库、不调用
+  `preparePaths`/迁移，也不允许 UI 手动切号。
+- 所有切号（启动、启动机器人前、运行中、设置页重新检测）统一走
+  `RuntimeCoordinator.switchAccount(to:reason:)`，不允许在旧库上直接改 selfID 或局部换路径。
+- 旧版迁移、`_unassigned` 认领、账号识别细节见 [`accounts.md`](accounts.md) §4–§7。
+
+### 2.2 设置持久化（全局 `config.json` + 账号 `profile.json`）
+
+| 文件 | 内容 | 加载 | 保存 |
+| --- | --- | --- | --- |
+| `config.json` | 完整 `AppSettings`（`general/hook/onebot/ai/bot/providers/personas/schedules` 镜像） | `SettingsStore.load()` 先解码它，沿用旧的损坏备份/默认值逻辑 | `SettingsPersistence.save(...)` 写完整 `AppSettings`（含账号字段镜像，供旧版回滚）；账号字段运行时以 profile 为准 |
+| `accounts/<id>/profile.json` | `ProfileSettings`：`schemaVersion` / `bot` / `personas` / `schedules` | `SettingsStore.loadProfile(profileURL:)`，缺失 `.default`，损坏备份 `profile.corrupt-<ts>.json` 后默认 | `SettingsPersistence.save(_:profileURL:)` 在 `profileURL != nil` 时双写；按编码字节去重，原子 replace |
+
+- `SettingsStore.load()` = 解码 `config.json` 得到完整 `AppSettings` → `settings.applyProfile(loadProfile(...))`；
+  即**全局字段来自 config，账号字段以 profile 为准**。
+- `SettingsPersistence.shared = SettingsPersistence(configURL: AppPaths.configFile)`；
+  保留 `init(fileURL:)`（测试、仅 config）并新增 `init(configURL:)`（应用、双写当前 profile）。
+- `save(_:profileURL:)`：显式 `profileURL == nil` 时只写 config；非 nil 时 config 与 profile
+  都按编码字节去重、各自原子写，profile 目标路径变化（切号）时强制写，返回任一文件是否变化。
+  旧 `save(_:)` 等价于 `profileURL == nil`，只写 config（shared 与 `init(fileURL:)` 一致）；
+  应用 `persist()` 显式传当前账号 profile 路径。
+- `AppStore.persist()` 在调用时捕获 `AppPaths.profileFile` 再交给 SettingsPersistence；
+  切号后延迟执行的旧快照仍写回旧账号 profile，不会串号。
+- `AppPaths` 委托 `AccountProfile`：`databaseFile` / `profileFile` / `mediaDirectory` /
+  `logsDirectory` 都指向当前账号；`ensureDirectories()` 不再把新媒体写入根 `media/`。
 
 ## 3. 事件流水线
 
@@ -197,6 +273,46 @@ bridge 事件 image（message_id, 无 url）
 - 未开启识图且原图没有旧描述时不追加说明，旧行为不变。
 - `ChatEngine` system prompt 会说明该标记是图片画面描述、不是本轮新发言，避免模型猜图。
 
+### 3.4 切号（运行中与启动阶段，2026-10-27）
+
+启动/启动机器人时由 resolver 判定账号档案；`bridge` 的 `get_login_info` 用于运行期确认与兜底
+（回包与档案不一致时切号，见 [accounts.md](accounts.md) §4.3）。`adoptSelfID(_:)` 收到账号后：
+
+```
+id 非法（不满足账号 ID 校验）→ warning，忽略，不落盘
+id == active 且 active != _unassigned
+  → 写 self_id / self_id_source=login；在当前账号库内补跑历史修复
+id != active 或 active == _unassigned
+  ├─ runtimeStarting == true
+  │    → 记 pendingAccountSwitch，不立刻拆运行时
+  │    → startRuntime 收尾后 consumePendingAccountSwitchIfNeeded() 再切
+  └─ 否则 → switchAccount(to: id, reason: .loginMismatch)
+```
+
+`switchAccount(to:reason:)` 的顺序固定：
+
+1. 若机器人在跑，先停止 bridge / OneBot / 调度 / 媒体队列（停止过程 flush 日志/设置/统计）；
+2. drain 后台写入任务（长记忆总结/群昵称回填/统计落盘：cancel + await）；
+3. `memory.suspend()`（close + 禁止 `ensureOpen` 隐式重开）；
+4. `claimUnassigned(by:)`（active 仍为 `_unassigned`）或 `AccountProfile.activate(id)`；
+5. `memory.switchToActiveAccountDatabase()`；
+6. 应用新账号 `profile`（`SettingsStore.load()` / `applyLoadedSettings`）；
+7. 清空内存中的会话/消息/长期记忆/日志/统计/选中会话/回复进度；
+8. 从新库载入数据，`store.persist()` 把 profile 写回新账号；
+9. 更新 `activeAccountID` / `activeAccountIsUnassigned` / `savedWeChatAccounts` /
+   `accountSwitchNotice`，关闭 `settings.bot.enabled`、`isBotRunning = false`。
+
+切号期间 `isSwitchingAccount=true`：`startBot`/`startRuntime`/`reconcileWeChatAccount` 互斥，
+总览与菜单栏启动按钮禁用；避免 bridge 用旧档案身份启动。
+
+- 运行中切号**不自动重启机器人**，由用户重新启动；避免用户没注意就自动用新账号回复。
+- 启动机器人前检测到换号（`startRuntime` 里的 resolver 复检）同样走 `switchAccount`，
+  然后才拼接 bridge 的 `-self_id` / `-image_path` / `-media_dir`。
+- 设置页「重新检测」调用 `AppStore.refreshWeChatAccount()` → `RuntimeCoordinator.reconcileWeChatAccount()`，
+  只在检测到不同账号时切库；返回是否真的切换。
+- 切换失败时尽力回到原账号库，保持运行时停止、复位 `isBotRunning`/`bot.enabled`
+  并提示重试；不会把两个账号的数据写进同一库。
+
 ## 4. 并发与线程模型
 
 | 组件 | 隔离方式 | 说明 |
@@ -204,7 +320,8 @@ bridge 事件 image（message_id, 无 url）
 | `AppStore` | `@MainActor @Observable` | UI 只读；所有状态回主线程更新 |
 | `RuntimeCoordinator` | `@MainActor` | 编排、事件处理、统计；等待服务用 `await` 让出主线程 |
 | `MemoryStore` | `actor` + SQLite `FULLMUTEX` | 所有 SQL 串行；UI/服务层都 `await` |
-| `SettingsPersistence` | `actor` | 编码、原子替换、合并写 |
+| `AccountProfile` | 静态状态 + `NSLock` | 账号解析/状态读写串行；迁移是阻塞 IO，调用方必须在后台线程执行 |
+| `SettingsPersistence` | `actor` | 编码、原子替换、合并写；config/profile 双写 |
 | `SchedulerService` | `actor` | 单循环 + `CheckedContinuation` 唤醒，无轮询 |
 | `OneBotClient` | 私有串行 `DispatchQueue` + `URLSessionWebSocketTask` 接收 `Task` | 网络/解析不在主线程；回调由运行时 hop 回 MainActor |
 | `ImageFetcher` | `@MainActor` 串行队列 + 可取消 `Task` | 一次只请求一张图；同一消息只尝试一次；停止/关闭设置即取消 |
@@ -226,9 +343,16 @@ revision 未变化时直接跳过，空闲时不做 O(n) 复制 / 遍历 2000 �
 
 ### 5.1 MemoryStore（SQLite）
 
-- 路径：`~/Library/Application Support/WeChatAI/chatbot.sqlite`；`journal_mode=WAL`、
+- 路径：当前微信账号的 `accounts/<id>/chatbot.sqlite`（`AppPaths.databaseFile`）；`journal_mode=WAL`、
   `synchronous=NORMAL`、`busy_timeout=3000`、`foreign_keys=ON`。
-- 表：`conversations`、`messages`、`logs`、`schedules`、`settings`（KV）。
+  `MemoryStore(databaseURL: nil)` 在 `open()` 时才解析路径（旧版单库迁移/切号可以先定 activeID）；
+  `MemoryStore(databaseURL:)` 仍可注入固定路径给单测。
+- 切库：`switchDatabase(to:)` / `switchToActiveAccountDatabase()` 关闭旧库并打开当前账号库；
+  `path` 是 actor 内属性，避免从后台线程读到半更新路径。切号前由 Runtime 先关闭库，
+  认领/激活完成后再打开，不能同时打开两个账号库。
+- 旧版根目录 `chatbot.sqlite` 迁移后保留，但不再被打开/写入；旧媒体同理。
+- 表（每个账号库独立）：`conversations`、`messages`、`logs`、`schedules`、`settings`（KV），
+  以及长期记忆的 `memories` / `memory_state` 等。
   消息表主键 `id`，`INSERT ... ON CONFLICT(id) DO UPDATE`，可安全重复投递；
   索引：`(conversation_id, timestamp DESC)`、`(timestamp DESC)`、`logs(date DESC)`。
 - 批量写：`upsertMessages` / `appendLogs` / `upsertConversations` / `replaceSchedules`
@@ -442,10 +566,13 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 - bridge：`Process` 启动 `bridge/onebot`，`currentDirectoryURL = bridge/`（onebot 从 cwd 读
   script.js），参数按 architecture.md §3.1：
   `-type=gadget -gadget_addr=127.0.0.1:<gadgetPort> -wechat_conf=<json>
-   -receive_host=<host>:<port> -token=<token> -conn_type=websocket -image_path=<真实临时目录>`。
-  `image_path` 优先用户配置；否则扫描
-  `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/*/temp/`；
-  找不到时阻止启动并提示先登录微信。
+   -receive_host=<host>:<port> -token=<token> -conn_type=websocket -image_path=<当前账号临时目录>`。
+  已识别账号时 Runtime **忽略用户配置的** `onebot.imagePath`，直接传
+  `AccountProfile.activeImageDirectory()`（当前账号的 `xwechat_files/<wxid>_*/temp`）与
+  `accounts/<当前账号>/media`；找不到图片临时目录时阻止启动并提示先登录微信/打开图片，
+  不再回退按 mtime 猜账号。未识别账号（`_unassigned`）时才允许显式 `imagePath`/自动探测。
+  `-self_id` 已识别账号时用 `AccountProfile.activeID`，未识别时用运行时 selfID
+  （见 architecture.md §3.1）。
 - stdout/stderr 行流式打日志（token 自动脱敏），进程退出更新 `bridgeRunning/bridgePID`；
   非 0 退出 → `failed`。App 终止通知会停止 bridge/OneBot/Scheduler 并 flush 日志统计。
 - **进程生命周期安全**（QA 连续 kill/重启崩溃回归）：`Process.terminationStatus` 只在
@@ -494,6 +621,10 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 | 场景 | 行为 |
 | --- | --- |
 | 配置损坏 | `SettingsStore.load` 备份 `config.corrupt-*.json` 后回退默认值 |
+| 账号 profile 损坏 | `SettingsStore.loadProfile` 备份 `profile.corrupt-<ts>.json` 后回退 `.default`；不影响其它账号 |
+| 旧版迁移失败 | 不写 `account-state.json`；旧库/旧媒体保持原样，下次启动重试；日志记录原因 |
+| 账号切换失败 | 运行时已先停止；保持停止并提示重试，不把两个账号的数据写进同一库 |
+| 登录账号 ID 非法 | 记 warning 并忽略，不创建账号目录（防止路径穿越） |
 | 配置写失败 | `SettingsPersistence` 抛错，UI 触发方可通过日志看到；不产生半截文件 |
 | Keychain 失败 | 明确 `KeychainError`；启动时缺 Key 直接阻止机器人启动 |
 | AI 超时/5xx/429 | 标记可重试，ChatEngine 按 retryCount 退避重试；最终失败计入 `failedToday` 并写日志 |
@@ -513,7 +644,12 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 - bridge/WS 只连接 `127.0.0.1`，不监听外部网卡；无 WebView/Electron。
 - 安装/恢复脚本只允许操作 `/Applications/WeChat.app`（或设置中的微信路径）与 App 备份目录；
   安装前强制微信退出并做完整官方备份。
-- 媒体仅从本地 `file://`/base64 复制，限制 40MB，文件名使用 UUID，不跟随符号链接路径。
+- 媒体仅从本地 `file://`/base64 复制，限制 40MB，文件名使用 UUID，不跟随符号链接路径；
+  新媒体写入当前账号 `accounts/<id>/media/`，不再写根 `media/`。
+- 账号隔离：账号目录名经过 `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` 校验，`_unassigned` 为保留名；
+  UI 与日志展示 mask（见 `AppAccount.maskedID`），公开文档不写真实 wxid。
+- 旧版迁移只 copy、不删除旧库/旧媒体/旧配置；`account-state.json` 只存账号指针，不含聊天内容。
+- Keychain、语音模型、日志文件与备份全局共享；换账号不会复制或删除 API Key。
 
 ## 8. 自检与测试
 
@@ -528,12 +664,12 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 `WakeWindowTests.swift`（6）、`ImageFetchTests.swift`（16）、`OneBotEventParserTests.swift`（5）、
 `DataRepairTrustTests.swift`（2）、`VisionTests.swift`（12）、`SystemVitalsTests.swift`（16），
 以及 `VoiceReadTests` / `VoiceSynthesisTests` / `VoiceRuntimeStatusTests` / `VoiceCatalogTests` 等语音测试；
-2026-10-27 实测共 407 项）：
+2026-10-27 账号隔离 + 2026-10-28 审查修复后为 470 项（8 项按环境跳过）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 407 tests, with 8 skipped, 0 failures（2026-10-27）
+# Executed 470 tests, with 8 skipped, 0 failures
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
@@ -560,6 +696,15 @@ AIClient endpoint/请求体/无 Key 字段、ProcessRunner 输出收集，
 以及**取消回归**：启动 `/bin/sleep 5` 后立即取消流，进程被终止且不崩溃、事件流及时结束；
 另有「`.terminated` 事件只在进程退出后发出」的不变量测试（避免再次出现
 `terminationStatus: task still running`）。
+多账号隔离（2026-10-27）新增覆盖：resolver 登录标记优先/目录活动回退/非法目录、mask 规则、
+`AccountLayout` 路径与目录创建、`preparePaths` 的 detected/state/`_unassigned` 回退与
+pendingNotice、旧版迁移（owner 有效/无效、owner == active、owner != active、无旧库、幂等、
+profile seed、旧文件保留）、`claimUnassigned` 只复制不删除/不覆盖已有库、
+config + profile 双文件加载/损坏备份/去重双写、`MemoryStore` 切换 A/B 库后会话/记忆/日志/KV
+互不可见。2026-10-28 审查修复另加回归：`_unassigned` 启动认领、`legacyMigrationDone` 门禁、
+空壳目标库替换、WAL 主库无 `-wal/-shm` 时的迁移、`MemoryStore.suspend()` 禁止隐式 open。
+当前 `swift test` 470 项通过
+（8 项按环境跳过）。
 
 ### 8.2 App 内诊断开关
 
@@ -633,3 +778,9 @@ Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Ke
   并行构建时用独立 scratch path（如 `.build-core-tests` / `.build-core`）避免 SwiftPM 锁冲突。
 - **headless 环境限制**：无 WindowServer 的 shell 中直接运行 App 二进制不会创建 SwiftUI Scene，
   因此 `WECHATAI_SELFTEST` 的 App 内入口不会触发；CI 请用 `swift test`。
+- **多账号**：同一时间只打开一个账号库；运行中换号会停止机器人且不自动重启。不能手动选择
+  账号档案/数据库，切号由 resolver 与 bridge `get_login_info` 驱动。未登录时使用
+  `_unassigned`，登录后认领复制（保留原目录）。旧版迁移只复制不删除，首次升级需要额外磁盘。
+  详细边界见 [`accounts.md`](accounts.md) §8。
+- **账号相关日志**：App 内日志在账号库中（分账号），崩溃/bridge 文件日志全局；
+  排查换号问题需要同时看 `account-state.json`、账号目录与 bridge 日志。

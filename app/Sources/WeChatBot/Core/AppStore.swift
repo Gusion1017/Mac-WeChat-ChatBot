@@ -36,6 +36,27 @@ final class AppStore {
     /// 由 Runtime 刷新；「机器人 → 语音」与句柄捕获引导只读展示，语音回复决策用它拦截未就绪状态。
     var voiceRuntimeStatus: VoiceRuntimeStatus = .unavailable
 
+    // MARK: 微信账号档案（多账号数据隔离）
+
+    /// 当前微信账号（wxid）；尚未识别时为 `_unassigned`。
+    /// 聊天记录、长期记忆、会话设置、人格与定时任务都保存在该账号的档案里，
+    /// 换微信账号后由 RuntimeCoordinator 自动切到对应档案。
+    var activeAccountID: String = AppAccount.unassignedID
+    var activeAccountIsUnassigned: Bool = true
+    /// 启动检测到账号变化 / 运行中切号后的提示；总览顶部展示，用户可关闭。
+    var accountSwitchNotice: String?
+    /// `accounts/` 下已保存的账号档案（设置页展示，不含 `_unassigned`）。
+    var savedWeChatAccounts: [SavedWeChatAccount] = []
+    /// 正在关闭旧库并切换账号档案；设置页用它在「重新检测」时禁用按钮。
+    var isSwitchingAccount = false
+    /// 最近一次「重新检测微信账号」失败原因；成功/无变化时清空，设置页用于区分
+    /// 「未检测到变化」与「检测到但切换失败」。
+    var lastAccountSwitchError: String?
+    /// 启动机器人过程中检测到账号变化、已排队等运行时就绪后再切号。
+    var accountSwitchPending = false
+    /// `settings == nil` 时由 AppStore 自己解析账号档案；注入设置的测试/诊断不触碰本机账号目录。
+    let managesAccountProfiles: Bool
+
     /// 首次启用语音回复 / 运行时启动后检测到发送句柄缺失时，由 RootView 弹出的捕获引导。
     /// 与语音设置面板内的局部弹窗相互独立：面板负责「用户刚开启开关」，这里负责「启动时检测」。
     var isVoiceSetupPromptPresented = false
@@ -71,16 +92,28 @@ final class AppStore {
     /// 音色试听：与合成服务共用引擎；两个设置入口共用一个播放器，避免同时出声。
     let voicePreview: VoicePreviewController
 
-    init(settings: AppSettings = SettingsStore.load()) {
+    init(settings: AppSettings? = nil) {
+        // 账号解析只做 stat / JSON 读取，必须早于 SettingsStore.load()，
+        // 这样 config/profile/DB/媒体目录都会指向当前微信账号。
+        let managesProfiles = settings == nil
+        self.managesAccountProfiles = managesProfiles
+        if managesProfiles {
+            AccountProfile.preparePaths()
+        }
+        let loaded = settings ?? SettingsStore.load()
         let synthesis = VoiceSynthesisService()
         self.voiceSynthesis = synthesis
         self.voicePreview = VoicePreviewController(synthesis: synthesis)
-        self.settings = settings
-        self.providers = settings.providers
-        self.personas = settings.personas
-        self.schedules = settings.schedules
-        L10n.apply(settings.general.language)
-        self.hookStatus.versionConfigFile = settings.hook.versionConfigPath
+        self.settings = loaded
+        self.providers = loaded.providers
+        self.personas = loaded.personas
+        self.schedules = loaded.schedules
+        self.activeAccountID = AccountProfile.activeID
+        self.activeAccountIsUnassigned = AccountProfile.isUnassigned
+        self.accountSwitchNotice = AccountProfile.pendingNotice
+        self.savedWeChatAccounts = AccountProfile.savedAccounts()
+        L10n.apply(loaded.general.language)
+        self.hookStatus.versionConfigFile = loaded.hook.versionConfigPath
         // Reading WeChat's Info.plist is disk I/O and used to run synchronously in init.
         // It is filled in off-main by the runtime bootstrap instead (`AppStore+Runtime`),
         // which also refreshes the full hook status shortly after.
@@ -111,18 +144,53 @@ final class AppStore {
         settings.schedules = schedules
         settings.bot.defaultProviderID = settings.ai.defaultProviderID
         let snapshot = settings
+        // profile 路径在调用时捕获：切号后延迟执行的旧快照仍写回旧账号的 profile，
+        // 不会把 A 账号的机器人配置写进 B 账号。
+        let profileURL = AppPaths.profileFile
         // Encoding/atomic write happens on SettingsPersistence's actor, never on MainActor.
-        Task { try? await SettingsPersistence.shared.save(snapshot) }
+        Task {
+            try? await SettingsPersistence.shared.save(snapshot, profileURL: profileURL)
+        }
         RuntimeRegistry.existing(for: self)?.settingsDidChange()
     }
 
     func reload() {
-        let loaded = SettingsStore.load()
+        applyLoadedSettings(SettingsStore.load())
+        refreshAccountObservables()
+    }
+
+    /// 把磁盘上（全局 config.json + 当前账号 profile.json）的设置整体应用回内存。
+    /// Runtime 切号/旧版迁移后 activeID 变化时也复用它。
+    func applyLoadedSettings(_ loaded: AppSettings) {
         settings = loaded
         providers = loaded.providers
         personas = loaded.personas
         schedules = loaded.schedules
         L10n.apply(loaded.general.language)
+    }
+
+    /// 同步 `AccountProfile` 的静态状态到 UI（切号/启动迁移后调用）。
+    func refreshAccountObservables(notice: String? = nil) {
+        activeAccountID = AccountProfile.activeID
+        activeAccountIsUnassigned = AccountProfile.isUnassigned
+        if let notice {
+            accountSwitchNotice = notice
+        }
+        savedWeChatAccounts = AccountProfile.savedAccounts()
+    }
+
+    func dismissAccountSwitchNotice() {
+        accountSwitchNotice = nil
+    }
+
+    /// 设置页「重新检测微信账号」：仅当微信客户端最近登录账号与当前档案不同才切库。
+    /// - Returns: 是否真的切换了账号档案。
+    func refreshWeChatAccount() async -> Bool {
+        guard managesAccountProfiles else { return false }
+        lastAccountSwitchError = nil
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.bootstrapIfNeeded()
+        return await coordinator.reconcileWeChatAccount()
     }
 
     /// Changes the interface language and persists it. Views re-render through the

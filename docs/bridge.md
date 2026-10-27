@@ -196,12 +196,14 @@ bridge/onebot \
   -receive_host=127.0.0.1:58080 \
   -token=<token> \
   -conn_type=websocket \
-  -image_path=/path/to/.../Img \
-  -media_dir="$HOME/Library/Application Support/WeChatAI/media" \
+  -image_path=/path/to/.../xwechat_files/<wxid>_<suffix>/temp \
+  -media_dir="$HOME/Library/Application Support/WeChatAI/accounts/<wxid>/media" \
   -log_level=info
 ```
 
-参数与 [`docs/architecture.md`](architecture.md) §3.1 完全一致。
+参数与 [`docs/architecture.md`](architecture.md) §3.1 完全一致。已识别微信账号时，
+App 强制把 `-image_path` / `-media_dir` 指向当前账号目录（忽略用户配置的
+`onebot.imagePath`）；未识别账号时才使用显式路径/自动探测。
 
 ### 2.3 行为说明
 
@@ -268,7 +270,7 @@ bridge/onebot \
 
 | action | 响应 | 说明 |
 | --- | --- | --- |
-| `get_login_info` | `{"echo":..., "status":"ok", "data":{"user_id":..., "nickname":...}}` | 上游 `nickname` 直接填 `wxid`（不是昵称）；`user_id` 来自 `image_path` 推断或已收到事件。 |
+| `get_login_info` | `{"echo":..., "status":"ok", "data":{"user_id":..., "nickname":...}}` | 上游 `nickname` 直接填 `wxid`（不是昵称）；`user_id` 优先取 App 传入的 `-self_id`，缺失时从 `image_path`/已收到事件推断。App 的账号档案以 resolver 为准，回包用于运行期确认。 |
 | `get_group_member_info` | `{"echo":..., "status":"ok", "data":{"nickname":...}}` | 只查进程内缓存（曾收到该群该成员消息）；未命中时为 `null`。 |
 | `get_contact_directory` | `{"echo":..., "status":"ok", "data":{"ok":true,"users":{...},"groups":{...}}}` | 本机**只读**读取通讯录后的目录；失败回 `{"status":"failed","error":...}`。 |
 | `send_private_msg` / `send_group_msg` | **不回包** | 发送结果只写日志；成功/失败不会产生 echo/响应。App 应以 HTTP 发送为主通道。 |
@@ -485,7 +487,7 @@ go test -count=1 -timeout=120s -run 'TestSendHandlerAuth|TestWebSocketGetLoginIn
    下载失败会导致该条事件不推送；大文件会阻塞该事件。
 8. **昵称缓存依赖历史消息**：`at`、`get_group_member_info` 使用进程内缓存，
    冷启动后未收到过对应群成员消息时可能缺失。
-9. **`myWechatId` 推断**：未收到事件前从 `image_path` 的
+9. **`myWechatId` 推断**：优先用 App 传入的 `-self_id`；未传时从 `image_path` 的
    `xwechat_files/<wxid>_xxx/...` 推断，路径格式不符时可能为空或截断。
 10. **日志含聊天内容**：`Info("发送数据", ...)` 会记录完整事件 JSON；日志文件
     （`run_bridge.sh` 默认 `bridge/log/`，App 默认 `~/Library/Logs/WeChatAI/bridge/`）

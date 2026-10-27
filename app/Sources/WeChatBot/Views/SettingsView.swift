@@ -825,7 +825,7 @@ struct SettingsView: View {
                             .font(.system(.caption, design: .monospaced))
                     }
 
-                    FormField(label: "图片临时目录", hint: "bridge 读取微信图片的目录，留空则自动探测") {
+                    FormField(label: "图片临时目录", hint: "已识别微信账号时使用当前账号目录；仅未识别账号时使用这里的值，留空则自动探测") {
                         TextField(L("自动探测"), text: bind(\.onebot.imagePath))
                             .textFieldStyle(.roundedBorder)
                             .font(.system(.caption, design: .monospaced))
@@ -865,18 +865,95 @@ struct SettingsView: View {
     private var dataSettings: some View {
         VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
             SettingsSection(
-                title: "本机数据",
-                footer: "所有配置、聊天记忆与日志均保存在 Application Support，不上传云端。"
+                title: "当前微信账号",
+                footer: "账号 ID 由微信登录数据识别，界面只显示脱敏结果；所有配置、记忆与日志都保存在本机，不上传云端。"
             ) {
                 VStack(alignment: .leading, spacing: 10) {
-                    PathRow(label: "数据目录", path: AppPaths.supportDirectory.path, revealInFinder: true)
-                    PathRow(label: "配置文件", path: AppPaths.configFile.path, revealInFinder: true)
+                    HStack(alignment: .center, spacing: 8) {
+                        Text(L("账号"))
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 96, alignment: .leading)
+                        Text(currentAccountLabel)
+                            .font(.callout.weight(.medium))
+                            .textSelection(.enabled)
+                        if store.activeAccountIsUnassigned {
+                            PillLabel(text: "临时档案", color: Theme.warning)
+                        } else {
+                            PillLabel(text: "当前", color: Theme.success, symbol: "checkmark")
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    PathRow(label: "账号数据目录", path: AppPaths.accountDirectory.path, revealInFinder: true)
+                    PathRow(label: "账号配置", path: AppPaths.profileFile.path, revealInFinder: true)
                     PathRow(label: "记忆数据库", path: AppPaths.databaseFile.path, revealInFinder: true)
-                    PathRow(label: "日志目录", path: AppPaths.logsDirectory.path, revealInFinder: true)
-                    PathRow(label: "备份目录", path: AppPaths.backupsDirectory.path, revealInFinder: true)
                     PathRow(label: "媒体目录", path: AppPaths.mediaDirectory.path, revealInFinder: true)
+                    SettingsDivider()
+                    PathRow(label: "全局配置", path: AppPaths.configFile.path, revealInFinder: true)
+                    PathRow(label: "备份目录", path: AppPaths.backupsDirectory.path, revealInFinder: true)
+                    PathRow(label: "运行日志", path: CrashReporter.logsDirectory.path, revealInFinder: true)
+                    SettingsDivider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Button {
+                            refreshWeChatAccount()
+                        } label: {
+                            HStack(spacing: 6) {
+                                if store.isSwitchingAccount {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                }
+                                Text(L("重新检测微信账号"))
+                            }
+                        }
+                        .buttonStyle(.glass)
+                        .disabled(store.isSwitchingAccount)
+                        Text(store.isSwitchingAccount
+                             ? L("正在检测微信登录账号并切换数据…")
+                             : (store.activeAccountIsUnassigned
+                                ? L("尚未识别到微信账号，请先登录微信后点此检测。")
+                                : L("检测当前微信登录账号；检测到变化时切换到该账号的数据。")))
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .padding(14)
+            }
+
+            InlineNotice(
+                kind: .info,
+                title: "数据隔离",
+                message: "聊天记录、长期记忆、会话设置、人格与定时任务随微信账号切换；AI 模型、Hook、OneBot、语音引擎与备份为全局共享。"
+            )
+
+            SettingsSection(
+                title: "已保存的账号",
+                footer: "账号档案保存在 accounts/ 目录；换微信账号后会自动切到对应数据，不会删除其他账号的记录。"
+            ) {
+                VStack(alignment: .leading, spacing: 0) {
+                    if store.savedWeChatAccounts.isEmpty {
+                        Text(L("尚未保存任何账号档案。登录微信并启动机器人后会自动建立当前账号的数据目录。"))
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .padding(14)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        ForEach(Array(store.savedWeChatAccounts.enumerated()), id: \.element.id) { index, account in
+                            if index > 0 { SettingsDivider() }
+                            SavedAccountRow(account: account)
+                        }
+                        if store.savedWeChatAccounts.count <= 1 {
+                            SettingsDivider()
+                            Text(L("只有当前账号。登录其他微信后点「重新检测微信账号」即可建立独立档案。"))
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .padding(14)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
             }
 
             SettingsSection(title: "备份与还原") {
@@ -919,6 +996,14 @@ struct SettingsView: View {
                 LogBufferMaintenanceRow()
             }
         }
+    }
+
+    /// Masked account ID for display; unassigned means WeChat has not been seen signing in yet.
+    private var currentAccountLabel: String {
+        if store.activeAccountIsUnassigned {
+            return L("未识别（等待微信登录）")
+        }
+        return AppAccount.maskedID(store.activeAccountID)
     }
 
     // MARK: About
@@ -1287,6 +1372,29 @@ struct SettingsView: View {
         }
     }
 
+    /// 检测微信客户端当前登录的账号；有变化时由 AppStore 切换到该账号的数据。
+    private func refreshWeChatAccount() {
+        guard !store.isSwitchingAccount else { return }
+        let previousID = store.activeAccountID
+        Task {
+            let switched = await store.refreshWeChatAccount()
+            if store.accountSwitchPending {
+                toast.show("机器人正在启动，完成后会自动切换账号数据", tone: .info)
+            } else if switched, store.activeAccountID != previousID {
+                toast.show("已切换到当前微信账号的数据", tone: .success)
+            } else if let error = store.lastAccountSwitchError {
+                // 检测到新账号但切换未生效：AppStore 已回退到原账号并保留错误原因。
+                toast.show(error, tone: .error)
+            } else if store.activeAccountIsUnassigned {
+                toast.show("仍未识别到微信账号，请先登录微信后重试", tone: .error)
+            } else if switched {
+                toast.show("切换微信账号数据失败，请稍后重试", tone: .error)
+            } else {
+                toast.show("未检测到账号变化", tone: .info)
+            }
+        }
+    }
+
     // MARK: Info
 
     private var appVersion: String {
@@ -1305,6 +1413,59 @@ struct SettingsView: View {
         #else
         "unknown"
         #endif
+    }
+}
+
+// MARK: - Saved account row
+
+/// One entry of the saved-account list: active marker, masked ID, last-used hint and Finder shortcut.
+private struct SavedAccountRow: View {
+    let account: SavedWeChatAccount
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: account.isActive ? "checkmark.circle.fill" : "circle")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(account.isActive ? Theme.success : Color.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(L(account.maskedID))
+                        .font(.callout.weight(.medium))
+                        .textSelection(.enabled)
+                    if account.isActive {
+                        PillLabel(text: "当前", color: Theme.success)
+                    }
+                }
+                HStack(spacing: 4) {
+                    if let lastUsedAt = account.lastUsedAt {
+                        Text(L("最近使用") + " " + UIFormat.relative(lastUsedAt))
+                    } else {
+                        Text(L("尚未使用"))
+                    }
+                    Text("·")
+                    Text(UIFormat.compactPath(account.directory.path))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(account.directory.path)
+                }
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 8)
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([account.directory])
+            } label: {
+                Image(systemName: "folder")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help(L("在 Finder 中显示"))
+            .accessibilityLabel(L("在 Finder 中显示") + " " + L(account.maskedID))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
     }
 }
 

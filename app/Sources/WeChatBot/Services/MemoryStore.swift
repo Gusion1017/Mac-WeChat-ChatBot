@@ -73,17 +73,27 @@ enum MemoryStoreError: LocalizedError {
 /// - Callers on the main actor must `await` these methods; the UI never blocks on IO.
 /// - WAL mode + `synchronous=NORMAL` give cheap durable writes.
 actor MemoryStore {
-    static let shared = MemoryStore()
+    /// App 级共享实例。数据库路径在 `open()` 时解析（而不是 init 时捕获），
+    /// 这样旧版单库迁移/微信账号切换可以先把 `AccountProfile` 的 activeID 确定下来，
+    /// 再打开对应账号的库；模拟器/单测仍可用 `init(databaseURL:)` 固定路径。
+    static let shared = MemoryStore(implicitOpen: false)
 
-    private let databaseURL: URL
+    private var databaseURL: URL?
     private var db: OpaquePointer?
     private var isOpen = false
     private(set) var openedAt: Date?
+    /// App 级实例在 bootstrap 迁移完成前不允许被日志等隐式 `ensureOpen` 提前打开；
+    /// 切号期间也置 false，防止旧任务把刚 close 的库重新打开。
+    private var implicitOpenAllowed: Bool
+    /// 显式 suspend 后，`ensureOpen` 不再自动 open；必须走 `switchDatabase/open` 恢复。
+    private var suspended = false
 
-    nonisolated var path: String { databaseURL.path }
+    /// 只在 actor 内读取，避免账号切换时从后台线程读到半更新的路径。
+    var path: String { (databaseURL ?? AppPaths.databaseFile).path }
 
-    init(databaseURL: URL = AppPaths.databaseFile) {
+    init(databaseURL: URL? = nil, implicitOpen: Bool = true) {
         self.databaseURL = databaseURL
+        self.implicitOpenAllowed = implicitOpen
     }
 
     deinit {
@@ -97,14 +107,16 @@ actor MemoryStore {
 
     func open() throws {
         guard !isOpen else { return }
+        let target = databaseURL ?? AppPaths.databaseFile
+        databaseURL = target
         try FileManager.default.createDirectory(
-            at: databaseURL.deletingLastPathComponent(),
+            at: target.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
 
         var handle: OpaquePointer?
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        let status = sqlite3_open_v2(databaseURL.path, &handle, flags, nil)
+        let status = sqlite3_open_v2(target.path, &handle, flags, nil)
         guard status == SQLITE_OK, let handle else {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "sqlite3_open_v2 code \(status)"
             if let handle { sqlite3_close_v2(handle) }
@@ -125,6 +137,31 @@ actor MemoryStore {
         }
         isOpen = true
         openedAt = Date()
+        suspended = false
+        implicitOpenAllowed = true
+    }
+
+    /// 切号前调用：关闭库并禁止 `ensureOpen` 隐式重开（claim 复制前库必须保持关闭）。
+    func suspend() {
+        suspended = true
+        implicitOpenAllowed = false
+        close()
+    }
+
+    /// 关闭当前库并打开指定路径（微信账号切换/测试用）。
+    /// 未打开时等价于设置路径后 `open()`；同一路径且已打开时不做任何事。
+    func switchDatabase(to url: URL) throws {
+        suspended = false
+        implicitOpenAllowed = true
+        if isOpen, databaseURL?.standardizedFileURL == url.standardizedFileURL { return }
+        if isOpen { close() }
+        databaseURL = url
+        try open()
+    }
+
+    /// 切到 `AccountProfile` 当前账号的数据库（调用方须先完成 AccountProfile.activate/claim）。
+    func switchToActiveAccountDatabase() throws {
+        try switchDatabase(to: AppPaths.databaseFile)
     }
 
     /// Closes the handle after a WAL checkpoint. Safe to call multiple times.
@@ -2137,7 +2174,11 @@ actor MemoryStore {
     // MARK: - SQLite helpers
 
     private func ensureOpen() throws {
-        if !isOpen { try open() }
+        guard !suspended else { throw MemoryStoreError.notOpen }
+        if !isOpen {
+            guard implicitOpenAllowed else { throw MemoryStoreError.notOpen }
+            try open()
+        }
         guard db != nil else { throw MemoryStoreError.notOpen }
     }
 

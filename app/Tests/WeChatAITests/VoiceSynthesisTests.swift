@@ -164,7 +164,13 @@ final class VoiceSynthesisTests: XCTestCase {
             path.hasSuffix("Library/Application Support/WeChatAI/models"),
             "模型目录必须在 Application Support 下，实际：\(path)"
         )
-        XCTAssertTrue(VoiceSynthesisService.outputDirectory.path.hasSuffix("WeChatAI/media/tts"))
+        // 2026-10-27：新媒体目录按微信账号隔离，TTS 输出位于当前账号 media/tts。
+        let expectedTTS = AppPaths.mediaDirectory.appendingPathComponent("tts", isDirectory: true).path
+        XCTAssertEqual(VoiceSynthesisService.outputDirectory.path, expectedTTS)
+        XCTAssertTrue(
+            expectedTTS.hasSuffix("/accounts/\(AccountProfile.activeID)/media/tts"),
+            "TTS 目录必须位于当前账号 media 下，实际：\(expectedTTS)"
+        )
     }
 
     func testModelCatalogIsConsistent() {

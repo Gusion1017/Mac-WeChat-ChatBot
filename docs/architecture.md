@@ -12,9 +12,10 @@
 │                                                                  │
 │  WeChatAI.app (SwiftUI, 原生)                                    │
 │   ├─ UI / 触发判定 / 人格 / 记忆 / 定时任务 / 日志                 │
+│   ├─ AccountProfile（多微信账号档案：布局/状态/迁移）              │
 │   ├─ OneBotClient (WS + HTTP, 127.0.0.1:58080)                   │
 │   ├─ AIService (URLSession, OpenAI 兼容, 流式)                    │
-│   ├─ MemoryStore (SQLite, ~/Library/Application Support/WeChatAI) │
+│   ├─ MemoryStore (SQLite, accounts/<当前账号>/chatbot.sqlite)      │
 │   └─ HookManager (检测/备份/安装/启动/停止)                        │
 │                    │ spawn/HTTP/WS                               │
 │                    ▼                                             │
@@ -50,7 +51,7 @@
 | --- | --- |
 | `app/Sources/WeChatBot/Models/` | 共享数据模型 / 设置 |
 | `app/Sources/WeChatBot/Core/` | AppStore、运行时编排、生命周期与菜单栏控制器 |
-| `app/Sources/WeChatBot/Services/` | OneBot / AI / 记忆 / 触发判定 / 调度 / Hook 服务 |
+| `app/Sources/WeChatBot/Services/` | OneBot / AI / 记忆 / 账号档案 / 触发判定 / 调度 / Hook 服务 |
 | `app/Sources/WeChatBot/DesignSystem/` | 主题、组件、玻璃效果 |
 | `app/Sources/WeChatBot/Views/` | 所有页面与弹窗 |
 | `app/Sources/WeChatBot/WeChatBotApp.swift` | App 场景（窗口 / 设置 / 命令）与菜单栏控制器装配 |
@@ -63,6 +64,37 @@
 | `assets/` | App 图标源文件与 `.icns` |
 | `docs/` | 架构、契约与操作手册 |
 | `_research/` | 真机证据 / 日志（git 忽略，仅本地保留） |
+
+### 2.1 运行期数据目录（多微信账号，2026-10-27）
+
+App 的聊天数据、机器人配置与新媒体按**当前登录的微信账号**隔离；AI/Hook/OneBot/Keychain/
+语音模型/日志文件仍全局共享。完整行为、隔离矩阵与排障见 [`accounts.md`](accounts.md)。
+
+```
+~/Library/Application Support/WeChatAI/
+├── config.json                     # 全局设置（完整 AppSettings 镜像，兼容旧版回滚）
+├── account-state.json              # {"schemaVersion":1,"lastAccountID":"wxid_xxx","updatedAt":…}
+├── accounts/
+│   ├── _unassigned/                # 尚未识别微信账号时的临时档案（保留名）
+│   │   ├── chatbot.sqlite
+│   │   ├── profile.json
+│   │   └── media/
+│   └── <wxid>/
+│       ├── chatbot.sqlite (+ -wal / -shm)
+│       ├── profile.json            # {"schemaVersion":1,"bot":{…},"personas":[…],"schedules":[…]}
+│       ├── media/                  # 该账号新产生的图片/语音/TTS 输出
+│       ├── logs/                   # 预留（当前为空）
+│       └── legacy-migration.json   # 仅旧版迁移目标有
+├── media/                          # 旧版遗留媒体（只读保留，不迁移、不删除）
+├── backups/ runtime/ cosyvoice/ voice-clones/ models/
+└── chatbot.sqlite                  # 旧版单库（迁移后保留，不删）
+```
+
+- 账号目录名就是 wxid，校验 `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`；`_unassigned` 为保留名。
+- `config.json` 仍是全局设置入口；运行期的 `bot` / `personas` / `schedules` 以
+  `accounts/<当前账号>/profile.json` 为准，`config.json` 中保留一份完整镜像以便旧版回滚。
+- 旧版 `chatbot.sqlite` / `media/` / `config.json` 只 copy、不删除；旧媒体里的绝对路径继续有效。
+- 启动/切号顺序、迁移与 `_unassigned` 认领见 [`accounts.md`](accounts.md) §5–§7。
 
 ## 3. OneBot 桥接契约（已按上游 v0.0.18 源码核对）
 
@@ -78,8 +110,8 @@ bridge/onebot \
   -conn_type=websocket \
   -self_id=<当前登录 wxid> \
   -log_file=$HOME/Library/Logs/WeChatAI/bridge/macos.log \
-  -image_path=/Users/<user>/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/temp/<...>/Img/ \
-  -media_dir="/Users/<user>/Library/Application Support/WeChatAI/media"
+  -image_path=/Users/<user>/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<当前账号>_<suffix>/temp/<...>/Img/ \
+  -media_dir="/Users/<user>/Library/Application Support/WeChatAI/accounts/<当前账号>/media"
 ```
 
 - `onebot` 从**当前工作目录**读取 `script.js`，因此 App 启动进程时 `currentDirectoryURL` 必须指向 bridge 资源目录。
@@ -87,14 +119,22 @@ bridge/onebot \
   运行期会往 bundle 里追加文件、破坏 ad-hoc 签名，导致下次启动被系统以
   `Launch Constraint Violation` 杀掉。App 现在传 `~/Library/Logs/WeChatAI/bridge/macos.log`。
 - `-self_id` 是当前登录账号的权威来源（App 已知时传入）；缺失时 bridge 才从 `image_path`
-  的 `xwechat_files/<wxid>_xxxx/` 推导。多账号目录下 App 取最近有活动的账号。
+  的 `xwechat_files/<wxid>_xxxx/` 推导。已识别账号时 App 传当前档案的 `AccountProfile.activeID`
+  （不信任旧库可能被污染的 selfID）；未识别时沿用运行时 selfID（可能为空）。
+  bridge `get_login_info` 返回后用于运行期确认：与档案一致则记录权威 selfID，
+  不一致则切到回包账号的数据档案（见 [`accounts.md`](accounts.md) §4.3）。
+  多账号目录下 App 取当前账号，不再取「最近有活动」的账号。
 - `-wechat_conf` 由 App **运行期生成**：读取 `hook/versions/<version>_mac.json` 后合并 App 设置
   （4.1.15.55 / 4.2.0.5 / 4.2.0.9 为 R3 发送开关），写入
   `~/Library/Application Support/WeChatAI/runtime/hook-<version>-<build>.json` 再传给 bridge；
   仓库 JSON 始终保持默认 `off`，产品行为只由设置决定。
-- `image_path` 用于图片/视频临时目录；不存在时上游会报错，App 负责创建/探测。
-- `-media_dir` 是**入站图片获取**的落盘目录（App 传 `~/Library/Application Support/WeChatAI/media`）；
-  留空时 bridge 回退到同一路径。图片只会写入该目录，不写 app bundle（避免破坏 ad-hoc 签名）。
+- `image_path` 用于图片/视频临时目录；不存在时上游会报错，App 负责创建/探测。多账号下
+  App 传当前账号的 `xwechat_files/<dir>/temp`（`WeChatAccountResolution.imageDirectory`）。
+- `-media_dir` 是**入站图片获取**的落盘目录，App 始终传
+  `~/Library/Application Support/WeChatAI/accounts/<当前账号>/media`；
+  留空（例如手动运行 bridge 调试）时 bridge 回退根 `media/`，仅用于旧版兼容。
+  图片只会写入账号目录，不写 app bundle（避免破坏 ad-hoc 签名），也不再新写根 `media/`
+  （旧媒体只读保留）。
 - 鉴权：HTTP 发送接口与 `/fetch_image` 要求 `Authorization: Bearer <token>`；WS 无鉴权，仅监听 127.0.0.1。
 
 ### 3.2 WebSocket 事件（bridge → App）
@@ -217,7 +257,8 @@ bridge 推送的 JSON（`WechatMessage`，字段可能缺省）：
   `[链接/文件]` 开头的消息，保留结构化 `at` 后缀），并刷新会话预览。
   触发判定只取引用回复的正文（`RuleEngine.triggerText`）：被引用原文仅作为 AI 上下文，
   不会因为「引用了一条 @ 过机器人 / 含关键词的旧消息」而重复唤醒。
-- 媒体字段：`data.url` 为 `file://` 本地路径时复制到 App 媒体目录；`data.file` 可能为 base64。
+- 媒体字段：`data.url` 为 `file://` 本地路径时复制到当前账号媒体目录
+  `accounts/<当前账号>/media/`；`data.file` 可能为 base64。旧版根 `media/` 不再新写。
 - **入站图片获取（2026-10-23 新增，按需）**：微信 4.1.15 / 4.2.0.5 的图片消息在 hook 里
   只有文本占位 `[图片]`，图片 XML（`<img aeskey=… cdnmidimgurl=… cdnthumburl=… md5=…
   length=… />`）在 `raw_message` 里。bridge 在推送事件前解析该 XML，按 `message_id`
@@ -265,7 +306,7 @@ bridge 推送的 JSON（`WechatMessage`，字段可能缺省）：
   单条消息过长时 App 应自行分段。
 - **入站图片获取**：`POST http://127.0.0.1:58080/fetch_image`，Header `Authorization: Bearer <token>`，
   body `{"message_id":"<OneBot message_id>"}`。bridge 按需触发微信 CDN 下载（单次总预算约 12 秒），
-  成功返回 `{"status":"ok","data":{"file":"file:///.../media/<date>/<name>.jpg","message_id":"..."}}`，
+  成功返回 `{"status":"ok","data":{"file":"file:///.../accounts/<当前账号>/media/<date>/<name>.jpg","message_id":"..."}}`，
   失败返回 `{"status":"failed","error":"中文原因"}`；消息未登记/已过期 400，下载失败 502。
   App 只在该会话生效的「获取图片」开启、消息是图片、`mediaPath`/`mediaURL` 为空时请求
   （会话覆盖 → 旧全局默认 → true）；返回路径写入 `ChatMessage.mediaPath` 并落库。
@@ -279,7 +320,9 @@ bridge 推送的 JSON（`WechatMessage`，字段可能缺省）：
 
 ## 4. App 内部关键类型
 
-- `AppStore`（`Core/AppStore.swift`）：`@MainActor @Observable`，持有 settings/conversations/messages/logs/hookStatus/stats；UI 只读并调用其方法。
+- `AppStore`（`Core/AppStore.swift`）：`@MainActor @Observable`，持有 settings/conversations/messages/logs/hookStatus/stats；UI 只读并调用其方法。多账号字段：`activeAccountID` / `activeAccountIsUnassigned` / `accountSwitchNotice` / `savedWeChatAccounts` / `isSwitchingAccount`（见 §5）。
+- `AccountProfile` / `AccountLayout` / `WeChatAccountResolver`（`Services/AccountProfile.swift`、`Services/WeChatAccountResolver.swift`）：
+  账号档案布局、`account-state.json`、旧版迁移、`_unassigned` 认领、启动前账号识别。契约见 [`accounts.md`](accounts.md)。
 - `SleepPreventionCenter`（`Services/SleepPreventionService.swift`，`@MainActor @Observable`）：
   `general.sleepPrevention` 的运行时执行者，持有/释放 IOKit `PreventUserIdleSystemSleep` 断言，
   监听电源适配器变化；纯决策函数 `shouldPreventSleep(mode:onExternalPower:)` 可单测。
@@ -304,11 +347,20 @@ bridge 推送的 JSON（`WechatMessage`，字段可能缺省）：
 
 ## 5. 配置与密钥
 
-- 配置：`~/Library/Application Support/WeChatAI/config.json`（`AppSettings`，JSON）。
+- 配置：`~/Library/Application Support/WeChatAI/config.json`（`AppSettings`，JSON；全局）。
   通用设置中的 `general.sleepPrevention`（`never` / `externalPowerOnly` / `always`，默认 `never`）
   通过自定义 Codable 兼容旧版缺失字段；其它设置的旧字段同理不会因新增键而重置。
-- 数据库：同目录 `chatbot.sqlite`（WAL）。
-- API Key：macOS Keychain，service = `com.gusionw.wechatai`，account = `provider.apiKeyReference`。
+  `config.json` 保留完整 `AppSettings` 镜像（含 `bot`/`personas`/`schedules`）用于旧版回滚；
+  当前版本运行时的账号字段以 `accounts/<当前账号>/profile.json` 为准，加载时由
+  `SettingsStore.load()` 用 profile 覆盖。
+- 账号配置：`accounts/<当前账号>/profile.json`（`ProfileSettings`：`bot`/`personas`/`schedules`）。
+  缺失用默认值；解码失败备份为 `profile.corrupt-<ts>.json` 后回退默认，不影响全局配置。
+- 账号指针：`account-state.json`（`lastAccountID` / `updatedAt` / `legacyMigrationDone`），
+  由 `AccountProfile` 原子写；只有旧库迁移真正完成才把 `legacyMigrationDone` 置 `true`。
+- 数据库：`accounts/<当前账号>/chatbot.sqlite`（WAL）；旧版根目录 `chatbot.sqlite` 迁移后保留、
+  不再写入。账号切换与旧版迁移见 [`accounts.md`](accounts.md)。
+- API Key：macOS Keychain，service = `com.gusionw.wechatai`，account = `provider.apiKeyReference`；
+  全局共享，不随微信账号切换。
 - 配置中**禁止**出现明文 Key；`AIProvider.apiKeyReference` 仅存 Keychain account 名。
 
 ## 6. Hook 版本契约
@@ -342,6 +394,9 @@ bridge 推送的 JSON（`WechatMessage`，字段可能缺省）：
 4. 群聊仅在被 @/关键词/前缀时回复；白/黑名单、冷却、频率限制生效。
 5. 重启 App/微信后能恢复连接；日志可查；数据本地持久化。
 6. 空闲时 App 内存占用低（目标 < 150MB），bridge < 80MB；无忙轮询。
+7. 多微信账号：换微信账号后聊天/记忆/会话设置/机器人配置切到该账号档案，AI/Hook/OneBot/
+   Keychain/语音模型保持全局；升级旧单库时只 copy 不删；旧媒体路径仍可读。验收细节见
+   [`accounts.md`](accounts.md) §11。
 
 ## 8. 运行时资源布局与安装契约（App bundle）
 

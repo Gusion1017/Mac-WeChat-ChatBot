@@ -2,6 +2,14 @@ import Foundation
 
 // MARK: - Paths
 
+/// 应用文件路径。
+///
+/// - 全局（不随微信账号切换）：`config.json`、Keychain、bridge 日志、备份、运行期文件；
+/// - 账号级（随微信账号切换）：`accounts/<id>/` 下的 `profile.json`、SQLite、媒体与日志。
+///
+/// 账号级路径全部委托给 `AccountProfile`（见 docs/accounts.md、实施契约 §2.3）。
+/// 所有属性都是**纯计算**（只读路径、无副作用），因为 `AppPaths` 也会被
+/// `SettingsPersistence` 等后台 actor 读取；`AccountProfile` 内部自行加锁。
 enum AppPaths {
     static let appName = "WeChatAI"
     static let bundleID = "com.gusionw.wechatai"
@@ -12,9 +20,32 @@ enum AppPaths {
         return base.appendingPathComponent(appName, isDirectory: true)
     }
 
+    /// 全局设置：完整 `AppSettings` 镜像（兼容旧版回滚），不随账号切换。
     static var configFile: URL { supportDirectory.appendingPathComponent("config.json") }
-    static var databaseFile: URL { supportDirectory.appendingPathComponent("chatbot.sqlite") }
-    static var logsDirectory: URL { supportDirectory.appendingPathComponent("logs", isDirectory: true) }
+
+    // MARK: 账号级（委托 AccountProfile，随微信账号切换）
+
+    /// 当前账号的账号级设置（bot / personas / schedules）。
+    static var profileFile: URL { AccountProfile.profileFile }
+    /// 当前账号的记忆数据库。
+    static var databaseFile: URL { AccountProfile.databaseFile }
+    /// 当前账号的新媒体目录（入站图片/语音、TTS 输出）。
+    static var mediaDirectory: URL { AccountProfile.mediaDirectory }
+    /// 当前账号的日志目录。
+    static var logsDirectory: URL { AccountProfile.logsDirectory }
+    /// 所有账号目录的父目录（`accounts/`）。
+    static var accountsDirectory: URL { AccountProfile.layout.accountsDirectory }
+    /// 当前账号目录（`accounts/<id>/`）。
+    static var accountDirectory: URL { AccountProfile.activeDirectory }
+    /// 当前账号状态（`accounts/../account-state.json`）。
+    static var accountStateFile: URL { AccountProfile.layout.stateFile }
+    /// 旧版单库（迁移后保留，只读回退用）。
+    static var legacyDatabaseFile: URL { AccountProfile.layout.legacyDatabaseFile }
+    /// 旧版遗留媒体目录（只读保留；旧消息里的绝对路径仍可读，不迁移、不删除、不主动创建）。
+    static var legacyMediaDirectory: URL { AccountProfile.layout.legacyMediaDirectory }
+
+    // MARK: 全局
+
     /// bridge 日志必须写在 app bundle 之外：写入 `Contents/Resources/bridge/log`
     /// 会破坏 ad-hoc 签名，导致下次启动被 macOS 以 Launch Constraint Violation 杀掉。
     /// 与 CrashReporter 的崩溃/面包屑保持同一目录（`~/Library/Logs/WeChatAI`）。
@@ -25,12 +56,25 @@ enum AppPaths {
     }
     static var bridgeLogFile: URL { bridgeLogDirectory.appendingPathComponent("macos.log") }
     static var backupsDirectory: URL { supportDirectory.appendingPathComponent("backups", isDirectory: true) }
-    static var mediaDirectory: URL { supportDirectory.appendingPathComponent("media", isDirectory: true) }
     /// 运行期生成的 Hook 配置（含 4.1.15.55 / 4.2.0.x R3 发送开关），不写仓库资源。
     static var runtimeDirectory: URL { supportDirectory.appendingPathComponent("runtime", isDirectory: true) }
 
+    /// 创建全局目录 + 当前账号目录。
+    ///
+    /// 旧版根目录 `media/` 不再创建（旧媒体只读保留）；新媒体的账号目录由
+    /// `AccountProfile` 的当前账号决定（含 `media/` 与 `logs/`）。
     static func ensureDirectories() {
-        for url in [supportDirectory, logsDirectory, bridgeLogDirectory, backupsDirectory, mediaDirectory, runtimeDirectory] {
+        let urls = [
+            supportDirectory,
+            accountsDirectory,
+            accountDirectory,
+            mediaDirectory,
+            logsDirectory,
+            bridgeLogDirectory,
+            backupsDirectory,
+            runtimeDirectory,
+        ]
+        for url in urls {
             try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         }
     }
@@ -342,22 +386,109 @@ struct AppSettings: Codable, Hashable {
     }
 }
 
+// MARK: - Account-level settings (profile.json)
+
+/// 账号级设置：随微信账号切换，单独持久化到 `accounts/<id>/profile.json`。
+///
+/// `config.json` 仍然保存完整 `AppSettings` 镜像（兼容旧版回滚与迁移），但加载时
+/// 以当前账号的 `profile.json` 覆盖 `bot / personas / schedules`；全局字段
+/// （general / hook / onebot / ai / providers）只存在于 `config.json`。
+struct ProfileSettings: Codable, Hashable {
+    /// `profile.json` 的结构版本，与 `AppSettings.schemaVersion` 相互独立（当前都为 1）。
+    var schemaVersion: Int = 1
+    var bot = BotSettings()
+    var personas: [Persona] = [AppSettings.makeDefaultPersona()]
+    var schedules: [ScheduledTask] = []
+
+    static var `default`: ProfileSettings { ProfileSettings() }
+}
+
+// 自定义解码：旧版/部分写入/手改的 profile.json 缺某个键时只回退该键的默认值，
+// 不丢弃整份文件。实现放在 extension 里以保留合成的 memberwise init。
+extension ProfileSettings {
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, bot, personas, schedules
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = ProfileSettings()
+        schemaVersion = (try? container.decodeIfPresent(Int.self, forKey: .schemaVersion))
+            ?? defaults.schemaVersion
+        bot = (try? container.decodeIfPresent(BotSettings.self, forKey: .bot)) ?? defaults.bot
+        personas = (try? container.decodeIfPresent([Persona].self, forKey: .personas))
+            ?? defaults.personas
+        schedules = (try? container.decodeIfPresent([ScheduledTask].self, forKey: .schedules))
+            ?? defaults.schedules
+    }
+}
+
+extension AppSettings {
+    /// 从完整设置中抽出账号级部分（用于写 `profile.json`）。
+    var profile: ProfileSettings {
+        get {
+            // profile 结构版本独立于 AppSettings.schemaVersion，固定 1；
+            // 全局 schema 升级不应连带把账号 profile 的版本号抬高。
+            ProfileSettings(schemaVersion: 1, bot: bot, personas: personas, schedules: schedules)
+        }
+        set { applyProfile(newValue) }
+    }
+
+    /// 用账号级设置覆盖 `bot / personas / schedules`，其余全局字段保持不变。
+    mutating func applyProfile(_ profile: ProfileSettings) {
+        bot = profile.bot
+        personas = profile.personas
+        schedules = profile.schedules
+    }
+}
+
 // MARK: - Load / save
 
 enum SettingsStore {
+    /// 应用默认加载：全局 `config.json` + 当前账号 `profile.json`。
     static func load() -> AppSettings {
         AppPaths.ensureDirectories()
-        guard let data = try? Data(contentsOf: AppPaths.configFile) else { return .default }
+        return load(configURL: AppPaths.configFile, profileURL: AppPaths.profileFile)
+    }
+
+    /// 可注入加载（测试用）：先读全局 config，再用账号 profile 覆盖账号字段。
+    /// `profileURL == nil` 时只读 config（旧版行为，profile 不存在也走这里）。
+    static func load(configURL: URL, profileURL: URL?) -> AppSettings {
+        var settings = loadConfig(configURL: configURL)
+        if let profileURL {
+            settings.applyProfile(loadProfile(profileURL: profileURL))
+        }
+        return settings
+    }
+
+    /// 读取账号级 profile：缺失 → `.default`；损坏 → 备份 `profile.corrupt-<ts>.json` 后 `.default`。
+    static func loadProfile(profileURL: URL) -> ProfileSettings {
+        guard let data = try? Data(contentsOf: profileURL) else { return .default }
         do {
-            return try JSONDecoder().decode(AppSettings.self, from: data)
+            return try JSONDecoder().decode(ProfileSettings.self, from: data)
         } catch {
-            NSLog("[WeChatAI] config decode failed: \(error)")
-            let backup = AppPaths.supportDirectory.appendingPathComponent("config.corrupt-\(Int(Date().timeIntervalSince1970)).json")
-            try? FileManager.default.copyItem(at: AppPaths.configFile, to: backup)
+            NSLog("[WeChatAI] profile decode failed: \(error)")
+            let backup = profileURL.deletingLastPathComponent()
+                .appendingPathComponent("profile.corrupt-\(Int(Date().timeIntervalSince1970)).json")
+            try? FileManager.default.copyItem(at: profileURL, to: backup)
             return .default
         }
     }
 
+    private static func loadConfig(configURL: URL) -> AppSettings {
+        guard let data = try? Data(contentsOf: configURL) else { return .default }
+        do {
+            return try JSONDecoder().decode(AppSettings.self, from: data)
+        } catch {
+            NSLog("[WeChatAI] config decode failed: \(error)")
+            let backup = configURL.deletingLastPathComponent()
+                .appendingPathComponent("config.corrupt-\(Int(Date().timeIntervalSince1970)).json")
+            try? FileManager.default.copyItem(at: configURL, to: backup)
+            return .default
+        }
+    }
+
+    /// 只写全局 `config.json`（账号字段由 `SettingsPersistence.save(_:profileURL:)` 双写）。
     static func save(_ settings: AppSettings) {
         AppPaths.ensureDirectories()
         do {

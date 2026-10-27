@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | [`install.md`](install.md) | **安装与启动**：Releases App（v1.3.0，约 71MB）/ 源码 ZIP 两种方式、**Command Line Tools 前置**、Gatekeeper、菜单栏、首次向导与发布打包 | 操作手册 |
 | [`architecture.md`](architecture.md) | 总体架构、目录边界、OneBot 桥接契约 | 现行契约 |
+| [`accounts.md`](accounts.md) | **多微信账号数据隔离**：隔离矩阵、`accounts/<wxid>/` 布局、识别算法、三种切号路径、旧版单库迁移与 `_unassigned` 认领、边界与排障 | 现行契约 |
 | [`core-services.md`](core-services.md) | Swift 核心服务：AppStore、AI/OneBot/记忆/触发判定/调度、防睡眠、并发与错误处理 | 现行契约 |
 | [`bridge.md`](bridge.md) | Go OneBot 桥接：启动参数、HTTP/WS 接口、frida-core 接入 | 现行契约 |
 | [`memory.md`](memory.md) | 记忆系统：10 条短期窗口、8 条批量总结、同会话早期片段召回、记忆文件夹与综合权重 | 现行契约 |
@@ -28,6 +29,7 @@
 - 从 GitHub ZIP 安装 / 给普通用户发布：先看 [`install.md`](install.md)。
 - 想改协议：先读 [`architecture.md`](architecture.md) §3–§4，再读 [`bridge.md`](bridge.md)。
 - 想改 App 页面或交互：[`ui-design.md`](ui-design.md) + [`core-services.md`](core-services.md)。
+- 想懂账号切换/换微信后数据去哪了：[`accounts.md`](accounts.md)。
 - 想懂记忆/召回：[`memory.md`](memory.md)。
 - 只想本地联调（无微信）：[`../devtools/README.md`](../devtools/README.md)。
 - 提交前自检：`bash scripts/check.sh`；文档链接：`python3 scripts/check_docs.py`。

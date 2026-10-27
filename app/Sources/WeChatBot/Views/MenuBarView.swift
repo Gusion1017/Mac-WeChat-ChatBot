@@ -275,7 +275,7 @@ struct MenuBarView: View {
                 symbol: toggleSymbol,
                 tint: toggleTint,
                 help: toggleHelp,
-                isBusy: isToggling
+                isBusy: isToggling || store.isSwitchingAccount
             ) {
                 toggleBot()
             }
@@ -365,6 +365,7 @@ struct MenuBarView: View {
     }
 
     private var toggleTitle: String {
+        if store.isSwitchingAccount { return "正在切换微信账号…" }
         if isToggling { return store.isBotRunning ? "正在停止…" : "正在启动…" }
         return store.isBotRunning ? "停止机器人" : "启动机器人"
     }
@@ -383,7 +384,7 @@ struct MenuBarView: View {
 
     /// 启停不收起面板：用户可能连续查看状态或再点其它入口。
     private func toggleBot() {
-        guard !isToggling else { return }
+        guard !isToggling, !store.isSwitchingAccount else { return }
         isToggling = true
         Task {
             if store.isBotRunning {

@@ -1617,3 +1617,39 @@
 "在后台启动机器人并自动回复" = "Start the bot in the background and auto-reply";
 "停止后台机器人" = "Stop the background bot";
 "左键打开状态面板" = "Left-click to open the status panel";
+
+/* WeChat account data isolation (2026-10-27). */
+"当前微信账号" = "Current WeChat account";
+"账号 ID 由微信登录数据识别，界面只显示脱敏结果；所有配置、记忆与日志都保存在本机，不上传云端。" = "The account ID is detected from WeChat sign-in data and shown masked. All settings, memories and logs stay on this Mac and are never uploaded.";
+"账号" = "Account";
+"当前" = "Current";
+"未识别" = "Not detected";
+"未识别（等待微信登录）" = "Not detected (waiting for WeChat sign-in)";
+"临时档案" = "Temporary profile";
+"账号数据目录" = "Account data directory";
+"账号配置" = "Account profile";
+"全局配置" = "Global config";
+"重新检测微信账号" = "Re-detect WeChat account";
+"正在检测微信登录账号并切换数据…" = "Detecting the signed-in WeChat account and switching data…";
+"检测当前微信登录账号；检测到变化时切换到该账号的数据。" = "Detect the account signed in to WeChat; if it changed, switch to that account's data.";
+"尚未识别到微信账号，请先登录微信后点此检测。" = "No WeChat account detected yet. Sign in to WeChat, then detect again.";
+"数据隔离" = "Data isolation";
+"聊天记录、长期记忆、会话设置、人格与定时任务随微信账号切换；AI 模型、Hook、OneBot、语音引擎与备份为全局共享。" = "Chat history, long-term memory, conversation settings, personas and schedules follow the WeChat account. AI models, Hook, OneBot, the voice engine and backups are shared globally.";
+"已保存的账号" = "Saved accounts";
+"账号档案保存在 accounts/ 目录；换微信账号后会自动切到对应数据，不会删除其他账号的记录。" = "Account profiles are stored in the accounts/ directory. Switching to another WeChat account automatically loads that account's data and never deletes other accounts' records.";
+"尚未保存任何账号档案。登录微信并启动机器人后会自动建立当前账号的数据目录。" = "No account profiles yet. Sign in to WeChat and start the bot to create a data directory for the current account.";
+"只有当前账号。登录其他微信后点「重新检测微信账号」即可建立独立档案。" = "Only the current account. Sign in to another WeChat account, then click “Re-detect WeChat account” to create its own profile.";
+"最近使用" = "Last used";
+"尚未使用" = "Not used yet";
+"已切换到当前微信账号的数据" = "Switched to the current WeChat account's data";
+"仍未识别到微信账号，请先登录微信后重试" = "WeChat account still not detected. Sign in to WeChat and try again.";
+"未检测到账号变化" = "No account change detected";
+"切换微信账号数据失败，请稍后重试" = "Failed to switch WeChat account data. Try again later.";
+"微信账号已切换" = "WeChat account switched";
+"知道了" = "Got it";
+
+/* Account switch pending / busy (2026-10-28). */
+"机器人正在启动，完成后会自动切换账号数据" = "The bot is starting; account data will switch automatically when it is ready.";
+"正在切换微信账号…" = "Switching WeChat account…";
+"正在切换微信账号数据，请稍候" = "Switching WeChat account data. Please wait.";
+"已识别微信账号时使用当前账号目录；仅未识别账号时使用这里的值，留空则自动探测" = "When a WeChat account is detected, the current account's directory is used; this value applies only while the account is unassigned. Leave empty for auto-detection.";

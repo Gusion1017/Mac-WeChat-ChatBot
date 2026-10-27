@@ -6,6 +6,46 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-10-28
+
+### 新增
+
+- **多微信账号数据隔离（2026-10-27）**：换微信账号后，聊天记录、长期记忆、会话设置、机器人配置、
+  人格与定时任务自动切到该账号自己的档案，新媒体写入 `accounts/<id>/media/`；
+  AI 通道/Keychain、Hook、OneBot、语音模型与音色库、CosyVoice、崩溃日志、bridge 日志与微信备份
+  全局共享，不随账号切换。
+  - **识别与切号**：`WeChatAccountResolver` 按「登录标记 mtime > 账号目录活动」识别，
+    最终以 bridge `get_login_info` 为权威；覆盖启动、点「启动机器人」前、运行中登录不一致
+    三种切号路径；运行中切号会先停机器人，切库后不自动重启。未识别时使用
+    `accounts/_unassigned/`，首次登录后复制认领、保留原目录。
+  - **旧版迁移**：旧单库以 `settings.onebot.self_id` 为 owner 归入对应账号；用 SQLite Backup API
+    复制旧库为一致快照（含 WAL 已提交内容，不裸 copy WAL/SHM），并从 `config.json` 的
+    `bot`/`personas`/`schedules` 写入 profile 种子，写 `legacy-migration.json` 与
+    `account-state.json`；旧库、旧 `config.json`、旧媒体目录全部保留。迁移幂等，重复启动不会
+    覆盖已有账号数据。升级后需切回原微信账号才能看到旧聊天。
+  - **UI**：设置 → 数据与备份新增「当前微信账号 / 已保存的账号 / 重新检测微信账号」，
+    展示账号 mask、账号数据目录、账号配置、记忆数据库、媒体目录与全局配置/备份/日志目录；
+    总览在账号切换后显示可关闭的提示。不提供手动选择数据库/账号档案。
+  - **边界**：删除聊天只影响当前账号；其它账号数据在重新登录该账号前不可见但保留；
+    旧媒体绝对路径继续有效，不迁移、不删除；Keychain/语音模型/日志全局共享；
+    首次升级需要与旧库同量级的额外磁盘空间。
+  - **文档与测试**：新增 [`docs/accounts.md`](docs/accounts.md)（行为/隔离矩阵/布局/识别/切号/
+    迁移/边界/排障），同步更新 `docs/README.md`、`docs/architecture.md`、`docs/core-services.md`、
+    `docs/memory.md`、`docs/ui-design.md`、`docs/install.md`、根 `README.md` 与本文；
+    新增 resolver、`AccountLayout`、旧版迁移/认领、config+profile 双文件与 `MemoryStore`
+    切库隔离测试；`swift test` 470 项通过（8 项按环境跳过）。
+  - **修复旧库迁移空复制（2026-10-28）**：旧库是 WAL 模式且旧 App 退出后 `-wal/-shm`
+    已被删除时，READONLY 连接在 prepare 阶段会 `SQLITE_CANTOPEN`，导致迁移未复制数据却继续
+    打开空库（表现为“聊天记录/记忆没了”）。owner 读取、Backup API、空壳库检查改用 READWRITE
+    连接；新增“WAL 主库无 sidecar”回归测试，旧库/旧配置/旧媒体仍全部保留。
+  - **审查修复（2026-10-28）**：`_unassigned` 有数据时启动不再被 `preparePaths` 直接改写
+    active，改为在开库前认领（保留源目录）；`MemoryStore.suspend()` 禁止切号期间隐式重开，
+    `LogPipeline` 延后到迁移/认领完成后 attach；后台记忆总结/群昵称回填/统计落盘在切号前
+    cancel + await，回复流水线加账号代次保护；`account-state.json` 增加
+    `legacyMigrationDone` 门禁，`activate`/切号不再替迁移“盖章”；迁移/认领可替换提前开库
+    留下的空壳库、绝不覆盖已有业务数据；bridge `image_path` 强制取当前账号目录；
+    切号失败复位 `isBotRunning` 并禁止启动机器人并发。
+
 ## [1.5.2] — 2026-10-27
 
 ### 变更
@@ -559,12 +599,13 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.5.2...HEAD
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.6.0...HEAD
 [1.3.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.3.0
 [1.4.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.4.0
 [1.5.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.5.0
 [1.5.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.5.1
 [1.5.2]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.5.2
+[1.6.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.6.0
 [1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.0
