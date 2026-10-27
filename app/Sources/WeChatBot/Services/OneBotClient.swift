@@ -326,7 +326,18 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
         notifyState(reconnectAttempt == 0 ? .connecting : .reconnecting)
 
         let session = makeSessionLocked()
-        let task = session.webSocketTask(with: url)
+        // bridge 的 /ws 与 HTTP 接口共用同一个 OneBot token（见 docs/bridge.md §6）。
+        // URLSessionWebSocketTask(with: URL) 无法携带自定义头，必须传 URLRequest；
+        // 旧版 bridge 不校验该头，带上也兼容。
+        let task: URLSessionWebSocketTask
+        let trimmedToken = config.token.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedToken.isEmpty {
+            task = session.webSocketTask(with: url)
+        } else {
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(trimmedToken)", forHTTPHeaderField: "Authorization")
+            task = session.webSocketTask(with: request)
+        }
         socket = task
         task.resume()
 

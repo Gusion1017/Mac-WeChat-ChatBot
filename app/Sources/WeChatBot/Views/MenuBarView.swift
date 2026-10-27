@@ -384,7 +384,7 @@ struct MenuBarView: View {
 
     /// 启停不收起面板：用户可能连续查看状态或再点其它入口。
     private func toggleBot() {
-        guard !isToggling, !store.isSwitchingAccount else { return }
+        guard !isToggling, !store.isSwitchingAccount, !store.isBotTransitioning else { return }
         isToggling = true
         Task {
             if store.isBotRunning {

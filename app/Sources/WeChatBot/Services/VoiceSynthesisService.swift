@@ -161,11 +161,17 @@ actor VoiceSynthesisService {
     /// 4 线程对 10–14 核的 Apple Silicon 是稳妥值，也避免和 App 主线程抢核。
     static let inferenceThreadCount = 4
 
+    /// 引擎空闲多久后释放（秒）。Kokoro 常驻约 350–700MB，ZipVoice 约 150–250MB；
+    /// 试听一次或回一条语音后一直常驻到退出并不合理，长时间不用应还给系统。
+    static let idleUnloadDelay: TimeInterval = 10 * 60
+
     private var kokoroEngine: SherpaTtsEngine?
     private var zipvoiceEngine: SherpaTtsEngine?
     /// 已加载引擎对应的模型路径签名；模型文件被替换（重新下载）后重建引擎。
     private var kokoroSignature: String?
     private var zipvoiceSignature: String?
+    /// 最近一次空闲释放任务；每次合成都会重置。
+    private var idleUnloadTask: Task<Void, Never>?
 
     init() {}
 
@@ -195,8 +201,10 @@ actor VoiceSynthesisService {
         (kokoroEngine == nil ? 0 : 1) + (zipvoiceEngine == nil ? 0 : 1)
     }
 
-    /// 释放已加载引擎，下次合成重新加载（模型更新/功能关闭时调用）。
+    /// 释放已加载引擎，下次合成重新加载（模型更新/功能关闭/长时间空闲时调用）。
     func unloadEngines() {
+        idleUnloadTask?.cancel()
+        idleUnloadTask = nil
         kokoroEngine = nil
         zipvoiceEngine = nil
         kokoroSignature = nil
@@ -206,6 +214,16 @@ actor VoiceSynthesisService {
     /// TTS 输出目录：`~/Library/Application Support/WeChatAI/media/tts/`。
     nonisolated static var outputDirectory: URL {
         AppPaths.mediaDirectory.appendingPathComponent("tts", isDirectory: true)
+    }
+
+    /// 合成成功后重置空闲计时；`idleUnloadDelay` 内没有新合成就释放引擎。
+    private func scheduleIdleUnload() {
+        idleUnloadTask?.cancel()
+        idleUnloadTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.idleUnloadDelay))
+            guard !Task.isCancelled else { return }
+            await self?.unloadEngines()
+        }
     }
 
     // MARK: Synthesize
@@ -225,6 +243,8 @@ actor VoiceSynthesisService {
         allowsTruncation: Bool = true
     ) async throws -> SynthesisResult {
         let limit = min(max(maxSeconds, Self.minMaxSeconds), Self.maxMaxSeconds)
+        idleUnloadTask?.cancel()
+        idleUnloadTask = nil
         var spoken = VoiceTextSanitizer.sanitizeForSpeech(text)
         guard !spoken.isEmpty else { throw VoiceSynthesisError.emptyText }
 
@@ -282,6 +302,7 @@ actor VoiceSynthesisService {
                 (error as? LocalizedError)?.errorDescription ?? "\(error)")
         }
 
+        scheduleIdleUnload()
         return SynthesisResult(
             wavURL: outputURL,
             duration: Double(outputSamples.count) / Double(outputRate),

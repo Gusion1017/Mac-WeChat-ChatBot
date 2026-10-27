@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import SwiftUI
 
 /// Chat bubble supporting text / image / voice / emoji / file / video / link,
@@ -161,6 +162,9 @@ struct MessageBubble: View, Equatable {
 
     /// Loads the local media file once per path (`.task(id:)`), never during body
     /// evaluation. Previously every body re-run re-read the file from disk.
+    ///
+    /// 解码放到后台线程并按最长边 1600px 下采样：12MP HEIC 在主线程解码
+    /// 会让会话列表滚动/首次显示卡 50–300ms，原图整张常驻内存也浪费。
     private func loadLocalImageIfNeeded() async {
         guard let path = message.mediaPath, !path.isEmpty else {
             localImage = nil
@@ -169,7 +173,29 @@ struct MessageBubble: View, Equatable {
         }
         guard loadedImagePath != path else { return }
         loadedImagePath = path
-        localImage = NSImage(contentsOfFile: path)
+        let image = await Task.detached(priority: .userInitiated) {
+            Self.decodeDownsampledImage(atPath: path)
+        }.value
+        guard !Task.isCancelled else { return }
+        localImage = image
+    }
+
+    /// 后台解码 + 下采样（最长边 1600px，足够 2x/3x 气泡显示）。
+    private nonisolated static func decodeDownsampledImage(atPath path: String) -> NSImage? {
+        let url = URL(fileURLWithPath: path)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1600,
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return NSImage(
+            cgImage: cgImage,
+            size: NSSize(width: cgImage.width, height: cgImage.height)
+        )
     }
 
     private var remoteImageURL: URL? {

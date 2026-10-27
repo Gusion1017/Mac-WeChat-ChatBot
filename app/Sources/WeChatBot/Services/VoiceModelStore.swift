@@ -478,7 +478,11 @@ final class VoiceModelStore {
         }
 
         states[kind] = .verifying
-        let digest = try Self.sha256Hex(of: destination)
+        // 365MB 模型流式计算 SHA256（约 0.2–0.5s）：不能在 MainActor 上做，
+        // 否则下载完成瞬间整个 UI 冻结、主线程看门狗误报卡顿。
+        let digest = try await Task.detached(priority: .utility) {
+            try Self.sha256Hex(of: destination)
+        }.value
         guard digest == spec.sha256 else {
             try? fileManager.removeItem(at: destination)
             states[kind] = .notDownloaded
@@ -487,7 +491,12 @@ final class VoiceModelStore {
 
         if spec.isArchive {
             states[kind] = .extracting
-            try extractArchive(destination, kind: kind)
+            // tar 解包 365MB 压缩包 10–30s，且 waitUntilExit 是同步等待：
+            // 必须放到后台线程，否则整个 App 在主线程上 beachball。
+            let archive = destination
+            try await Task.detached(priority: .utility) {
+                try Self.extractArchive(archive)
+            }.value
         } else if let name = spec.plainFileName {
             let target = Self.modelsDirectory.appendingPathComponent(name)
             try? fileManager.removeItem(at: target)
@@ -506,7 +515,10 @@ final class VoiceModelStore {
     }
 
     /// `/usr/bin/tar -xjf <archive> -C <models>`（不依赖 app bundle 的资源）。
-    private func extractArchive(_ archive: URL, kind: VoiceModelKind) throws {
+    ///
+    /// `nonisolated static`：解包是同步阻塞调用（`waitUntilExit`），工具方法本身
+    /// 不做线程约束，调用方必须放到后台线程执行（见 `install`）。
+    nonisolated static func extractArchive(_ archive: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
         process.arguments = ["-xjf", archive.path, "-C", Self.modelsDirectory.path]
@@ -526,7 +538,6 @@ final class VoiceModelStore {
             throw VoiceModelError.extractionFailed(
                 message.isEmpty ? "tar 退出码 \(process.terminationStatus)" : message)
         }
-        _ = kind
     }
 
     /// 流式计算 SHA256（365MB 模型不整读进内存）。

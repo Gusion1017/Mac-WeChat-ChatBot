@@ -238,7 +238,10 @@ App 强制把 `-image_path` / `-media_dir` 指向当前账号目录（忽略用�
 
 ### 3.1 WebSocket 事件（bridge → App）
 
-- 地址：`ws://127.0.0.1:58080/ws`；**无鉴权**，只应监听回环地址。
+- 地址：`ws://127.0.0.1:58080/ws`；与 HTTP 接口共用 OneBot token：握手时必须带
+  `Authorization: Bearer <token>`（或 `?token=<token>`），用常量时间比较；`-token` 为空
+  （未配置鉴权）时放行。App 自 1.6.0 起在 WS 握手带 Bearer 头，旧版 App（不带该头）
+  需要先把 bridge `-token` 留空才能连接。
 - 事件在 `HandleIncomingMessage` 完成身份归一化与入站图片登记后**立即**写出（不等待
   `-send_interval`），WS 写由 `wsWriteMu` 串行化；HTTP 推送同样立即发出。
 - 上游通过 `json.Marshal(WechatMessage)` 发送紧凑 JSON；`message` 为数组；
@@ -275,8 +278,9 @@ App 强制把 `-image_path` / `-media_dir` 指向当前账号目录（忽略用�
 | `get_contact_directory` | `{"echo":..., "status":"ok", "data":{"ok":true,"users":{...},"groups":{...}}}` | 本机**只读**读取通讯录后的目录；失败回 `{"status":"failed","error":...}`。 |
 | `send_private_msg` / `send_group_msg` | **不回包** | 发送结果只写日志；成功/失败不会产生 echo/响应。App 应以 HTTP 发送为主通道。 |
 
-其余 action 会被静默忽略。同一时刻只有一个 WS 连接（全局 `conn`）；新连接会替换旧连接，
-未连接期间的事件会被丢弃（仅记日志）。WS 入站消息无需 token。
+其余 action 会被静默忽略。同一时刻只接受一个 WS 连接：已有活动连接时新连接被拒绝（HTTP 409），
+避免第二个连接抢占事件流；读限制 8 MB、写超时 5 s，写失败会关闭连接（`conn` 只在仍是自己时置 nil）。
+WS 入站消息同样受 token 约束；未连接期间的事件会被丢弃（仅记日志）。
 
 ### 3.3 HTTP 发送接口
 

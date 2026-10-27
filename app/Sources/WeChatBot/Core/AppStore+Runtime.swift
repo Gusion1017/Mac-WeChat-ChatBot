@@ -757,9 +757,14 @@ final class RuntimeCoordinator {
             await self?.refreshDeepSeekBalance()
             var ticks = 0
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(30))
+                // tolerance：允许系统把 30s 的唤醒往后合并，是省电的关键（无 tolerance
+                // 时定时器不允许 coalescing，闲置时也会准点唤醒 CPU）。
+                try? await Task.sleep(for: .seconds(30), tolerance: .seconds(10))
                 guard !Task.isCancelled, let self else { return }
                 self.refreshBatteryStatus()
+                // 统计跨日翻转不能只在收到入站消息时做：夜间没有新消息时
+                // 总览会整夜显示昨天的「今日收到/回复」。
+                self.rolloverStatsIfNeeded()
                 ticks += 1
                 if ticks >= 10 {
                     ticks = 0
@@ -943,7 +948,7 @@ final class RuntimeCoordinator {
     func startRuntime() async throws {
         await bootstrapIfNeeded()
         guard !store.isSwitchingAccount else { throw RuntimeError.accountSwitching }
-        guard !store.isBotRunning, oneBotClient == nil else { return }
+        guard !store.isBotRunning, oneBotClient == nil, !runtimeStarting else { return }
         runtimeStarting = true
         defer { runtimeStarting = false }
 
@@ -1106,6 +1111,8 @@ final class RuntimeCoordinator {
 
         store.stats.startedAt = Date()
         scheduleStatsPersist()
+        // 机器人真正跑起来才需要防睡眠；启动失败/停止时由 stopRuntime 释放。
+        SleepPreventionCenter.shared.setRuntimeActive(true)
         log(.info, "Bot", "机器人运行时已启动（\(configuration.host):\(configuration.port)）")
     }
 
@@ -1139,6 +1146,8 @@ final class RuntimeCoordinator {
         if store.settings.hook.autoStartBridge {
             hookManager.stopBridge()
         }
+        // 停止机器人后不再需要防睡眠（用户偏好保留，下次启动恢复）。
+        SleepPreventionCenter.shared.setRuntimeActive(false)
         log(.info, "Bot", "机器人运行时已停止")
         // Flush coalesced logs (UI + SQLite) before the runtime goes idle.
         await LogPipeline.shared.flushNow()
@@ -2089,6 +2098,7 @@ final class RuntimeCoordinator {
     /// 取消队列后不会再有人更新它们，避免气泡永远停在「转写中」。
     private func markPendingVoiceMessagesDisabled() {
         var changed: [ChatMessage] = []
+        var updates: [String: [ChatMessage]] = [:]
         for (conversationID, list) in store.messages {
             guard list.contains(where: { $0.kind == .voice && $0.voiceTranscriptState == .pending }) else {
                 continue
@@ -2099,9 +2109,12 @@ final class RuntimeCoordinator {
                 updated[index].voiceTranscriptState = .disabled
                 changed.append(updated[index])
             }
-            store.messages[conversationID] = updated
+            updates[conversationID] = updated
         }
         guard !changed.isEmpty else { return }
+        // 先收集改动再一次性 merge：边遍历边写 `store.messages` 会触发整字典
+        // 与整消息数组的 COW 复制（会话多时是 O(会话数 × 消息数)）。
+        store.messages.merge(updates) { _, new in new }
         Task { [weak self] in
             guard let self else { return }
             try? await self.memory.upsertMessages(changed)
@@ -2169,7 +2182,7 @@ final class RuntimeCoordinator {
         guard !candidates.isEmpty else { return }
 
         let requestProvider = settings.visionRequestProvider(from: provider)
-        guard aiClient.credentialState(for: requestProvider) == .available else {
+        guard await credentialStateOffMain(for: requestProvider) == .available else {
             log(.debug, "Vision", "识图跳过：通道「\(provider.name)」缺少可用 API Key")
             return
         }
@@ -2234,7 +2247,7 @@ final class RuntimeCoordinator {
         visionAttempted.insert(message.id)
 
         do {
-            let dataURL = try VisionSupport.imageDataURL(forFileAt: path)
+            let dataURL = try await VisionSupport.imageDataURLAsync(forFileAt: path)
             let messages = VisionSupport.requestMessages(prompt: prompt, imageDataURL: dataURL)
             let result = try await aiClient.complete(
                 messages: messages,
@@ -2294,7 +2307,7 @@ final class RuntimeCoordinator {
            settings.isVisionEnabled,
            let provider = settings.visionProvider {
             let requestProvider = settings.visionRequestProvider(from: provider)
-            if aiClient.credentialState(for: requestProvider) == .available {
+            if await credentialStateOffMain(for: requestProvider) == .available {
                 description = await recognizeVisionImage(
                     referenced,
                     conversation: conversation,
@@ -2665,7 +2678,7 @@ final class RuntimeCoordinator {
             failReplyProgress(conversationID: conversation.id, error: "未找到可用 AI 服务")
             return
         }
-        let credentialState = aiClient.credentialState(for: settingsProvider)
+        let credentialState = await credentialStateOffMain(for: settingsProvider)
         guard credentialState == .available else {
             let reason: String
             if case .unreadable(let status) = credentialState {
@@ -3014,7 +3027,7 @@ final class RuntimeCoordinator {
             log(.warning, "AI", "拍一拍 AI 回复：未找到可用 AI 服务")
             return nil
         }
-        let credentialState = aiClient.credentialState(for: settingsProvider)
+        let credentialState = await credentialStateOffMain(for: settingsProvider)
         guard credentialState == .available else {
             let reason: String
             if case .unreadable(let status) = credentialState {
@@ -3152,6 +3165,10 @@ final class RuntimeCoordinator {
                 )
                 if index > 0 {
                     log(.info, "Voice", "已回退 \(voiceEngineLabel(attempt)) 发送语音")
+                }
+                if attempt == .cosyVoice {
+                    // 记录最近合成活动：CosyVoice3 健康轮询据此从 5s 降频到 30s。
+                    await CosyVoiceRuntime.shared.noteSynthesisActivity()
                 }
             } catch {
                 lastFailure = (error as? LocalizedError)?.errorDescription ?? "\(error)"
@@ -3897,6 +3914,17 @@ final class RuntimeCoordinator {
         dayFormatter.string(from: date)
     }
 
+    // MARK: - Keychain（主线程安全）
+
+    /// Keychain 读取放到后台线程：app 重签/授权失效时 macOS 可能弹授权框并阻塞
+    /// 调用线程，回复热路径（每条自动回复/识图/拍一拍）不能因此卡住主线程。
+    /// `startRuntime` 的启动前校验用的是同一做法。
+    private func credentialStateOffMain(for provider: AIProvider) async -> ProviderCredentialState {
+        await Task.detached(priority: .userInitiated) { [aiClient, provider] in
+            aiClient.credentialState(for: provider)
+        }.value
+    }
+
     func currentSelfID() -> String { selfID }
     func activeOneBotClient() -> OneBotClient? { oneBotClient }
     func isRuntimeRunning() -> Bool { oneBotClient != nil }
@@ -3912,7 +3940,11 @@ extension AppStore {
             lastError = RuntimeError.accountSwitching.localizedDescription
             return
         }
-        guard !isBotRunning else { return }
+        // `isBotRunning` 在整个启动过程中都是 false（bridge/HTTP 建好后才置 true），
+        // 只靠它挡不住重入：双击会起两次 startRuntime。
+        guard !isBotRunning, !isBotTransitioning else { return }
+        isBotTransitioning = true
+        defer { isBotTransitioning = false }
         isBusy = true
         defer { isBusy = false }
         let coordinator = RuntimeRegistry.coordinator(for: self)
@@ -3942,7 +3974,9 @@ extension AppStore {
     }
 
     func stopBot() async {
-        guard isBotRunning else { return }
+        guard isBotRunning, !isBotTransitioning else { return }
+        isBotTransitioning = true
+        defer { isBotTransitioning = false }
         isBusy = true
         defer { isBusy = false }
         let coordinator = RuntimeRegistry.coordinator(for: self)

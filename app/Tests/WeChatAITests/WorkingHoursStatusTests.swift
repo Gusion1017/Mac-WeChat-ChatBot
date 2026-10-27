@@ -56,6 +56,28 @@ final class WorkingHoursStatusTests: XCTestCase {
         XCTAssertEqual(hours.status(at: date(2026, 10, 20, 12, 0), calendar: calendar), .paused)
     }
 
+    func testOvernightWindowUsesPreviousWeekdayForAfterMidnight() {
+        // 周一~周五 22:00–06:00：周五晚的窗口延续到周六凌晨，星期要按周五算。
+        let hours = WorkingHours(
+            enabled: true,
+            startMinute: 22 * 60,
+            endMinute: 6 * 60,
+            weekdays: [2, 3, 4, 5, 6]
+        )
+        // 2026-10-23 是周五，2026-10-24 是周六，2026-10-25 是周日，2026-10-26 是周一。
+        XCTAssertEqual(hours.status(at: date(2026, 10, 23, 22, 30), calendar: calendar), .active)
+        XCTAssertEqual(hours.status(at: date(2026, 10, 24, 0, 30), calendar: calendar), .active)
+        XCTAssertEqual(hours.status(at: date(2026, 10, 24, 3, 0), calendar: calendar), .active)
+        XCTAssertEqual(hours.status(at: date(2026, 10, 24, 6, 0), calendar: calendar), .paused)
+        // 周六晚不在工作日集合内，周日凌晨也不该被周五/周六的窗口误判为 active。
+        XCTAssertEqual(hours.status(at: date(2026, 10, 24, 22, 30), calendar: calendar), .paused)
+        XCTAssertEqual(hours.status(at: date(2026, 10, 25, 0, 30), calendar: calendar), .paused)
+        // 周日不是工作日，周一 00:30 也不该激活。
+        XCTAssertEqual(hours.status(at: date(2026, 10, 26, 0, 30), calendar: calendar), .paused)
+        XCTAssertEqual(hours.status(at: date(2026, 10, 26, 22, 30), calendar: calendar), .active)
+        XCTAssertEqual(hours.status(at: date(2026, 10, 27, 0, 30), calendar: calendar), .active)
+    }
+
     func testStatusPausedWhenNoWeekdaySelected() {
         let hours = WorkingHours(
             enabled: true,

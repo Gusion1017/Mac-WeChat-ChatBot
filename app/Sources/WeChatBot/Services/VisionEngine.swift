@@ -154,6 +154,15 @@ enum VisionSupport {
         return "data:image/jpeg;base64,\(data.base64EncodedString())"
     }
 
+    /// `imageDataURL` 的后台版本：识图前的解码/缩放/JPEG 重编码/base64 是 CPU
+    /// 密集操作（12MP 图约 50–300ms/张），调用方在 MainActor 上时必须走这里，
+    /// 否则用户发图后的等待阶段会明显卡界面。
+    static func imageDataURLAsync(forFileAt path: String) async throws -> String {
+        try await Task.detached(priority: .utility) {
+            try imageDataURL(forFileAt: path)
+        }.value
+    }
+
     /// 读取本地图片（JPEG/PNG/HEIC/WebP 等 ImageIO 支持的格式），
     /// 等比缩放到最长边 `maxDimension`，重新编码为 JPEG，避免不同服务对格式/尺寸的差异。
     static func jpegData(

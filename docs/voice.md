@@ -199,6 +199,9 @@ AI 回复文本 → decideVoiceReply（开关/概率/对等/短回复/模型就�
 
 - STT：9.2s → 0.23s；46.6s → 0.51s（RTF 0.011–0.043）；峰值内存约 22 MB；完全离线。
 - TTS（debug 构建、4 线程、模型已缓存）：Kokoro RTF≈0.43（5.8s 音频约 2.5s）、ZipVoice distill int8 RTF≈0.92（3.2s 音频约 3.0s）；首次加载额外 1–3s，release 会更快。
+- 引擎内存与空闲释放（2026-10-28）：Kokoro 常驻约 350–700MB、ZipVoice 约 150–250MB；
+  最后一次合成后 10 分钟无新请求会自动 `unloadEngines()`，下次合成重新加载（1–3s）。
+  单测可断言 `loadedEngineCount` 前后变化。
 - 整段合成（关闭内部按标点切分）会比逐段合成略慢：49 字回复 Kokoro 仍约 2–3s；换来的是
   句内语气连续、停顿自然。极端长文本（>300 字）仍建议用 `maxVoiceSeconds`/短回复策略限制。
 - CosyVoice3（本地 Python 旁路，可选）：启动到 ready 约 22s，常驻 RSS 约 8.65GB；
@@ -318,6 +321,6 @@ bash scripts/check.sh --with-go        # 静态 + Swift 全量 + Go
 cd app && SWIFT_DISABLE_SANDBOX=1 swift test --scratch-path .build-lead
 ```
 
-当前：Swift 398 项通过（8 项按环境跳过：模型未下载/联网/真实 E2E；含音色目录、CosyVoice 集成、语音合成/发送回归）；
-Go 62 顶层 / 159 用例通过；release App 约 189MB。
+当前：Swift 473 项执行（465 通过 / 8 项按环境跳过：模型未下载/联网/真实 E2E；含音色目录、CosyVoice 集成、语音合成/发送回归）；
+Go 64 顶层 / 76 子测试通过；release App 约 189MB。
 语音实现与测试细节见 `bridge/voice.go`、`bridge/voice_test.go`；入站/出站契约与限制见本文件与 [`bridge.md`](bridge.md)。

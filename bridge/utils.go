@@ -300,22 +300,59 @@ func FileToBase64(filePath string) (string, error) {
 	return base64.StdEncoding.EncodeToString(data), nil
 }
 
+// legacyMediaDir 返回 legacy 入站媒体（语音/文件/表情）落盘根目录，并确保目录存在。
+//
+// 历史上这些文件写在 filepath.Dir(os.Executable())，即 App bundle 内部：
+//   - 向 bundle 写文件会破坏 ad-hoc 签名，App 下次启动可能被系统直接杀掉；
+//   - bundle 目录只读/沙箱受限时写失败，4.1.12 的入站语音就是因为 audio/
+//     不存在且 SaveAudioFile 没有 MkdirAll 而被整条丢弃。
+//
+// 现在优先跟随 App 传入的 -media_dir（config.MediaDir）；未配置时回退到
+// ~/Library/Application Support/WeChatAI/media/legacy，与图片/语音落盘目录的
+// 约定保持一致（见 media.go resolvedMediaDir）。
+func legacyMediaDir() (string, error) {
+	dir := strings.TrimSpace(config.MediaDir)
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("无法确定媒体保存目录: %v", err)
+		}
+		dir = filepath.Join(home, "Library", "Application Support", "WeChatAI", "media", "legacy")
+	} else {
+		dir = expandUserPath(dir)
+		dir = filepath.Clean(dir)
+	}
+	if dir == "" {
+		return "", errors.New("媒体保存目录无效")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("创建媒体保存目录失败: %v", err)
+	}
+	return dir, nil
+}
+
 func SaveAudioFile(silkBytes []byte) (path string, err error) {
 	mp3Bytes, err := SilkToMp3(silkBytes)
 	if err != nil {
 		return "", err
 	}
 
-	exePath, err := os.Executable()
+	// 落盘到 media_dir 下（不再写 app bundle，见 legacyMediaDir）。
+	baseDir, err := legacyMediaDir()
 	if err != nil {
 		return "", err
+	}
+	audioDir := filepath.Join(baseDir, "audio")
+	// 目录不存在时先创建：缺这一步会让入站语音写文件失败并被丢弃。
+	if err := os.MkdirAll(audioDir, 0o755); err != nil {
+		return "", fmt.Errorf("创建语音保存目录失败: %v", err)
 	}
 
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	randomNumber := r.Intn(1000)
 	timestamp := time.Now().Unix()
 	fileName := fmt.Sprintf("%d_%d.mp3", randomNumber, timestamp)
-	targetPath := filepath.Dir(exePath) + "/audio/" + fileName
+	targetPath := filepath.Join(audioDir, fileName)
 	err = os.WriteFile(targetPath, mp3Bytes, 0644)
 	if err != nil {
 		return "", err
@@ -504,7 +541,8 @@ func detectLegacyOfficeFormat(data []byte) string {
 
 // SaveFileToFile 通用文件保存函数
 func SaveFileToFile(ext string, data []byte) (string, error) {
-	exePath, err := os.Executable()
+	// 落盘到 media_dir 下（不再写 app bundle，见 legacyMediaDir）。
+	baseDir, err := legacyMediaDir()
 	if err != nil {
 		return "", err
 	}
@@ -513,20 +551,21 @@ func SaveFileToFile(ext string, data []byte) (string, error) {
 	randomNumber := r.Intn(1000)
 	timestamp := time.Now().Unix()
 
-	// 根据文件类型选择保存目录
+	// 根据文件类型选择保存子目录
 	dir := "file"
 	if ext == "jpg" || ext == "png" || ext == "gif" || ext == "bmp" || ext == "webp" {
 		dir = "image"
 	}
 
 	fileName := fmt.Sprintf("%d_%d.%s", randomNumber, timestamp, ext)
-	targetPath := filepath.Dir(exePath) + "/" + dir + "/" + fileName
+	targetDir := filepath.Join(baseDir, dir)
 
 	// 确保目录存在
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return "", err
 	}
 
+	targetPath := filepath.Join(targetDir, fileName)
 	err = os.WriteFile(targetPath, data, 0644)
 	if err != nil {
 		return "", err
@@ -536,7 +575,8 @@ func SaveFileToFile(ext string, data []byte) (string, error) {
 }
 
 func SaveImageToFile(ext string, data []byte) (string, error) {
-	exePath, err := os.Executable()
+	// 落盘到 media_dir 下（不再写 app bundle，见 legacyMediaDir）。
+	baseDir, err := legacyMediaDir()
 	if err != nil {
 		return "", err
 	}
@@ -545,7 +585,11 @@ func SaveImageToFile(ext string, data []byte) (string, error) {
 	randomNumber := r.Intn(1000)
 	timestamp := time.Now().Unix()
 	fileName := fmt.Sprintf("%d_%d.%s", randomNumber, timestamp, ext)
-	targetPath := filepath.Dir(exePath) + "/image/" + fileName
+	imageDir := filepath.Join(baseDir, "image")
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		return "", err
+	}
+	targetPath := filepath.Join(imageDir, fileName)
 	err = os.WriteFile(targetPath, data, 0644)
 	if err != nil {
 		return "", err

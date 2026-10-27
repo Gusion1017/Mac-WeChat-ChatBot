@@ -37,6 +37,9 @@ actor SchedulerService {
         self.tasks = Self.normalize(tasks, now: Date(), calendar: calendar)
         running = true
         notifyChange()
+        // 重启前先唤醒旧的等待循环：否则旧 loopTask 会一直挂在
+        // `waitForWake` 的 CheckedContinuation 上（waiter 被覆盖后永久泄漏）。
+        wakeUp()
         loopTask?.cancel()
         loopTask = Task { [weak self] in
             await self?.runLoop()

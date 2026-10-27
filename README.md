@@ -63,8 +63,8 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
 
 | 模块 | 状态 |
 | --- | --- |
-| SwiftUI App / Swift 核心 | ✅ 470 项测试（8 项按环境跳过：模型未下载/联网/真实 E2E）；4.1.15.55 / 4.2.0.5 文本真机 E2E |
-| OneBot bridge（Go） | ✅ 构建 / 鉴权 / 真机附加 / 62 顶层 · 159 用例测试通过 |
+| SwiftUI App / Swift 核心 | ✅ 473 项测试（8 项按环境跳过：模型未下载/联网/真实 E2E）；4.1.15.55 / 4.2.0.5 文本真机 E2E |
+| OneBot bridge（Go） | ✅ 构建 / 鉴权 / 真机附加 / 64 顶层 · 76 子测试通过 |
 | 首启向导 / 安装 | ✅ CLT 检测与安装引导、微信版本 / Hook 预检、备份约 665MB（磁盘需 ≥2.5GB） |
 | 微信 4.1.12.53 | ✅ legacy 收发 + 主动发送 |
 | 微信 4.1.15.55 | ✅ Message finalizer 接收 + R3 文本发送（首次需在本机微信手动发一条消息捕获句柄） |
@@ -87,8 +87,8 @@ WeChatAI.app (SwiftUI)          bridge/onebot (Go)              WeChat.app
 
 ### 快速开始
 
-- **普通用户**：下载 [`WeChat-AI-1.6.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.6.0/WeChat-AI-1.6.0.zip)
-  （约 72 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.6.0/WeChat-AI-1.6.0.zip.sha256)），
+- **普通用户**：下载 [`WeChat-AI-1.6.1.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.6.1/WeChat-AI-1.6.1.zip)
+  （约 72 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.6.1/WeChat-AI-1.6.1.zip.sha256)），
   按下面步骤安装；历史版本见 [Tags](https://github.com/Gusion1017/Mac-WeChat-ChatBot/tags)。
 
   1. 解压得到 `WeChat AI.app`，拖到 `~/Applications`（当前用户，无需管理员）或 `/Applications`（所有用户）。
@@ -146,7 +146,7 @@ App 内可在 设置 → Hook → 还原官方微信 一键还原（还原前先
 ### 目录结构
 
 ```
-app/        SwiftUI App（SwiftPM）+ 470 项测试；app/Vendor/（sherpa-onnx 静态库）不入库
+app/        SwiftUI App（SwiftPM）+ 473 项测试；app/Vendor/（sherpa-onnx 静态库）不入库
 bridge/     Go OneBot 桥接（GPL-3.0 衍生，改动见 NOTICE）；silkenc/ SILK 编码，testdata/ 测试样本
 hook/       script.js（唯一事实来源）与版本地址表
 tools/      Hook 安装、备份、还原
@@ -163,16 +163,16 @@ dist/       发布产物（zip / sha256，不入库）
 ### 开发与测试
 
 ```bash
-bash scripts/check.sh               # 静态检查 + Swift 470 项测试
+bash scripts/check.sh               # 静态检查 + Swift 473 项测试
 bash scripts/build_bridge.sh        # Go 构建 + Go 测试
 bash scripts/fetch_sherpa.sh        # sherpa-onnx 静态库（build_app 会自动补）
 bash scripts/package_release.sh     # Releases 用 zip + sha256
 make release                        # 同上：构建 → 打包 → 签名校验 → sha256
 ```
 
-发布产物为 `dist/WeChat-AI-1.6.0.zip`（约 72MB）与 `.sha256`。打包脚本会自动
+发布产物为 `dist/WeChat-AI-1.6.1.zip`（约 72MB）与 `.sha256`。打包脚本会自动
 `codesign --verify --strict`；`spctl -a -vv` 对 ad-hoc 未公证包预期返回 `rejected`（属正常），
-分发前在 `dist/` 内用 `shasum -a 256 -c WeChat-AI-1.6.0.zip.sha256` 校验。
+分发前在 `dist/` 内用 `shasum -a 256 -c WeChat-AI-1.6.1.zip.sha256` 校验。
 
 改了 `hook/script.js` 记得跑 `bash scripts/sync_hook_script.sh`。接口 / 行为变更先改 `docs/` 再改代码。
 GitHub Actions 只跑 Linux 可完成的检查（文档链接、脚本语法、副本一致、无构建产物）。
@@ -269,8 +269,8 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
 
 | Component | Status |
 | --- | --- |
-| SwiftUI app / Swift core | ✅ 470 tests passing (8 environment-gated skips: models not downloaded / network / live E2E); text E2E on 4.1.15.55 / 4.2.0.5 |
-| OneBot bridge (Go) | ✅ builds / auth / device attach / 62 top-level · 159 case tests passing |
+| SwiftUI app / Swift core | ✅ 473 tests passing (8 environment-gated skips: models not downloaded / network / live E2E); text E2E on 4.1.15.55 / 4.2.0.5 |
+| OneBot bridge (Go) | ✅ builds / auth / device attach / 64 top-level · 76 subtest cases passing |
 | First-run wizard / install | ✅ CLT detection and install guidance, WeChat version / hook preflight, ~665MB backup (needs ≥2.5GB disk) |
 | WeChat 4.1.12.53 | ✅ legacy send + receive |
 | WeChat 4.1.15.55 | ✅ Message-finalizer receive + R3 text sending (send one message in WeChat once to capture the handle) |
@@ -296,8 +296,8 @@ Contracts in [`docs/architecture.md`](docs/architecture.md); document index in
 ### Quick Start
 
 - **Regular users**: download
-  [`WeChat-AI-1.6.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.6.0/WeChat-AI-1.6.0.zip)
-  (~72 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.6.0/WeChat-AI-1.6.0.zip.sha256))
+  [`WeChat-AI-1.6.1.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.6.1/WeChat-AI-1.6.1.zip)
+  (~72 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.6.1/WeChat-AI-1.6.1.zip.sha256))
   and follow these steps; older versions are on [Tags](https://github.com/Gusion1017/Mac-WeChat-ChatBot/tags).
 
   1. Unzip `WeChat AI.app` and drag it to `~/Applications` (current user, no admin) or
@@ -361,7 +361,7 @@ remain in the known-supported list and install directly (their version files are
 ### Repository Layout
 
 ```
-app/        SwiftUI app (SwiftPM) + 470 tests; app/Vendor/ (sherpa-onnx static libs) is not committed
+app/        SwiftUI app (SwiftPM) + 473 tests; app/Vendor/ (sherpa-onnx static libs) is not committed
 bridge/     Go OneBot bridge (GPL-3.0 derivative, changes listed in NOTICE); silkenc/ official SILK encoder, testdata/
 hook/       script.js (single source of truth) and version address tables
 tools/      hook install, backup and restore
@@ -385,10 +385,10 @@ bash scripts/package_release.sh     # release zip + sha256
 make release                        # same: build → package → signature check → sha256
 ```
 
-The release artifacts are `dist/WeChat-AI-1.6.0.zip` (~72MB) and `.sha256`. Packaging runs
+The release artifacts are `dist/WeChat-AI-1.6.1.zip` (~72MB) and `.sha256`. Packaging runs
 `codesign --verify --strict`; `spctl -a -vv` reports `rejected` for an ad-hoc, non-notarized bundle
 (that is expected). Verify before publishing with
-`cd dist && shasum -a 256 -c WeChat-AI-1.6.0.zip.sha256`.
+`cd dist && shasum -a 256 -c WeChat-AI-1.6.1.zip.sha256`.
 
 After editing `hook/script.js`, run `bash scripts/sync_hook_script.sh`. Change `docs/` before code
 for interface or behaviour changes. GitHub Actions only runs Linux-friendly checks (docs links,

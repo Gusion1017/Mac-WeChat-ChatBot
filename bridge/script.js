@@ -426,6 +426,28 @@ function patchString(addr, plainStr) {
     addr.add(bytes.length).writeU8(0);
 }
 
+// 固定缓冲容量常量：路径/文件名缓冲统一 256B（setupSendImgMessageDynamic 等），
+// 语音二进制缓冲 5MB（setupSendVoiceMessageDynamic），写入前必须校验容量。
+var UPLOAD_PATH_BUFFER_BYTES = 256;
+var VOICE_AUDIO_BUFFER_BYTES = 5 * 1024 * 1024;
+
+// patchStringFits 只判断字符串能否放进固定缓冲（含结尾 NUL），不写内存。
+function patchStringFits(plainStr, capacityBytes) {
+    var value = (typeof plainStr === "string") ? plainStr : String(plainStr);
+    return value.length + 1 <= capacityBytes;
+}
+
+// patchStringChecked 先校验容量再写固定缓冲：超长时不写、记录 hookDebug 并返回 false，
+// 避免 writeByteArray 越界写破坏 Frida 堆（2026-10-27 审计 P2-17）。写成功返回 true。
+function patchStringChecked(addr, plainStr, capacityBytes) {
+    if (!patchStringFits(plainStr, capacityBytes)) {
+        hookDebug("patchString 越界跳过: len=" + String(plainStr).length + " cap=" + capacityBytes);
+        return false;
+    }
+    patchString(addr, (typeof plainStr === "string") ? plainStr : String(plainStr));
+    return true;
+}
+
 function generateAESKey() {
     const chars = 'abcdef0123456789';
     let key = '';
@@ -858,7 +880,12 @@ function fillUploadX1AndStart(idAddr, pathAddr, x1Buffer, receiver, md5, filePat
     patchString(idAddr, receiver + "_" + String(Math.floor(Date.now() / 1000)) + "_" + Math.floor(Math.random() * 1001) + "_1");
     patchString(md5Addr, md5);
     patchString(uploadAesKeyAddr, generateAESKey());
-    patchString(pathAddr, filePath);
+    // 路径写入 256B 固定缓冲（ImagePathAddr1 / videoPathAddr1）：超长时不再
+    // 越界写，直接返回 "fail" 让 bridge 判失败。
+    if (!patchStringChecked(pathAddr, filePath, UPLOAD_PATH_BUFFER_BYTES)) {
+        console.error("[!] 上传文件路径超长，跳过上传: len=" + String(filePath).length);
+        return "fail";
+    }
 
     x1Buffer.writeByteArray(payload);
     x1Buffer.writePointer(uploadFunc1Addr);
@@ -2032,9 +2059,15 @@ function triggerUploadVoice(receiver, voicePath, payloadHex, audioDataHex, durat
     voiceDurationGlobal = durationMs;
     const payload = hexToByteArray(payloadHex);
 
-    // 解码音频二进制数据，写入预分配的5MB内存
+    // 解码音频二进制数据，写入预分配的5MB内存；先校验容量（含结尾余量），
+    // 超长时不写并返回 "fail"，避免越界写破坏 Frida 堆（审计 P2-17）。
     const audioBytes = hexToByteArray(audioDataHex);
     const audioLen = audioBytes.length;
+    if (audioLen + 1 > VOICE_AUDIO_BUFFER_BYTES) {
+        console.error("[!] 语音数据超长，跳过上传: len=" + audioLen);
+        hookDebug("triggerUploadVoice: audio too large len=" + audioLen);
+        return "fail";
+    }
     voiceSilkDataLenGlobal = audioLen;
     voiceAudioDataAddr.writeByteArray(audioBytes);
 
@@ -2043,8 +2076,13 @@ function triggerUploadVoice(receiver, voicePath, payloadHex, audioDataHex, durat
     const voiceIdStr = (typeof voiceFileId === "string" && voiceFileId.length > 0)
         ? voiceFileId
         : receiver + "_" + String(Math.floor(Date.now() / 1000)) + "_" + Math.floor(Math.random() * 1001) + "_1";
-    patchString(voiceIdAddr, voiceIdStr);
-    patchString(voicePathAddr1, voicePath);
+    // voiceIdAddr / voicePathAddr1 都是 256B 固定缓冲：超长时不再越界写。
+    if (!patchStringChecked(voiceIdAddr, voiceIdStr, UPLOAD_PATH_BUFFER_BYTES) ||
+        !patchStringChecked(voicePathAddr1, voicePath, UPLOAD_PATH_BUFFER_BYTES)) {
+        console.error("[!] 语音文件路径/ID 超长，跳过上传");
+        hookDebug("triggerUploadVoice: path/id too large");
+        return "fail";
+    }
 
     uploadVoiceX1.writeByteArray(payload);
     uploadVoiceX1.writePointer(uploadFunc1Addr);
@@ -4699,6 +4737,16 @@ function triggerDownload(receiver, cdnUrl, aesKey, filePath, fileType) {
     // 模板里的旧长度会把较长的 CDN file key 截断（194 → 178 字符），任务因此
     // 无效、回调不触发。这里按实际值写长度与容量。
     var fileIdValue = receiver + "_" + String(Math.floor(Date.now() / 1000)) + "_" + Math.floor(Math.random() * 1001) + "_1";
+    // 固定缓冲容量：fileId/aesKey 128B，cdnUrl/filePath 256B（setupDownloadFileDynamic）。
+    // 逐个写字符串前先校验容量，任一超长就整体放弃下载，避免越界写堆（审计 P2-17）。
+    if (!patchStringFits(fileIdValue, 128) ||
+        !patchStringFits(cdnUrl, UPLOAD_PATH_BUFFER_BYTES) ||
+        !patchStringFits(aesKey, 128) ||
+        !patchStringFits(filePath, UPLOAD_PATH_BUFFER_BYTES)) {
+        console.error("[!] 下载参数超长，跳过下载");
+        hookDebug("triggerDownload: string too large");
+        return "fail";
+    }
     // 先铺模板，再写字符串对象（模板会覆盖 0x40~0xA8）。
     downloadFileX1.writeByteArray(downloadMediaPayload);
     function patchDownloadString(objectOffset, dataAddr, value) {

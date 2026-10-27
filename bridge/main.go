@@ -18,6 +18,18 @@ import (
 	"github.com/frida/frida-go/frida"
 )
 
+// str 从 Frida 回调消息的 map 里安全读取字符串字段：
+// key 缺失或类型不是 string 时返回 ""。原来直接 `msg["type"].(string)` 在
+// JS 侧字段缺失/类型不符时会 panic，整条消息（如上传完成回包）被丢掉。
+func str(m map[string]interface{}, key string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
 func main() {
 	initFlag()
 	initLogger()
@@ -45,10 +57,20 @@ func main() {
 
 	go func() {
 		<-stop
-		fridaScript.Clean()
-		session.Clean()
-		device.Clean()
-		Fatal("正在释放 Frida 资源并退出...")
+		// SIGTERM/SIGINT 是 App 主动停止 bridge 的正常路径：先释放 Frida 资源，
+		// 再以退出码 0 退出。原来走 zerolog Fatal（os.Exit(1)），App 会把正常
+		// 停止误判为 bridge 崩溃。
+		if fridaScript != nil {
+			fridaScript.Clean()
+		}
+		if session != nil {
+			session.Clean()
+		}
+		if device != nil {
+			device.Clean()
+		}
+		Info("正在释放 Frida 资源并退出...")
+		os.Exit(0)
 	}()
 
 	// 3. 启动服务
@@ -218,15 +240,15 @@ func loadJs() {
 			return
 		}
 
-		msgType := msg["type"].(string)
+		msgType := str(msg, "type")
 
 		switch msgType {
 		case "send":
 			if p, ok := msg["payload"]; ok {
 				if pMap, ok := p.(map[string]interface{}); ok {
 					payloadJson, _ := json.Marshal(pMap)
-					if t, ok := pMap["type"]; ok {
-						switch t.(string) {
+					if _, ok := pMap["type"]; ok {
+						switch str(pMap, "type") {
 						case "protobuf_msg":
 							go HandleProtobufMsgAndSend(pMap)
 						case "send":
@@ -237,10 +259,7 @@ func loadJs() {
 							}
 						case "buf2resp":
 							go func() {
-								msgType := ""
-								if mt, ok := pMap["msg_type"]; ok {
-									msgType = mt.(string)
-								}
+								msgType := str(pMap, "msg_type")
 								if dataInter, ok := pMap["data"]; ok {
 									if dataArr, ok := dataInter.([]interface{}); ok {
 										rawBytes := make([]byte, len(dataArr))
@@ -308,24 +327,17 @@ func loadJs() {
 							m := &SendMsg{
 								Type: "send_image",
 							}
-							targetId := ""
-							if targetIdInter, ok := pMap["target_id"]; ok {
-								targetId = targetIdInter.(string)
+							targetId := str(pMap, "target_id")
+							if targetId != "" {
 								if strings.Contains(targetId, "wxid_") {
 									m.UserId = targetId
 								} else {
 									m.GroupID = targetId
 								}
 							}
-							if cdnKey, ok := pMap["cdn_key"]; ok {
-								m.CdnKey = cdnKey.(string)
-							}
-							if aesKey, ok := pMap["aes_key"]; ok {
-								m.AesKey = aesKey.(string)
-							}
-							if md5Key, ok := pMap["md5_key"]; ok {
-								m.Md5Key = md5Key.(string)
-							}
+							m.CdnKey = str(pMap, "cdn_key")
+							m.AesKey = str(pMap, "aes_key")
+							m.Md5Key = str(pMap, "md5_key")
 							if ch, ok := pendingResultMap.LoadAndDelete(targetId); ok {
 								m.ResultChan = ch.(chan error)
 							}
@@ -334,27 +346,18 @@ func loadJs() {
 							m := &SendMsg{
 								Type: "send_video",
 							}
-							targetId := ""
-							if targetIdInter, ok := pMap["target_id"]; ok {
-								targetId = targetIdInter.(string)
+							targetId := str(pMap, "target_id")
+							if targetId != "" {
 								if strings.Contains(targetId, "wxid_") {
 									m.UserId = targetId
 								} else {
 									m.GroupID = targetId
 								}
 							}
-							if cdnKey, ok := pMap["cdn_key"]; ok {
-								m.CdnKey = cdnKey.(string)
-							}
-							if aesKey, ok := pMap["aes_key"]; ok {
-								m.AesKey = aesKey.(string)
-							}
-							if md5Key, ok := pMap["md5_key"]; ok {
-								m.Md5Key = md5Key.(string)
-							}
-							if videoId, ok := pMap["video_id"]; ok {
-								m.VideoId = videoId.(string)
-							}
+							m.CdnKey = str(pMap, "cdn_key")
+							m.AesKey = str(pMap, "aes_key")
+							m.Md5Key = str(pMap, "md5_key")
+							m.VideoId = str(pMap, "video_id")
 							if ch, ok := pendingResultMap.LoadAndDelete(targetId); ok {
 								m.ResultChan = ch.(chan error)
 							}
@@ -363,21 +366,16 @@ func loadJs() {
 							m := &SendMsg{
 								Type: "send_voice",
 							}
-							targetId := ""
-							if targetIdInter, ok := pMap["target_id"]; ok {
-								targetId = targetIdInter.(string)
+							targetId := str(pMap, "target_id")
+							if targetId != "" {
 								if strings.Contains(targetId, "wxid_") {
 									m.UserId = targetId
 								} else {
 									m.GroupID = targetId
 								}
 							}
-							if cdnKey, ok := pMap["cdn_key"]; ok {
-								m.CdnKey = cdnKey.(string)
-							}
-							if aesKey, ok := pMap["aes_key"]; ok {
-								m.AesKey = aesKey.(string)
-							}
+							m.CdnKey = str(pMap, "cdn_key")
+							m.AesKey = str(pMap, "aes_key")
 							if voiceDuration, ok := pMap["voice_duration"]; ok {
 								if vd, ok := voiceDuration.(float64); ok {
 									m.VoiceDuration = int32(vd)
@@ -433,8 +431,10 @@ func loadJs() {
 				Info("R3 发送句柄记录已过期（微信已重启），等待重新捕获")
 				_ = os.Remove(r3SeedFile())
 			default:
-				Warn("R3 发送句柄已失效，等待重新捕获", "result", result)
-				_ = os.Remove(r3SeedFile())
+				// 只有 "stale"（微信已重启）才删除记录；"off"/"fail" 等临时状态
+				// （脚本未启用、暂时取不到句柄）必须保留，文档承诺跨 bridge 重启
+				// 恢复，删了下次重启就失去恢复机会。
+				Warn("R3 发送句柄暂不可恢复，保留记录等待下次重启重试", "result", result)
 			}
 		}
 		if rec.VoiceSeed != "" {

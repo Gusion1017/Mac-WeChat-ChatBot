@@ -27,6 +27,9 @@ final class AppStore {
     var sidebarSelection: SidebarItem? = .dashboard
     var selectedConversationID: String?
     var isBotRunning = false
+    /// 启停机器人进行中：MainActor 上同步置位，防止双击/仪表盘与菜单栏同时触发时
+    /// 发出两次 `startRuntime`（会拉起两个 bridge、两个 OneBotClient，旧连接事件被丢弃）。
+    var isBotTransitioning = false
     var isBusy = false
     var isOnboardingPresented = false
     var gatewayConnected = false

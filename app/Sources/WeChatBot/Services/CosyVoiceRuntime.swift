@@ -580,6 +580,10 @@ actor CosyVoiceRuntime {
     static let healthPollInterval: TimeInterval = 0.5
     static let probeTimeout: TimeInterval = 1.5
     static let monitorInterval: TimeInterval = 5
+    /// 空闲时的健康轮询间隔：最近 2 分钟没有合成请求就从 5s 降到 30s，
+    /// 避免常驻服务每天 1.7 万次无意义探活（唤醒/能耗/日志噪声）。
+    static let idleMonitorInterval: TimeInterval = 30
+    static let idleThreshold: TimeInterval = 120
     static let stopGraceSeconds: TimeInterval = 5
     static let maxLogLines = 200
 
@@ -596,6 +600,8 @@ actor CosyVoiceRuntime {
     private var logLines: [String] = []
     private var monitorTask: Task<Void, Never>?
     private var startTask: Task<CosyVoiceHealth, Error>?
+    /// 最近一次合成活动时间；只用它决定健康轮询频率（不影响服务生命周期）。
+    private var lastSynthesisAt = Date.distantPast
 
     init(
         client: CosyVoiceClient? = nil,
@@ -921,12 +927,27 @@ actor CosyVoiceRuntime {
         monitorTask?.cancel()
         monitorTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(CosyVoiceRuntime.monitorInterval))
                 guard let self else { return }
+                let interval = await self.nextMonitorInterval()
+                try? await Task.sleep(
+                    for: .seconds(interval), tolerance: .seconds(interval / 4))
+                guard !Task.isCancelled else { return }
                 let shouldContinue = await self.monitorTick(endpoint: endpoint)
                 if !shouldContinue { return }
             }
         }
+    }
+
+    /// 最近有合成活动 → 5s；空闲 → 30s。
+    private func nextMonitorInterval() -> TimeInterval {
+        Date().timeIntervalSince(lastSynthesisAt) < Self.idleThreshold
+            ? Self.monitorInterval
+            : Self.idleMonitorInterval
+    }
+
+    /// 合成/试听请求发生时刷新活跃时间（由 Core 调用；空闲后健康轮询自动降频）。
+    func noteSynthesisActivity() {
+        lastSynthesisAt = Date()
     }
 
     /// 返回 false 时停止监控（服务已退出/已由其他路径接管）。

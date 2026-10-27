@@ -401,6 +401,16 @@ final class VoiceSynthesisTests: XCTestCase {
     // MARK: - 6. 克隆档案 CRUD
 
     func testCloneStoreCRUD() async throws {
+        // 克隆档案目录默认在用户的 Application Support 下：单测必须改到临时目录，
+        // 否则会污染真实音色库，且在受限沙箱/CI 里会因权限失败（CoreAudio -54）。
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechatai-clones-\(UUID().uuidString)", isDirectory: true)
+        AppPaths.supportDirectoryOverride = tempRoot
+        defer {
+            try? FileManager.default.removeItem(at: tempRoot)
+            AppPaths.supportDirectoryOverride = nil
+        }
+
         let store = await VoiceCloneStore.shared
         let reference = try Self.makeSineReference(seconds: 1.0)
         defer { try? FileManager.default.removeItem(at: reference.url) }

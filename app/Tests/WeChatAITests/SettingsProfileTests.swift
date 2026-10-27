@@ -295,6 +295,69 @@ final class SettingsProfileTests: XCTestCase {
         )
     }
 
+    // MARK: - Old config compatibility (missing new keys)
+
+    func testOldConfigMissingNewFieldsKeepsGlobalSections() throws {
+        // 模拟旧版 config.json：bot 缺 humanize/workingHours/pat，ai 缺 streamReplies/vision。
+        let json = """
+        {
+          "schemaVersion": 1,
+          "hook": { "wechatPath": "/Applications/WeChat.app", "enableNativeSend": false },
+          "onebot": { "host": "127.0.0.1", "port": 58080, "token": "legacy-token" },
+          "ai": { "retryCount": 3 },
+          "bot": { "enabled": true, "keywords": ["旧关键词"] },
+          "providers": [{
+            "id": "p1", "name": "DeepSeek", "kind": "deepSeek",
+            "baseURL": "https://api.deepseek.com", "model": "deepseek-chat",
+            "apiKeyReference": "p1", "temperature": 0.7, "maxTokens": 800,
+            "timeoutSeconds": 60, "stream": true, "enabled": true, "isDefault": true
+          }],
+          "personas": [],
+          "schedules": []
+        }
+        """
+        try Data(json.utf8).write(to: configURL)
+
+        let loaded = SettingsStore.load(configURL: configURL, profileURL: nil)
+
+        // 关键全局字段不能被整份默认值覆盖。
+        XCTAssertEqual(loaded.onebot.token, "legacy-token")
+        XCTAssertEqual(loaded.hook.wechatPath, "/Applications/WeChat.app")
+        XCTAssertEqual(loaded.ai.retryCount, 3)
+        XCTAssertEqual(loaded.bot.keywords, ["旧关键词"])
+        XCTAssertEqual(loaded.providers.first?.id, "p1")
+        // 缺失的新键回退该字段默认值。
+        XCTAssertEqual(loaded.bot.humanize, HumanizeSettings())
+        XCTAssertEqual(loaded.bot.workingHours, WorkingHours())
+        XCTAssertEqual(loaded.ai.streamReplies, true)
+    }
+
+    func testCorruptSingleSectionFallsBackLossilyInsteadOfResettingEverything() throws {
+        // general 段被手改坏，但 hook/onebot/providers 仍然完好：只丢 general。
+        let json = """
+        {
+          "schemaVersion": 1,
+          "general": 12345,
+          "hook": { "wechatPath": "/Applications/WeChat.app" },
+          "onebot": { "host": "127.0.0.1", "port": 58080, "token": "keep-me" },
+          "providers": [{
+            "id": "p1", "name": "DeepSeek", "kind": "deepSeek",
+            "baseURL": "https://api.deepseek.com", "model": "deepseek-chat",
+            "apiKeyReference": "p1", "temperature": 0.7, "maxTokens": 800,
+            "timeoutSeconds": 60, "stream": true, "enabled": true, "isDefault": true
+          }]
+        }
+        """
+        try Data(json.utf8).write(to: configURL)
+
+        let loaded = SettingsStore.load(configURL: configURL, profileURL: nil)
+
+        XCTAssertEqual(loaded.onebot.token, "keep-me")
+        XCTAssertEqual(loaded.hook.wechatPath, "/Applications/WeChat.app")
+        XCTAssertEqual(loaded.providers.first?.id, "p1")
+        XCTAssertEqual(loaded.general, GeneralSettings())
+    }
+
     // MARK: - Helpers
 
     private func jsonObject(at url: URL) throws -> [String: Any] {

@@ -591,6 +591,9 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
   不会导致整份配置解码失败。
 - 启动：`AppDelegate.applicationDidFinishLaunching` 读取配置并 `apply(mode:)`；
   退出 `applicationWillTerminate` 调用 `release()`。设置页修改时立即 apply 并 persist。
+- **与机器人运行状态绑定（2026-10-28）**：只有机器人运行时才持有断言。`startRuntime` 成功后
+  `setRuntimeActive(true)`；`stopRuntime` 调用 `setRuntimeActive(false)` 立即释放断言
+  （偏好不变，下次启动恢复）。避免“始终防睡眠”在停止机器人后仍让整机无法空闲睡眠。
 - 实现：`IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep, On, …)`
   持有最多一个断言；`IOPSNotificationCreateRunLoopSource` 监听电源适配器变化，
   回调跳回主线程重算，事件驱动、不轮询。
@@ -669,7 +672,7 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 470 tests, with 8 skipped, 0 failures
+# Executed 473 tests, with 8 skipped, 0 failures
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值

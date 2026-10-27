@@ -6,6 +6,78 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ## [Unreleased]
 
+## [1.6.1] — 2026-10-28
+
+### 修复
+
+- **主线程冻结（性能/功耗）**：`VoiceModelStore.install` 的 365MB 模型 SHA256 校验与
+  `tar -xjf` 解包（含同步 `waitUntilExit`）移到后台线程，下载模型时不再出现 10s+ beachball；
+  识图前的解码/缩放/JPEG 重编码 + base64 改走 `VisionSupport.imageDataURLAsync`；
+  聊天图片气泡改为后台 ImageIO 下采样解码（最长边 1600px），大图滚动不再卡主线程；
+  回复热路径（自动回复/识图/引用图/拍一拍）的 Keychain 读取移出 MainActor
+  （`RuntimeCoordinator.credentialStateOffMain`），签名失效授权弹窗不再卡死主线程。
+- **工作时段跨午夜判定（逻辑）**：22:00–02:00 这类窗口的后半夜改为按「前一天」的星期判定，
+  修复「周一~周五 22:00–02:00」在周六 00:30 静默不生效；新增回归测试。
+- **启停机器人重入（并发）**：新增 `AppStore.isBotTransitioning` 并在 `startBot/stopBot/
+  startRuntime` 全部入口拦截，双击或仪表盘/菜单栏同时点击不再拉起两个 bridge 与两个
+  `OneBotClient`（旧连接事件被静默丢弃）。
+- **旧配置解码容错（数据）**：`WorkingHours / HumanizeSettings / BotSettings / AISettings /
+  OneBotSettings` 改为逐键 `decodeIfPresent`；`SettingsStore.loadConfig` 整体解码失败时
+  按顶层段降级解析。旧 `config.json` 缺新键不再导致 onebot token、`hook.wechatPath`、
+  providers 等全局设置被默认值覆盖；新增两条旧配置回归测试。
+- **防睡眠泄漏（功耗）**：防睡眠断言与机器人运行状态绑定：`startRuntime` 成功后持有，
+  `stopRuntime` 立即释放（偏好保留）。停止机器人后整机不再被阻止空闲睡眠。
+- **CosyVoice3 空转轮询（功耗）**：健康轮询自适应，最近 2 分钟有合成活动时 5s/次，
+  空闲降到 30s/次（原固定 5s，约 1.7 万次/天无效请求）。
+- **TTS 引擎常驻（内存）**：Kokoro/ZipVoice 引擎在最后一次合成后 10 分钟无新请求时自动
+  `unloadEngines()`（约 350–700MB / 150–250MB RSS），下次合成重新加载。
+- **统计跨日**：统计日期翻转挂到 30s vitals 循环（`rolloverStatsIfNeeded`），
+  夜间无新消息时总览不再整夜显示昨天的「今日收到/回复」；vitals 的 30s sleep 补 tolerance。
+- **会话语音状态批量更新（性能）**：`markPendingVoiceMessagesDisabled` 先收集再一次性
+  `merge`，避免边遍历边写字典导致的整字典/整数组 COW 复制。
+- **调度器等待者泄漏**：`SchedulerService.start` 先 `wakeUp()` 唤醒旧等待循环，
+  重复 start 不再让旧 `CheckedContinuation` 永久悬空。
+- **单测隔离（测试）**：`VoiceCloneStore` 的 CRUD 测试改用临时目录
+  （新增 `AppPaths.supportDirectoryOverride`），不再写用户真实音色库，受限沙箱/CI 下
+  也不会因权限失败（此前的 `CoreAudio -54` 失败源）。
+- **App WS 鉴权兼容**：`OneBotClient` 的 WebSocket 连接改用 `URLRequest` 并在 token 非空时
+  携带 `Authorization: Bearer <token>`，配合 bridge 新增的 `/ws` 鉴权；旧 bridge 忽略该头。
+
+### 安全
+
+- **bridge `/ws` 鉴权（2026-10-28）**：WS 握手校验 `Authorization: Bearer <token>` 或
+  `?token=`（常量时间比较，`-token` 为空时放行）；已有活动连接时拒绝新连接（HTTP 409）；
+  连接句柄改为局部变量 + 互斥保护，退出时只清理自己的连接；读限制 8MB、写超时 5s，
+  避免任意本机进程订阅事件流/伪造发送动作。
+
+### bridge / hook 修复
+
+- 上传返回值类型：`triggerUploadImg/Video/Voice` 的 RPC 返回 `float64`，原来与字符串 `"0"`
+  比较恒为失败（图片/视频/legacy 语音上传永远报错但消息可能已发出）；统一 `fmt.Sprint` 比较。
+- R3 发送句柄持久化文件只在 `stale` 状态删除；`off/fail` 保留，符合「跨 bridge 重启恢复」承诺。
+- SIGTERM/SIGINT 正常退出改为退出码 0（原走 `Fatal` 退出码 1，App 会误判崩溃）。
+- Frida 回调中的 `.(string)` 断言统一改为安全取值 `str()`，字段缺失不再 panic 丢消息。
+- legacy（4.1.12）入站媒体不再写入 app bundle（会破坏 ad-hoc 签名，导致下次启动被杀）：
+  优先 `-media_dir`，回退 `~/Library/Application Support/WeChatAI/media/legacy`，并统一
+  `MkdirAll`（`SaveAudioFile` 缺目录曾导致入站语音整条被丢弃）。
+- `hook/script.js` 固定缓冲区写入前做容量检查（256B 路径 / 5MB 语音音频），超长不再写坏
+  微信进程堆；`bridge/script.js` 已同步（sha256 一致）。
+
+### 文档 / 项目结构
+
+- 发布说明入库：`docs/releases/1.6.0.md`（原只在 gitignore 的 `dist/`，清理会丢失）。
+- `docs/README.md` 更新 Releases 版本/体积与发布记录索引；`docs/bridge.md` 更新 `/ws` 鉴权与
+  单连接语义；`docs/core-services.md` 补防睡眠运行时绑定；`docs/cosyvoice.md` 补轮询自适应；
+  `docs/voice.md` 补 TTS 空闲释放。
+- 构建/发布产物不改变可再生产方式：`app/.build*`、`dist/`、`bridge/onebot` 仍由
+  `make bridge` / `make app` / `make release` 生成。
+
+### 验证
+
+- `swift test`：473 项执行，0 失败（8 项按环境跳过）。
+- `scripts/build_bridge.sh`：Go 构建 + 全部单元/契约测试通过。
+- `scripts/check.sh --docs`：脚本语法、hook/bridge sha 一致、文档链接、hook 版本 JSON 全绿。
+
 ## [1.6.0] — 2026-10-28
 
 ### 新增
@@ -599,13 +671,14 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.6.1...HEAD
 [1.3.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.3.0
 [1.4.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.4.0
 [1.5.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.5.0
 [1.5.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.5.1
 [1.5.2]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.5.2
 [1.6.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.6.0
+[1.6.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.6.1
 [1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.0

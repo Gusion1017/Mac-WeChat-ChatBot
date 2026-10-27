@@ -898,12 +898,25 @@ struct WorkingHours: Codable, Hashable {
         guard enabled else { return true }
         let comps = calendar.dateComponents([.weekday, .hour, .minute], from: date)
         guard let weekday = comps.weekday, let hour = comps.hour, let minute = comps.minute else { return true }
-        guard weekdays.contains(weekday) else { return false }
         let current = hour * 60 + minute
-        if startMinute <= endMinute {
-            return current >= startMinute && current < endMinute
+        if startMinute < endMinute {
+            // 普通时段：当天星期 + [start, end)。
+            return weekdays.contains(weekday) && current >= startMinute && current < endMinute
         }
-        return current >= startMinute || current < endMinute
+        if startMinute > endMinute {
+            // 跨夜时段（如 22:00–02:00）：窗口从 start 当天开始，到次日 end 结束。
+            // - 前半夜（t >= start）：属于「今天」开始的窗口，按今天星期判定；
+            // - 后半夜（t < end）：属于「昨天」开始的窗口，必须按前一天星期判定，
+            //   否则周五 22:00–02:00 的窗口在周六 00:30 会被误判为休息。
+            if current >= startMinute { return weekdays.contains(weekday) }
+            if current < endMinute {
+                let previousWeekday = weekday == 1 ? 7 : weekday - 1
+                return weekdays.contains(previousWeekday)
+            }
+            return false
+        }
+        // start == end：零长度窗口（旧行为；UI 不提供该组合）。
+        return false
     }
 }
 
@@ -1428,5 +1441,112 @@ struct BotSettings: Codable, Hashable {
         let normalized = TriggerMode.groupOptions.filter { stored.contains($0) }
         if !normalized.isEmpty { return normalized }
         return [groupTrigger]
+    }
+}
+
+// MARK: - 旧配置容错解码
+//
+// `WorkingHours` / `HumanizeSettings` / `BotSettings` 都含「后加的非可选字段」。
+// Codable 的合成解码遇到缺失键会 throw，而 `AppSettings` 是整体解码的：
+// 旧版 config.json 只要缺一个 `humanize.maxSegments`，整份全局设置（onebot token、
+// hook.wechatPath、providers…）都会回退默认值并写回覆盖。这里逐键
+// `decodeIfPresent`，缺键/类型损坏只回退该字段的默认值。
+
+extension WorkingHours {
+    private enum CodingKeys: String, CodingKey {
+        case enabled, startMinute, endMinute, weekdays
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = WorkingHours()
+        enabled = (try? container.decodeIfPresent(Bool.self, forKey: .enabled)) ?? defaults.enabled
+        startMinute = (try? container.decodeIfPresent(Int.self, forKey: .startMinute))
+            ?? defaults.startMinute
+        endMinute = (try? container.decodeIfPresent(Int.self, forKey: .endMinute))
+            ?? defaults.endMinute
+        weekdays = (try? container.decodeIfPresent(Set<Int>.self, forKey: .weekdays))
+            ?? defaults.weekdays
+    }
+}
+
+extension HumanizeSettings {
+    private enum CodingKeys: String, CodingKey {
+        case enabled, minDelayMs, maxDelayMs, splitMessages, maxSegments, typingIndicator
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = HumanizeSettings()
+        enabled = (try? container.decodeIfPresent(Bool.self, forKey: .enabled)) ?? defaults.enabled
+        minDelayMs = (try? container.decodeIfPresent(Int.self, forKey: .minDelayMs))
+            ?? defaults.minDelayMs
+        maxDelayMs = (try? container.decodeIfPresent(Int.self, forKey: .maxDelayMs))
+            ?? defaults.maxDelayMs
+        splitMessages = (try? container.decodeIfPresent(Bool.self, forKey: .splitMessages))
+            ?? defaults.splitMessages
+        maxSegments = (try? container.decodeIfPresent(Int.self, forKey: .maxSegments))
+            ?? defaults.maxSegments
+        typingIndicator = (try? container.decodeIfPresent(Bool.self, forKey: .typingIndicator))
+            ?? defaults.typingIndicator
+    }
+}
+
+extension BotSettings {
+    private enum CodingKeys: String, CodingKey {
+        case enabled, dryRun, replyToDirect, groupTrigger, groupTriggers, keywords
+        case commandPrefix, ignoreSelf, ignoreOfficialAccounts, cooldownSeconds
+        case maxRepliesPerMinute, maxContextMessages, workingHours, humanize
+        case defaultProviderID, defaultPersonaID, pat, wakeWindow, voice
+        case imageFetchEnabled, selfMentionNames, whitelistEntries, blacklistEntries
+        case whitelistConversations, blacklistConversations, whitelistUsers, blacklistUsers
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = BotSettings()
+        enabled = (try? container.decodeIfPresent(Bool.self, forKey: .enabled)) ?? defaults.enabled
+        dryRun = (try? container.decodeIfPresent(Bool.self, forKey: .dryRun)) ?? defaults.dryRun
+        replyToDirect = (try? container.decodeIfPresent(Bool.self, forKey: .replyToDirect))
+            ?? defaults.replyToDirect
+        groupTrigger = (try? container.decodeIfPresent(TriggerMode.self, forKey: .groupTrigger))
+            ?? defaults.groupTrigger
+        groupTriggers = try? container.decodeIfPresent([TriggerMode].self, forKey: .groupTriggers)
+        keywords = (try? container.decodeIfPresent([String].self, forKey: .keywords))
+            ?? defaults.keywords
+        commandPrefix = (try? container.decodeIfPresent(String.self, forKey: .commandPrefix))
+            ?? defaults.commandPrefix
+        ignoreSelf = (try? container.decodeIfPresent(Bool.self, forKey: .ignoreSelf))
+            ?? defaults.ignoreSelf
+        ignoreOfficialAccounts = (try? container.decodeIfPresent(
+            Bool.self, forKey: .ignoreOfficialAccounts)) ?? defaults.ignoreOfficialAccounts
+        cooldownSeconds = (try? container.decodeIfPresent(Double.self, forKey: .cooldownSeconds))
+            ?? defaults.cooldownSeconds
+        maxRepliesPerMinute = (try? container.decodeIfPresent(
+            Int.self, forKey: .maxRepliesPerMinute)) ?? defaults.maxRepliesPerMinute
+        maxContextMessages = (try? container.decodeIfPresent(
+            Int.self, forKey: .maxContextMessages)) ?? defaults.maxContextMessages
+        workingHours = (try? container.decodeIfPresent(WorkingHours.self, forKey: .workingHours))
+            ?? defaults.workingHours
+        humanize = (try? container.decodeIfPresent(HumanizeSettings.self, forKey: .humanize))
+            ?? defaults.humanize
+        defaultProviderID = try? container.decodeIfPresent(String.self, forKey: .defaultProviderID)
+        defaultPersonaID = try? container.decodeIfPresent(String.self, forKey: .defaultPersonaID)
+        pat = try? container.decodeIfPresent(PatReplySettings.self, forKey: .pat)
+        wakeWindow = try? container.decodeIfPresent(WakeWindowSettings.self, forKey: .wakeWindow)
+        voice = try? container.decodeIfPresent(VoiceSettings.self, forKey: .voice)
+        imageFetchEnabled = try? container.decodeIfPresent(Bool.self, forKey: .imageFetchEnabled)
+        selfMentionNames = try? container.decodeIfPresent(
+            [String: String].self, forKey: .selfMentionNames)
+        whitelistEntries = try? container.decodeIfPresent([String].self, forKey: .whitelistEntries)
+        blacklistEntries = try? container.decodeIfPresent([String].self, forKey: .blacklistEntries)
+        whitelistConversations = (try? container.decodeIfPresent(
+            [String].self, forKey: .whitelistConversations)) ?? defaults.whitelistConversations
+        blacklistConversations = (try? container.decodeIfPresent(
+            [String].self, forKey: .blacklistConversations)) ?? defaults.blacklistConversations
+        whitelistUsers = (try? container.decodeIfPresent(
+            [String].self, forKey: .whitelistUsers)) ?? defaults.whitelistUsers
+        blacklistUsers = (try? container.decodeIfPresent(
+            [String].self, forKey: .blacklistUsers)) ?? defaults.blacklistUsers
     }
 }

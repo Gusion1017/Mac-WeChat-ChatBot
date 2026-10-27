@@ -14,7 +14,17 @@ enum AppPaths {
     static let appName = "WeChatAI"
     static let bundleID = "com.gusionw.wechatai"
 
+    /// 测试专用覆盖：非 nil 时所有 Application Support 路径改到这个根目录。
+    ///
+    /// 单测（如 `VoiceCloneStore` 的 CRUD）必须写临时目录：直接写用户的真实
+    /// `~/Library/Application Support/WeChatAI` 既会污染用户数据，在受限沙箱/CI
+    /// 里还会因权限不足直接失败（CoreAudio 报 -54）。
+    nonisolated(unsafe) static var supportDirectoryOverride: URL?
+
     static var supportDirectory: URL {
+        if let override = supportDirectoryOverride {
+            return override
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
         return base.appendingPathComponent(appName, isDirectory: true)
@@ -233,6 +243,28 @@ struct OneBotSettings: Codable, Hashable {
     var imagePath: String = ""
 }
 
+extension OneBotSettings {
+    private enum CodingKeys: String, CodingKey {
+        case host, port, token, connType, bridgePath, imagePath
+    }
+
+    /// 逐键解码：旧配置缺 `connType` / `bridgePath` / `imagePath` 时不能整段回退，
+    /// 否则随机生成的 OneBot token 会被重置，外部 bridge 直接连不上。
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = OneBotSettings()
+        host = (try? container.decodeIfPresent(String.self, forKey: .host)) ?? defaults.host
+        port = (try? container.decodeIfPresent(Int.self, forKey: .port)) ?? defaults.port
+        token = (try? container.decodeIfPresent(String.self, forKey: .token)) ?? defaults.token
+        connType = (try? container.decodeIfPresent(String.self, forKey: .connType))
+            ?? defaults.connType
+        bridgePath = (try? container.decodeIfPresent(String.self, forKey: .bridgePath))
+            ?? defaults.bridgePath
+        imagePath = (try? container.decodeIfPresent(String.self, forKey: .imagePath))
+            ?? defaults.imagePath
+    }
+}
+
 /// 识图（视觉）模型设置（2026-10-23 新增）。
 ///
 /// 图片本身不直接进入回复模型上下文：收到图片后先用这里的通道/模型生成一段
@@ -278,12 +310,32 @@ struct AISettings: Codable, Hashable {
     var modelTemperatures: [String: Double]?
     /// 识图模型设置；nil 表示未配置（旧配置/默认关闭）。
     var vision: VisionSettings?
-
     /// 当前模型生效的自定义温度；未配置返回 `nil`（模型默认）。
     func temperature(forModel model: String) -> Double? {
         let key = model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty, let value = modelTemperatures?[key] else { return nil }
         return min(max(value, 0), 2)
+    }
+}
+
+extension AISettings {
+    private enum CodingKeys: String, CodingKey {
+        case defaultProviderID, streamReplies, retryCount, modelTemperatures, vision
+    }
+
+    /// 旧 `config.json` 没有 `streamReplies` / `retryCount` / `vision` 时只回退这些
+    /// 字段的默认值，不让整份 `AppSettings` 解码失败（那会连 onebot token 一起重置）。
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = AISettings()
+        defaultProviderID = try? container.decodeIfPresent(String.self, forKey: .defaultProviderID)
+        streamReplies = (try? container.decodeIfPresent(Bool.self, forKey: .streamReplies))
+            ?? defaults.streamReplies
+        retryCount = (try? container.decodeIfPresent(Int.self, forKey: .retryCount))
+            ?? defaults.retryCount
+        modelTemperatures = try? container.decodeIfPresent(
+            [String: Double].self, forKey: .modelTemperatures)
+        vision = try? container.decodeIfPresent(VisionSettings.self, forKey: .vision)
     }
 }
 
@@ -484,8 +536,44 @@ enum SettingsStore {
             let backup = configURL.deletingLastPathComponent()
                 .appendingPathComponent("config.corrupt-\(Int(Date().timeIntervalSince1970)).json")
             try? FileManager.default.copyItem(at: configURL, to: backup)
+            // 整体解码失败时按顶层段逐个降级解析：单个段损坏只丢该段，
+            // 不让 onebot token / hook.wechatPath / providers 一起回退默认值。
+            return decodeSectionsLossily(data)
+        }
+    }
+
+    /// 逐段降级解析 `config.json`。
+    ///
+    /// 旧版配置缺新键、或某一段被手改坏时，`AppSettings` 整体 `decode` 会抛错；
+    /// 这里按顶层 key 分别解码，失败的段保留 `AppSettings.default` 中的默认值。
+    private static func decodeSectionsLossily(_ data: Data) -> AppSettings {
+        guard let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return .default
         }
+        var settings = AppSettings.default
+        let decoder = JSONDecoder()
+
+        func decode<T: Decodable>(_ key: String, as type: T.Type) -> T? {
+            guard let value = raw[key], JSONSerialization.isValidJSONObject(value),
+                  let section = try? JSONSerialization.data(withJSONObject: value),
+                  let decoded = try? decoder.decode(T.self, from: section)
+            else { return nil }
+            return decoded
+        }
+
+        if let number = raw["schemaVersion"] as? NSNumber {
+            settings.schemaVersion = number.intValue
+        }
+        if let value = decode("general", as: GeneralSettings.self) { settings.general = value }
+        if let value = decode("hook", as: HookSettings.self) { settings.hook = value }
+        if let value = decode("onebot", as: OneBotSettings.self) { settings.onebot = value }
+        if let value = decode("ai", as: AISettings.self) { settings.ai = value }
+        if let value = decode("bot", as: BotSettings.self) { settings.bot = value }
+        if let value = decode("providers", as: [AIProvider].self) { settings.providers = value }
+        if let value = decode("personas", as: [Persona].self) { settings.personas = value }
+        if let value = decode("schedules", as: [ScheduledTask].self) { settings.schedules = value }
+        NSLog("[WeChatAI] config decoded lossily: 保留可用段，损坏段回退默认值")
+        return settings
     }
 
     /// 只写全局 `config.json`（账号字段由 `SettingsPersistence.save(_:profileURL:)` 双写）。

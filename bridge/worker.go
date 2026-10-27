@@ -91,7 +91,9 @@ func SendWechatMsg(m *SendMsg) {
 		uploadPayloadHex := BuildUploadPayload("img")
 		result := fridaScript.ExportsCall("triggerUploadImg", targetId, md5Str, targetPath, uploadPayloadHex)
 		Info("📩 上传图片任务执行结果", "result", result, "target_id", targetId, "md5", md5Str, "path", targetPath)
-		if result != "0" {
+		// JS 返回的是 number（frida-go 反序列化为 float64），不能直接和字符串 "0"
+		// 比较（那样恒为真，图片永远判失败）。统一转文本比较，与 media.go/voice.go 一致。
+		if strings.TrimSpace(fmt.Sprint(result)) != "0" {
 			Error("上传图片失败", "target_id", targetId, "md5", md5Str, "result", result)
 			sendErr = errors.New("upload image failed")
 			return
@@ -140,7 +142,8 @@ func SendWechatMsg(m *SendMsg) {
 		uploadPayloadHex := BuildUploadPayload("video")
 		result := fridaScript.ExportsCall("triggerUploadVideo", targetId, md5Str, targetPath, uploadPayloadHex)
 		Info("📩 上传视频任务执行结果", "result", result, "target_id", targetId, "md5", md5Str, "path", targetPath, "duration", info.Duration, "size", info.VideoSize)
-		if result != "0" {
+		// 同上传图片：RPC 返回 number，用文本化后比较，避免 "!= \"0\"" 恒真。
+		if strings.TrimSpace(fmt.Sprint(result)) != "0" {
 			Error("上传视频失败", "target_id", targetId, "md5", md5Str, "result", result)
 			sendErr = errors.New("upload video failed")
 			return
@@ -221,7 +224,8 @@ func SendWechatMsg(m *SendMsg) {
 		uploadPayloadHex := BuildVoiceUploadPayload()
 		result := fridaScript.ExportsCall("triggerUploadVoice", targetId, targetPath, uploadPayloadHex, audioHex, voiceDurationMs)
 		Info("📩 上传语音任务执行结果", "result", result, "target_id", targetId, "path", targetPath, "silk_len", len(silkData), "duration_ms", voiceDurationMs)
-		if result != "0" {
+		// 同上传图片/视频：RPC 返回 number，用文本化后比较，避免 "!= \"0\"" 恒真。
+		if strings.TrimSpace(fmt.Sprint(result)) != "0" {
 			Error("上传语音失败", "target_id", targetId, "result", result)
 			sendErr = errors.New("upload voice failed")
 			return

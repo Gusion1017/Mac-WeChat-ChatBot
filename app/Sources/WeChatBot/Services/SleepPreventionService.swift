@@ -36,6 +36,9 @@ final class SleepPreventionCenter {
     @ObservationIgnored private var isHoldingAssertion = false
     @ObservationIgnored private var powerSourceRunLoopSource: CFRunLoopSource?
     @ObservationIgnored private var isObservingPowerSource = false
+    /// 机器人运行时才需要防睡眠：停止机器人后即使偏好是「始终」，也应释放断言，
+    /// 否则整机在闲置时无法进入睡眠（笔记本待机功耗从 ~0.1W 升至数瓦）。
+    @ObservationIgnored private var runtimeActive = false
 
     private static let assertionReason = "WeChat AI 正在运行，按设置防止系统空闲睡眠"
 
@@ -73,6 +76,15 @@ final class SleepPreventionCenter {
         if newMode == .never { lastError = nil }
     }
 
+    /// 机器人启动/停止时更新「运行时是否活跃」。停止机器人后释放断言，
+    /// 重新启动时按当前偏好恢复（用户偏好本身不变）。
+    func setRuntimeActive(_ active: Bool) {
+        guard runtimeActive != active else { return }
+        runtimeActive = active
+        startObservingPowerSourceIfNeeded()
+        evaluate()
+    }
+
     /// Re-reads the current power source (AC / battery). A `nil` result — desktops and
     /// any transient IOKit failure — is treated as external power.
     func refreshPowerSource() {
@@ -99,7 +111,8 @@ final class SleepPreventionCenter {
     }
 
     private func evaluate() {
-        let shouldPrevent = Self.shouldPreventSleep(mode: mode, onExternalPower: isOnExternalPower)
+        let shouldPrevent = runtimeActive
+            && Self.shouldPreventSleep(mode: mode, onExternalPower: isOnExternalPower)
         if shouldPrevent {
             acquireAssertionIfNeeded()
         } else {

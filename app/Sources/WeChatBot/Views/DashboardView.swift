@@ -29,7 +29,7 @@ struct DashboardView: View {
             .buttonStyle(.glassProminent)
             .tint(store.isBotRunning ? Theme.danger : Theme.accent)
             .controlSize(.regular)
-            .disabled(store.isSwitchingAccount)
+            .disabled(store.isSwitchingAccount || store.isBotTransitioning)
             .accessibilityHint(store.isSwitchingAccount
                 ? "正在切换微信账号数据，请稍候"
                 : (store.isBotRunning ? "停止接收与自动回复" : "开始接收消息并按触发设置自动回复"))
