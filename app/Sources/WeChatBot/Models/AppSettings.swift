@@ -43,6 +43,8 @@ enum AppPaths {
     static var mediaDirectory: URL { AccountProfile.mediaDirectory }
     /// 当前账号的日志目录。
     static var logsDirectory: URL { AccountProfile.logsDirectory }
+    /// 当前账号的角色目录（每会话记忆卡，记忆 v2；人格来自人格设定）。
+    static var charactersDirectory: URL { AccountProfile.charactersDirectory }
     /// 所有账号目录的父目录（`accounts/`）。
     static var accountsDirectory: URL { AccountProfile.layout.accountsDirectory }
     /// 当前账号目录（`accounts/<id>/`）。
@@ -80,6 +82,7 @@ enum AppPaths {
             accountDirectory,
             mediaDirectory,
             logsDirectory,
+            charactersDirectory,
             bridgeLogDirectory,
             backupsDirectory,
             runtimeDirectory,

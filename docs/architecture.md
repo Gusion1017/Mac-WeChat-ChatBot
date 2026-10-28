@@ -11,12 +11,14 @@
 ┌───────────────────────────── macOS ─────────────────────────────┐
 │                                                                  │
 │  WeChatAI.app (SwiftUI, 原生)                                    │
-│   ├─ UI / 触发判定 / 人格 / 记忆 / 定时任务 / 日志                 │
-│   ├─ AccountProfile（多微信账号档案：布局/状态/迁移）              │
+│   ├─ UI / 触发判定 / 人格 / 记忆 / 定时任务 / 日志               │
+│   ├─ AccountProfile（多微信账号档案：布局/状态/迁移）            │
+│   ├─ CharacterStore（会话 + 全局记忆卡：memory.sqlite）          │
+│   ├─ MemoryEngine（记忆召回/提取/权重/合并）                     │
 │   ├─ OneBotClient (WS + HTTP, 127.0.0.1:58080)                   │
-│   ├─ AIService (URLSession, OpenAI 兼容, 流式)                    │
-│   ├─ MemoryStore (SQLite, accounts/<当前账号>/chatbot.sqlite)      │
-│   └─ HookManager (检测/备份/安装/启动/停止)                        │
+│   ├─ AIService (URLSession, OpenAI 兼容, 流式)                   │
+│   ├─ MemoryStore (SQLite, 账号库；旧 memories 表只读兼容)        │
+│   └─ HookManager (检测/备份/安装/启动/停止)                      │
 │                    │ spawn/HTTP/WS                               │
 │                    ▼                                             │
 │  bridge/onebot (Go, 轻量；GPL-3.0 衍生)                           │
@@ -44,6 +46,21 @@
   停止周期任务；入站去重表为 4096 条固定窗口（历史回放 / 长时间运行不增长内存）。
 - 启动历史修复信任 bridge `get_login_info` 的权威 selfID（`onebot.self_id_source=login`），
   跳过历史事件反推；两个全表 appmsg / 引用文本迁移由 `data.repairs_version` 门禁只执行一次。
+
+### 1.1 回复与记忆数据流（v2）
+
+1. bridge WS 事件 → `OneBotClient` 解析 → 运行时把会话/消息写入当前账号库（`MemoryStore`）。
+2. 触发命中 → 取通道/人格；该会话首次生成回复时 `CharacterStore.ensureCharacter` 创建
+   `characters/<key>/memory.sqlite`（只建记忆卡，**新卡默认空**，不写初始记忆/`persona.md`）。
+   全局卡 `characters/c-__global__/memory.sqlite` 由 `ensureGlobalCharacter` 惰性创建。
+3. 生成回复前 `MemoryEngine.recall` 合并当前会话 + 全局共享记忆，按「最近 72h → 重要 →
+   关键词相关」取记忆并按 token 预算注入 system prompt；人格正文来自人格设定
+   （不再有每会话 `persona.md`）。
+4. AI 回复 → 发送；消息落库后调度后台记忆维护：同步 `interactions`（全量互动记录），
+   每 N 条（默认 8）批量 AI 提取 fact/decision/todo/lesson，相似度 ≥0.92 合并、
+   冲突 supersede 留档，推进提取游标并自动归档。
+5. 旧 `MemoryStore` 长期记忆（滚动总结/召回）不再参与运行时，仅保留只读兼容与旧单测。
+   完整契约与设置见 [`memory.md`](memory.md)。
 
 ## 2. 目录与写入边界
 
@@ -78,10 +95,16 @@ App 的聊天数据、机器人配置与新媒体按**当前登录的微信账�
 │   ├── _unassigned/                # 尚未识别微信账号时的临时档案（保留名）
 │   │   ├── chatbot.sqlite
 │   │   ├── profile.json
+│   │   ├── characters/             # 每会话 + 全局记忆卡
 │   │   └── media/
 │   └── <wxid>/
 │       ├── chatbot.sqlite (+ -wal / -shm)
 │       ├── profile.json            # {"schemaVersion":1,"bot":{…},"personas":[…],"schedules":[…]}
+│       ├── characters/             # 每会话一个角色目录（记忆 v2）+ 固定全局卡
+│       │   ├── c-__global__/
+│       │   │   └── memory.sqlite   # 全局共享记忆（手动维护，注入所有会话）
+│       │   └── c-<conversation-key>/
+│       │       └── memory.sqlite   # 记忆卡（SQLite WAL；无 persona.md）
 │       ├── media/                  # 该账号新产生的图片/语音/TTS 输出
 │       ├── logs/                   # 预留（当前为空）
 │       └── legacy-migration.json   # 仅旧版迁移目标有
@@ -94,6 +117,14 @@ App 的聊天数据、机器人配置与新媒体按**当前登录的微信账�
 - `config.json` 仍是全局设置入口；运行期的 `bot` / `personas` / `schedules` 以
   `accounts/<当前账号>/profile.json` 为准，`config.json` 中保留一份完整镜像以便旧版回滚。
 - 旧版 `chatbot.sqlite` / `media/` / `config.json` 只 copy、不删除；旧媒体里的绝对路径继续有效。
+- `characters/` 按微信账号隔离，随账号目录整体复制/认领；换号后只看到当前账号的角色卡。
+  每个目录只有 `memory.sqlite`，新卡默认空、不生成初始记忆；人格来自 `profile.json` 的人格设定。
+  固定伪目录 `c-__global__/` 是「全局共享记忆」：手动维护、注入所有会话、每账号一份、
+  不可删除，见 [`memory.md`](memory.md) §4.4。
+  旧版 `persona.md` 不再读取，创建/加载记忆卡时 best-effort 移到废纸篓；旧 `kind='origin'`
+  行在打开数据库时迁移（生成型删除、编辑过的转普通置顶手写），见 [`memory.md`](memory.md) §3.3、§4.3。
+- `chatbot.sqlite` 仍由 `MemoryStore` 管理会话/消息/日志/设置，其中旧 `memories` / `memory_state`
+  表保留只读兼容（不再写入），旧记忆需在 App 记忆面板手动导入，见 [`memory.md`](memory.md)。
 - 启动/切号顺序、迁移与 `_unassigned` 认领见 [`accounts.md`](accounts.md) §5–§7。
 
 ## 3. OneBot 桥接契约（已按上游 v0.0.18 源码核对）
@@ -323,6 +354,13 @@ bridge 推送的 JSON（`WechatMessage`，字段可能缺省）：
 - `AppStore`（`Core/AppStore.swift`）：`@MainActor @Observable`，持有 settings/conversations/messages/logs/hookStatus/stats；UI 只读并调用其方法。多账号字段：`activeAccountID` / `activeAccountIsUnassigned` / `accountSwitchNotice` / `savedWeChatAccounts` / `isSwitchingAccount`（见 §5）。
 - `AccountProfile` / `AccountLayout` / `WeChatAccountResolver`（`Services/AccountProfile.swift`、`Services/WeChatAccountResolver.swift`）：
   账号档案布局、`account-state.json`、旧版迁移、`_unassigned` 认领、启动前账号识别。契约见 [`accounts.md`](accounts.md)。
+- `CharacterStore` / `MemoryEngine`（`Services/CharacterStore.swift`、`Services/MemoryEngine.swift`）：
+  每会话角色目录 `characters/<key>/memory.sqlite`（人格单一来源，不再写 `persona.md`）。
+  `CharacterStore` actor 串行文件/DB 写入、按需打开记忆卡（LRU 4 个连接）、切号
+  suspend/activate，惰性创建全局卡（`ensureGlobalCharacter`），并 best-effort 清理旧
+  `persona.md` 与迁移旧 origin 行（新卡为空）；`MemoryEngine` 负责召回（合并会话 + 全局）、
+  批量提取、权重/衰减、0.92 合并、supersede 与归档。旧 `memories` 表只读兼容。
+  契约见 [`memory.md`](memory.md) §4.4、§8。
 - `SleepPreventionCenter`（`Services/SleepPreventionService.swift`，`@MainActor @Observable`）：
   `general.sleepPrevention` 的运行时执行者，持有/释放 IOKit `PreventUserIdleSystemSleep` 断言，
   监听电源适配器变化；纯决策函数 `shouldPreventSleep(mode:onExternalPower:)` 可单测。
@@ -359,6 +397,10 @@ bridge 推送的 JSON（`WechatMessage`，字段可能缺省）：
   由 `AccountProfile` 原子写；只有旧库迁移真正完成才把 `legacyMigrationDone` 置 `true`。
 - 数据库：`accounts/<当前账号>/chatbot.sqlite`（WAL）；旧版根目录 `chatbot.sqlite` 迁移后保留、
   不再写入。账号切换与旧版迁移见 [`accounts.md`](accounts.md)。
+- 记忆卡：`accounts/<当前账号>/characters/`（`CharacterStore`，每会话只有 `memory.sqlite`；
+  另有固定 `c-__global__/` 全局共享卡）；记忆设置 `bot.memory` 与人格设定 `personas` 都随账号
+  `profile.json`，因此人格是全局模板、会话记忆按会话隔离、全局记忆注入所有会话。
+  默认值与范围见 [`memory.md`](memory.md) §3、§4.4、§11。
 - API Key：macOS Keychain，service = `com.gusionw.wechatai`，account = `provider.apiKeyReference`；
   全局共享，不随微信账号切换。
 - 配置中**禁止**出现明文 Key；`AIProvider.apiKeyReference` 仅存 Keychain account 名。
@@ -394,7 +436,7 @@ bridge 推送的 JSON（`WechatMessage`，字段可能缺省）：
 4. 群聊仅在被 @/关键词/前缀时回复；白/黑名单、冷却、频率限制生效。
 5. 重启 App/微信后能恢复连接；日志可查；数据本地持久化。
 6. 空闲时 App 内存占用低（目标 < 150MB），bridge < 80MB；无忙轮询。
-7. 多微信账号：换微信账号后聊天/记忆/会话设置/机器人配置切到该账号档案，AI/Hook/OneBot/
+7. 多微信账号：换微信账号后聊天/记忆卡/会话设置/机器人配置切到该账号档案，AI/Hook/OneBot/
    Keychain/语音模型保持全局；升级旧单库时只 copy 不删；旧媒体路径仍可读。验收细节见
    [`accounts.md`](accounts.md) §11。
 

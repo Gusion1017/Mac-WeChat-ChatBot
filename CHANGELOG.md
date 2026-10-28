@@ -6,6 +6,39 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-10-28
+
+### 变更
+
+- **记忆系统 v2：会话记忆卡 · 人格设定（2026-10-28）**：记忆系统按「一个微信会话 =
+  一个记忆卡目录」重做，每个会话在 `accounts/<id>/characters/<会话 key>/` 下保存
+  `memory.sqlite`（记忆卡）。**人格统一采用「人格设定」**：每会话不再复制 `persona.md`，
+  会话只记录 `personaID` 绑定；旧副本在创建/加载记忆卡时 best-effort 移到废纸篓，
+  记忆页移除人设卡 sheet/按钮，姓名/摘要/系统提示词/模型在人格设定中修改后立即生效。
+  **移除起点记忆**：新卡默认空；旧库中生成型 `origin` 行删除，用户编辑过的转普通置顶手写记忆；
+  记忆页移除起点筛选/统计/徽标。记忆分事实/决策/待办/经验四类、普通/重要两级，按时间
+  （72h 最近窗口）、重要度与使用频率加权，普通/重要半衰期 30/180 天；相似度 ≥0.92 自动折叠，
+  冲突 supersede 双方留档
+  （旧记忆不召回）；每 N 条新互动（默认 8）后台批量 AI 提取，失败走本地兜底；全量互动文本
+  永久保存在 `interactions`（清理聊天记录不删除）。App「记忆库」页改为记忆卡面板：角色列表、
+  记忆卡、全量记录/记忆设置 sheet、Markdown/JSON 导出、旧记忆手动导入；空状态提供
+  「为现有会话创建记忆卡」；修复记忆页继承的撑高、空状态与全量记录首次回填问题。
+  **新增全局共享记忆**：固定伪角色 `__global__`（「全局共享」），目录
+  `characters/c-__global__/memory.sqlite`；手动维护、注入所有会话、不自动提取、没有全量记录
+  且不可删除；记忆页新增全局行，聚合视图同时并入全局记忆。
+  **记忆页移除聊天记录模式与重复统计**；清理聊天记录改为**具体会话头部菜单**
+  （`ChatCleanupSheet`，仅该会话，无“全部会话”入口；只删本地 `messages`，不动记忆卡/全量记录，
+  条数来自账号库 `messageCount`）；移除无用的旧长期记忆运行时状态/API（旧表只读读取与手动导入仍保留）。
+  **记忆库入口不再自动打开聚合页**：进入/再次点击只显示角色列表与「选择一个角色」占位，
+  「全部角色」/「查看全部角色」显式打开聚合；刷新、建卡、删卡后保持无选择。
+  不开放微信 `/记忆` 指令。旧 `memories` / `memory_state` 表保留只读、不自动迁移，
+  旧 MemoryStore 记忆方法与单测保留；新增 `bot.memory` 设置随账号 `profile.json`，
+  `characters/` 随账号目录整体复制，切号时 `CharacterStore` suspend/activate。
+  `swift test` 504 项通过（8 项按环境跳过）。文档同步更新
+  [`docs/memory.md`](docs/memory.md)、[`docs/architecture.md`](docs/architecture.md)、
+  [`docs/core-services.md`](docs/core-services.md)、[`docs/accounts.md`](docs/accounts.md)、
+  [`docs/ui-design.md`](docs/ui-design.md)、根 `README.md` 与本文。
+
 ## [1.6.2] — 2026-10-28
 
 ### 安全
@@ -681,7 +714,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.6.2...HEAD
+[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.7.0...HEAD
 [1.3.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.3.0
 [1.4.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.4.0
 [1.5.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.5.0
@@ -690,6 +723,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 [1.6.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.6.0
 [1.6.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.6.1
 [1.6.2]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.6.2
+[1.7.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.7.0
 [1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.0

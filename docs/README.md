@@ -11,7 +11,7 @@
 | [`accounts.md`](accounts.md) | **多微信账号数据隔离**：隔离矩阵、`accounts/<wxid>/` 布局、识别算法、三种切号路径、旧版单库迁移与 `_unassigned` 认领、边界与排障 | 现行契约 |
 | [`core-services.md`](core-services.md) | Swift 核心服务：AppStore、AI/OneBot/记忆/触发判定/调度、防睡眠、并发与错误处理 | 现行契约 |
 | [`bridge.md`](bridge.md) | Go OneBot 桥接：启动参数、HTTP/WS 接口、frida-core 接入 | 现行契约 |
-| [`memory.md`](memory.md) | 记忆系统：10 条短期窗口、8 条批量总结、同会话早期片段召回、记忆文件夹与综合权重 | 现行契约 |
+| [`memory.md`](memory.md) | **记忆系统 v2**：每会话角色目录只放 `memory.sqlite` 记忆卡（人格统一来自人格设定，旧 `persona.md` 进废纸篓）+ 固定 `c-__global__` 全局共享卡（手动维护、注入所有会话）、四类记忆、72h/重要度加权召回、0.92 折叠与 supersede、批量提取、全量互动、App 记忆面板与导出；旧 `memories` 表只读兼容 | 现行契约 |
 | [`ui-design.md`](ui-design.md) | SwiftUI 信息架构、设计 token、组件拆分与交互约定 | 现行契约 |
 | [`voice.md`](voice.md) | **语音能力**：入站转写、出站 TTS/克隆、103 音色选择与试听、按引擎模型下载、系统语音资源、失败降级与 4.2 Hook 限制 | 现行契约 |
 | [`cosyvoice.md`](cosyvoice.md) | **CosyVoice3 本地旁路**：可选高保真 TTS、安装/下载、本机音色管理、HTTP 契约、性能与回退 | 现行契约 |

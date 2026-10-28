@@ -16,10 +16,25 @@ struct ChatReplyPlan: Sendable {
     var contextMessageCount: Int
 }
 
+/// 一轮提示词的来源上下文（记忆 v2 与旧路径共用）。
+///
+/// - `personaPrompt`：v2 用「人格设定」正文，旧路径也用同一个模板正文；
+/// - `memoryPrompt`：已经是完整 system 段（v2 由 `MemoryEngine.recall` 格式化，旧路径带旧标题）；
+/// - `speakerIdentity`：群聊身份硬约束，追加在 system 末尾；
+/// - `provider`：由运行时应用人格 `model` 后的请求通道。
+struct ChatPromptContext: Sendable {
+    var personaPrompt: String?
+    var memoryPrompt: String?
+    var speakerIdentity: String?
+    var provider: AIProvider
+    var characterID: String?
+}
+
 /// Builds prompts and produces reply plans. Never sends anything itself; the runtime
 /// owns transport and human-like pacing so this stays testable and transport-agnostic.
 final class ChatEngine: @unchecked Sendable {
-    /// 短期记忆窗口：固定最多 10 条消息。超出的旧消息由 summarizeOverflow 总结。
+    /// 短期记忆窗口：固定最多 10 条消息。v2 中窗口外消息进入记忆卡 `interactions`，
+    /// 由 `MemoryEngine` 批量提取；`summarizeOverflow` 仅保留给旧单测/兼容。
     static let shortTermMemoryLimit = 10
     /// 批量总结阈值：短期窗口外未总结消息攒够 8 条才触发一次 AI 总结，
     /// 既避免每条新消息都调用模型，也把「窗口外未总结」的遗忘区间压到最多 7 条。
@@ -37,11 +52,22 @@ final class ChatEngine: @unchecked Sendable {
 
     private let memory: MemoryStore
     private let aiClient: AIClient
+    /// 记忆 v2 的角色目录与召回引擎；两者同时注入时才启用 v2。
+    /// 旧单测只传 `memory`/`aiClient`，因此默认参数保持旧路径行为不变。
+    private let characters: CharacterStore?
+    private let memoryEngine: MemoryEngine?
     var onLog: (@Sendable (LogLevel, String) -> Void)?
 
-    init(memory: MemoryStore, aiClient: AIClient) {
+    init(
+        memory: MemoryStore,
+        aiClient: AIClient,
+        characters: CharacterStore? = nil,
+        memoryEngine: MemoryEngine? = nil
+    ) {
         self.memory = memory
         self.aiClient = aiClient
+        self.characters = characters
+        self.memoryEngine = memoryEngine
     }
 
     // MARK: Generate
@@ -92,6 +118,164 @@ final class ChatEngine: @unchecked Sendable {
         history: [ChatMessage],
         dryRun: Bool
     ) async throws -> ChatReplyPlan {
+        // 记忆 v2：人格设定 + 记忆卡召回；未注入字符存储或记忆关闭时保留旧路径。
+        let context = await buildPromptContext(
+            conversation: conversation,
+            incoming: incoming,
+            settings: settings,
+            persona: persona,
+            provider: provider,
+            history: history
+        )
+        let promptMessages = buildMessages(
+            conversation: conversation,
+            incoming: incoming,
+            settings: settings,
+            personaPrompt: context.personaPrompt,
+            history: history,
+            memoryPrompt: context.memoryPrompt,
+            speakerIdentity: context.speakerIdentity
+        )
+        let temperature = settings.ai.temperature(
+            forModel: AIClient.effectiveModel(for: context.provider))
+        let result = try await aiClient.complete(
+            messages: promptMessages,
+            provider: context.provider,
+            temperature: temperature,
+            forceStream: Self.forceStream(for: settings)
+        )
+        let plan = makePlan(result: result, provider: context.provider, persona: persona,
+                            settings: settings, dryRun: dryRun, contextCount: promptMessages.count)
+        guard !plan.segments.isEmpty else {
+            onLog?(.warning, "AI 回复为空（清洗系统语音标注后没有剩余内容）")
+            throw AIError.emptyResponse
+        }
+        onLog?(.debug, "AI 回复生成完成：\(result.text.count) 字，\(Int(result.latencyMs))ms，"
+            + "tokens=\(result.usage.totalTokens)（上下文 \(promptMessages.count) 条）")
+        return plan
+    }
+
+    /// 组装一轮回复的提示词来源（不发起 AI 请求，便于单测记忆分支）。
+    ///
+    /// - 注入 `characters` + `memoryEngine` 且记忆设置开启：v2 路径，人格设定正文 +
+    ///   `MemoryEngine.recall` 的记忆上下文；记忆卡不可用时仍使用人格设定；
+    /// - 注入但记忆设置关闭：按 §11 回退人格模板，不召回任何记忆；
+    /// - 未注入（旧单测/旧装配）：完全保留 v1 行为（`MemoryStore` 长期记忆 + 早期片段）。
+    func buildPromptContext(
+        conversation: Conversation,
+        incoming: ChatMessage,
+        settings: AppSettings,
+        persona: Persona?,
+        provider: AIProvider,
+        history: [ChatMessage] = []
+    ) async -> ChatPromptContext {
+        if let characters, let memoryEngine {
+            return await buildMemoryV2Context(
+                characters: characters,
+                memoryEngine: memoryEngine,
+                conversation: conversation,
+                incoming: incoming,
+                settings: settings,
+                persona: persona,
+                provider: provider
+            )
+        }
+        return await buildLegacyPromptContext(
+            conversation: conversation,
+            incoming: incoming,
+            settings: settings,
+            persona: persona,
+            provider: provider,
+            history: history
+        )
+    }
+
+    // MARK: Prompt context (memory v2)
+
+    private func buildMemoryV2Context(
+        characters: CharacterStore,
+        memoryEngine: MemoryEngine,
+        conversation: Conversation,
+        incoming: ChatMessage,
+        settings: AppSettings,
+        persona: Persona?,
+        provider: AIProvider
+    ) async -> ChatPromptContext {
+        let memorySettings = settings.bot.memorySettings
+        guard memorySettings.enabled else {
+            // §11：关闭后不提取/不召回/不写全量记录，人格回退「人格设定」。
+            return ChatPromptContext(
+                personaPrompt: persona?.systemPrompt,
+                memoryPrompt: nil,
+                speakerIdentity: nil,
+                provider: provider,
+                characterID: nil
+            )
+        }
+
+        do {
+            try await characters.ensureCharacter(
+                conversation: conversation,
+                persona: persona,
+                activationTimestamp: incoming.timestamp
+            )
+        } catch {
+            // 记忆卡不可用时不能让整轮回复失败：仍用人格模板回复，只记日志（不含记忆正文）。
+            onLog?(.warning, "记忆卡不可用，仍使用人格设定：\(error.localizedDescription)")
+            return ChatPromptContext(
+                personaPrompt: persona?.systemPrompt,
+                memoryPrompt: nil,
+                speakerIdentity: nil,
+                provider: provider,
+                characterID: nil
+            )
+        }
+
+        let recall = await memoryEngine.recall(
+            conversationID: conversation.id,
+            query: incoming.text,
+            settings: memorySettings
+        )
+
+        // 身份映射用全部未归档/未被取代的置顶/重要/fact 记忆：
+        // 硬约束不应因为 token 预算没召回某条映射而丢失。
+        let identityMemories: [CharacterMemory]
+        if let local = try? await characters.fetchMemories(conversationID: conversation.id) {
+            let global = (try? await characters.fetchMemories(
+                conversationID: CharacterStore.globalConversationID)) ?? []
+            identityMemories = local + global
+        } else {
+            identityMemories = recall.memories
+        }
+
+        // 人设与模型统一来自「人格设定」；运行时已把 persona.model 应用到 provider。
+        // 只记录条数与角色 ID，绝不把记忆正文写进日志。
+        onLog?(.debug, "记忆 v2 召回 \(recall.memories.count) 条"
+            + "（角色 \(conversation.id)，省略 \(recall.omittedCount) 条）")
+
+        return ChatPromptContext(
+            personaPrompt: persona?.systemPrompt,
+            memoryPrompt: recall.prompt,
+            speakerIdentity: Self.speakerIdentityNote(
+                conversation: conversation,
+                incoming: incoming,
+                memories: identityMemories
+            ),
+            provider: provider,
+            characterID: conversation.id
+        )
+    }
+
+    // MARK: Prompt context (legacy v1, tests / unwired runtime)
+
+    private func buildLegacyPromptContext(
+        conversation: Conversation,
+        incoming: ChatMessage,
+        settings: AppSettings,
+        persona: Persona?,
+        provider: AIProvider,
+        history: [ChatMessage]
+    ) async -> ChatPromptContext {
         let memories = (try? await memory.fetchMemoriesForPrompt(
             conversationID: conversation.id,
             limit: Self.longTermMemoryLimit
@@ -114,31 +298,17 @@ final class ChatEngine: @unchecked Sendable {
             return value
         }
         let memoryNotes = memoryParts.isEmpty ? nil : memoryParts.joined(separator: "\n\n")
-        let promptMessages = buildMessages(
-            conversation: conversation,
-            incoming: incoming,
-            settings: settings,
-            persona: persona,
-            history: history,
-            memoryNotes: memoryNotes,
-            speakerIdentity: speakerIdentity
-        )
-        let temperature = settings.ai.temperature(forModel: AIClient.effectiveModel(for: provider))
-        let result = try await aiClient.complete(
-            messages: promptMessages,
-            provider: provider,
-            temperature: temperature,
-            forceStream: Self.forceStream(for: settings)
-        )
-        let plan = makePlan(result: result, provider: provider, persona: persona,
-                            settings: settings, dryRun: dryRun, contextCount: promptMessages.count)
-        guard !plan.segments.isEmpty else {
-            onLog?(.warning, "AI 回复为空（清洗系统语音标注后没有剩余内容）")
-            throw AIError.emptyResponse
+        // 与旧 `buildMessages(persona:memoryNotes:)` 完全一致：保留旧标题再交给新重载。
+        let memoryPrompt = memoryNotes.map {
+            "相关历史记忆（仅供参考，不要逐字复述）：\n\($0)"
         }
-        onLog?(.debug, "AI 回复生成完成：\(result.text.count) 字，\(Int(result.latencyMs))ms，"
-            + "tokens=\(result.usage.totalTokens)（上下文 \(promptMessages.count) 条）")
-        return plan
+        return ChatPromptContext(
+            personaPrompt: persona?.systemPrompt,
+            memoryPrompt: memoryPrompt,
+            speakerIdentity: speakerIdentity,
+            provider: provider,
+            characterID: nil
+        )
     }
 
     // MARK: Prompt assembly
@@ -149,6 +319,9 @@ final class ChatEngine: @unchecked Sendable {
         settings.ai.streamReplies ? nil : false
     }
 
+    /// 旧签名（旧单测/旧装配）：人格模板正文 + 旧「相关历史记忆」标题包装。
+    ///
+    /// 行为与记忆 v2 之前完全一致；内部转调 `personaPrompt:` 重载。
     func buildMessages(
         conversation: Conversation,
         incoming: ChatMessage,
@@ -158,8 +331,39 @@ final class ChatEngine: @unchecked Sendable {
         memoryNotes: String?,
         speakerIdentity: String? = nil
     ) -> [AIMessage] {
+        let memoryPrompt: String?
+        if let memoryNotes, !memoryNotes.isEmpty {
+            memoryPrompt = "相关历史记忆（仅供参考，不要逐字复述）：\n\(memoryNotes)"
+        } else {
+            memoryPrompt = nil
+        }
+        return buildMessages(
+            conversation: conversation,
+            incoming: incoming,
+            settings: settings,
+            personaPrompt: persona?.systemPrompt,
+            history: history,
+            memoryPrompt: memoryPrompt,
+            speakerIdentity: speakerIdentity
+        )
+    }
+
+    /// 提示词组装（记忆 v2 / 通用）。
+    ///
+    /// - `personaPrompt`：直接使用的人格设定正文；nil 时回退 `Persona.defaultSystemPrompt`；
+    /// - `memoryPrompt`：已格式化的 system 段，原样注入、不再套标题
+    ///   （v2 由 `MemoryEngine.recall` 生成「记忆上下文…」段）。
+    func buildMessages(
+        conversation: Conversation,
+        incoming: ChatMessage,
+        settings: AppSettings,
+        personaPrompt: String?,
+        history: [ChatMessage],
+        memoryPrompt: String?,
+        speakerIdentity: String? = nil
+    ) -> [AIMessage] {
         var systemLines: [String] = []
-        let basePrompt = (persona?.systemPrompt ?? Persona.defaultSystemPrompt)
+        let basePrompt = (personaPrompt ?? Persona.defaultSystemPrompt)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if !basePrompt.isEmpty { systemLines.append(basePrompt) }
         systemLines.append("你在 macOS 微信客户端上以真人身份聊天，回复要简短自然，不要暴露自己是 AI。")
@@ -196,8 +400,9 @@ final class ChatEngine: @unchecked Sendable {
         if !note.isEmpty {
             systemLines.append("关于此会话的长期记忆：\(note)")
         }
-        if let memoryNotes, !memoryNotes.isEmpty {
-            systemLines.append("相关历史记忆（仅供参考，不要逐字复述）：\n\(memoryNotes)")
+        // v2 的召回段已自带「记忆上下文…」标题，这里原样注入，避免双重标题。
+        if let memoryPrompt, !memoryPrompt.isEmpty {
+            systemLines.append(memoryPrompt)
         }
         // 放在最后：最近聊天里的「我就是某某」「某某其实是某某」不能覆盖这条。
         if let speakerIdentity, !speakerIdentity.isEmpty {
@@ -511,6 +716,8 @@ final class ChatEngine: @unchecked Sendable {
 
     /// 本轮发言人的权威身份约束：群昵称会变、会被开玩笑，wxid→称呼才是稳定键。
     /// 返回 nil 表示没有可用的人员映射（或不是群聊），不强行注入。
+    ///
+    /// 旧版长期记忆入口（核心/手写记忆才是权威来源）。
     static func speakerIdentityNote(
         conversation: Conversation,
         incoming: ChatMessage,
@@ -520,7 +727,37 @@ final class ChatEngine: @unchecked Sendable {
         let authoritative = memories.filter { $0.isCore || $0.source == "manual" }
         let mappings = personMappings(in: authoritative.map(\.summary))
         guard !mappings.isEmpty else { return nil }
+        return speakerIdentityNote(conversation: conversation, incoming: incoming, mappings: mappings)
+    }
 
+    /// 记忆 v2 入口：从置顶/重要/fact 记忆正文里解析 `wxid：称呼`。
+    ///
+    /// 只使用未归档、未被取代的记忆；找不到当前发言人的映射时同样明确要求
+    /// 「不要套用他人称呼」，与旧版硬约束保持一致。
+    static func speakerIdentityNote(
+        conversation: Conversation,
+        incoming: ChatMessage,
+        memories: [CharacterMemory]
+    ) -> String? {
+        guard conversation.kind == .group else { return nil }
+        let authoritative = memories.filter { memory in
+            guard !memory.archived, !memory.isSuperseded else { return false }
+            return memory.pinned
+                || memory.kind == .important
+                || memory.category == .fact
+        }
+        let mappings = personMappings(in: authoritative.map(\.content))
+        guard !mappings.isEmpty else { return nil }
+        return speakerIdentityNote(conversation: conversation, incoming: incoming, mappings: mappings)
+    }
+
+    /// 身份约束正文（两种记忆格式共用）。
+    private static func speakerIdentityNote(
+        conversation: Conversation,
+        incoming: ChatMessage,
+        mappings: [String: [String]]
+    ) -> String? {
+        guard conversation.kind == .group else { return nil }
         let id = incoming.senderID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !id.isEmpty, id != "self", id != "system", id != "我", id != "系统" else { return nil }
         let name = speakerLabel(for: incoming) ?? id

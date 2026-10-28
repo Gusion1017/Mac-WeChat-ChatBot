@@ -887,6 +887,7 @@ struct SettingsView: View {
                     PathRow(label: "账号数据目录", path: AppPaths.accountDirectory.path, revealInFinder: true)
                     PathRow(label: "账号配置", path: AppPaths.profileFile.path, revealInFinder: true)
                     PathRow(label: "记忆数据库", path: AppPaths.databaseFile.path, revealInFinder: true)
+                    PathRow(label: "记忆卡目录", path: AppPaths.charactersDirectory.path, revealInFinder: true)
                     PathRow(label: "媒体目录", path: AppPaths.mediaDirectory.path, revealInFinder: true)
                     SettingsDivider()
                     PathRow(label: "全局配置", path: AppPaths.configFile.path, revealInFinder: true)

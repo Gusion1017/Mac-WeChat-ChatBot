@@ -121,7 +121,18 @@ struct SidebarView: View {
                 }
                 return
             }
+            if item == .memory, isSelected {
+                // 记忆页内再次点击「记忆库」：回到栏目列表，不自动展示聚合页。
+                store.clearCharacterSelection()
+                return
+            }
             store.sidebarSelection = item
+            // 打开栏目时回到栏目总览：不自动展开某条会话/某个角色的详情。
+            if item == .conversations {
+                store.selectedConversationID = nil
+            } else if item == .memory {
+                store.clearCharacterSelection()
+            }
         } label: {
             HStack(spacing: 9) {
                 Image(systemName: item.uiSymbol)

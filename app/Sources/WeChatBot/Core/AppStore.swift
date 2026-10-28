@@ -18,7 +18,20 @@ final class AppStore {
     var stats = BotStats()
     var conversations: [Conversation] = []
     var messages: [String: [ChatMessage]] = [:]
-    var longTermMemories: [LongTermMemory] = []
+
+    // 记忆 v2（每会话角色卡）：记忆页数据源。
+    /// 全部角色摘要（会话标题/人格名/计数），由 `CharacterStore.listCharacters` 生成。
+    var characterSummaries: [CharacterSummary] = []
+    /// nil = 未选择角色；`isAllCharactersSelected` 为 true 时表示「全部角色」聚合。
+    var selectedCharacterID: String?
+    /// 是否显式选中了「全部角色」；进入记忆栏目时默认 false，不自动展示聚合。
+    var isAllCharactersSelected = false
+    var characterMemories: [CharacterMemory] = []
+    var characterInteractions: [CharacterInteraction] = []
+    var isLoadingCharacter = false
+    /// 记忆页是否可见：后台提取完成后只在该页可见时刷新大列表，避免无谓 IO。
+    var isMemoryPageVisible = false
+
     var logs: [LogEntry] = []
     /// 日志缓冲的修改代数：`logs` 每次整体变化都会 +1。日志页/仪表盘用低频采样
     /// （500ms / 750ms）对比这个值，未变化时跳过 O(n) 的重算与复制，空闲时不空转。

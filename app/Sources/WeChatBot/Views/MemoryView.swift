@@ -1,86 +1,99 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
-private enum MemoryMode: String, CaseIterable, Identifiable {
-    case longTerm
-    case chat
+/// 记忆卡列表筛选（docs/memory.md §10.1）。
+private enum MemoryFilter: String, CaseIterable, Identifiable {
+    case all
+    case recent
+    case important
+    case todo
+    case fact
+    case decision
+    case lesson
+    case archived
+    case superseded
 
     var id: String { rawValue }
-    var label: String {
+
+    /// 动态标签（「最近」按当前设置的窗口小时数生成），其余直接本地化。
+    func label(settings: MemorySettings) -> String {
         switch self {
-        case .longTerm: L("长期记忆")
-        case .chat: L("聊天记录")
-        }
-    }
-}
-
-/// 长期记忆文件夹：全部 / 全局 / 按会话（含已删除会话的兜底文件夹）。
-private enum MemoryFolder: Hashable, Identifiable {
-    case all
-    case global
-    case conversation(id: String, title: String, kind: ConversationKind)
-    case orphaned(id: String)
-
-    /// 会话文件夹的稳定 id；派生快照用同一规则建索引，避免字面量漂移。
-    static func conversationFolderID(_ conversationID: String) -> String {
-        "conversation:\(conversationID)"
-    }
-
-    var id: String {
-        switch self {
-        case .all: "all"
-        case .global: "global"
-        case .conversation(let id, _, _), .orphaned(let id): Self.conversationFolderID(id)
-        }
-    }
-
-    var title: String {
-        switch self {
-        case .all: L("全部记忆")
-        case .global: L("全局记忆")
-        case .conversation(_, let title, _): title.isEmpty ? L("未命名会话") : title
-        case .orphaned(let id): id
+        case .all: L("全部")
+        case .recent: Lf("最近 %dh", settings.recentWindowHours)
+        case .important: L("重要")
+        case .todo: L("待办")
+        case .fact: L("事实")
+        case .decision: L("决策")
+        case .lesson: L("经验")
+        case .archived: L("已归档")
+        case .superseded: L("已被取代")
         }
     }
 
     var symbol: String {
         switch self {
-        case .all: "brain.head.profile"
-        case .global: "globe"
-        case .conversation(_, _, let kind): kind.symbol
-        case .orphaned: "questionmark.folder"
+        case .all: "tray.full"
+        case .recent: "clock"
+        case .important: "exclamationmark.circle"
+        case .todo: "checklist"
+        case .fact: "text.book.closed"
+        case .decision: "arrow.triangle.branch"
+        case .lesson: "lightbulb"
+        case .archived: "archivebox"
+        case .superseded: "arrow.triangle.branch"
         }
     }
 
-    /// 新增记忆时的预填会话 ID：全局/全部文件夹为空。
-    var conversationID: String {
+    var tint: Color {
         switch self {
-        case .all, .global: ""
-        case .conversation(let id, _, _), .orphaned(let id): id
+        case .all: Theme.accent
+        case .recent: Theme.info
+        case .important: Theme.warning
+        case .todo: Theme.accent
+        case .fact: Theme.info
+        case .decision: Theme.violet
+        case .lesson: Theme.warning
+        case .archived: .secondary
+        case .superseded: Theme.danger
         }
     }
 
-    /// 无搜索时按文件夹过滤记忆。
-    func contains(_ memory: LongTermMemory) -> Bool {
+    func matches(
+        _ memory: CharacterMemory,
+        settings: MemorySettings,
+        now: Date
+    ) -> Bool {
+        let isActive = !memory.archived && !memory.isSuperseded
         switch self {
-        case .all: true
-        case .global: memory.isGlobal
-        case .conversation(let id, _, _), .orphaned(let id): memory.conversationID == id
+        case .all:
+            return isActive
+        case .recent:
+            return isActive && memory.isRecent(now: now, settings: settings)
+        case .important:
+            return isActive
+                && memory.resolvedKind(threshold: settings.importanceThreshold) == .important
+        case .todo:
+            return isActive && memory.category == .todo
+        case .fact:
+            return isActive && memory.category == .fact
+        case .decision:
+            return isActive && memory.category == .decision
+        case .lesson:
+            return isActive && memory.category == .lesson
+        case .archived:
+            return memory.archived
+        case .superseded:
+            return memory.isSuperseded
         }
     }
 }
 
-/// 侧栏分区：按会话类型（私聊/群聊/公众号）分组，或「未关联会话」兜底。
-private struct MemoryFolderSection: Identifiable {
-    var id: String
-    var title: String
-    var folders: [MemoryFolder]
-}
-
-/// 长期记忆列表排序：默认「综合权重」（核心优先），或「最近更新」（不强制核心前置）。
+/// 记忆卡列表排序。
 private enum MemorySortMode: String, CaseIterable, Identifiable {
     case weight
     case recentlyUpdated
+    case importance
 
     var id: String { rawValue }
 
@@ -88,6 +101,7 @@ private enum MemorySortMode: String, CaseIterable, Identifiable {
         switch self {
         case .weight: L("综合权重")
         case .recentlyUpdated: L("最近更新")
+        case .importance: L("重要度")
         }
     }
 
@@ -95,162 +109,188 @@ private enum MemorySortMode: String, CaseIterable, Identifiable {
         switch self {
         case .weight: "scalemass"
         case .recentlyUpdated: "clock.arrow.circlepath"
+        case .importance: "exclamationmark.circle"
         }
     }
 }
 
-/// 文件夹计数（总数 / 核心数），随长期记忆遍历一次算出。
-private struct MemoryCounts: Equatable {
-    var total = 0
-    var core = 0
+/// 一条记忆 + 一次性算好的综合权重；body 内不再重复求值。
+private struct ScoredMemory: Identifiable {
+    var id: String { memory.id }
+    let memory: CharacterMemory
+    let score: Double
 }
 
-/// 长期记忆页的派生数据：一次遍历 + 一次排序，body 内只构建一次。
-private struct LongTermSnapshot {
-    let activeFolder: MemoryFolder
+/// 记忆卡页面的计数（与 `CharacterStore.memoryCounts` 同口径：
+/// 「生效」只算未归档、未被取代）。
+private struct MemoryCardCounts: Equatable {
+    var active = 0
+}
+
+/// 角色列表派生数据：一次遍历，body 只构建一次。
+private struct CharacterListSnapshot {
+    let all: [CharacterSummary]
+    let global: CharacterSummary?
+    let visible: [CharacterSummary]
+    let totalActive: Int
+    let totalImportant: Int
+    let totalTodo: Int
     let isSearching: Bool
-    /// 已按当前文件夹/搜索/仅核心/排序模式处理好的列表。
-    let memories: [LongTermMemory]
-    let filteredCoreCount: Int
-    let totalMemoryCount: Int
-    let coreMemoryCount: Int
-    let folderSections: [MemoryFolderSection]
-    let folderSessionCount: Int
-    let folderCounts: [String: MemoryCounts]
 }
 
-/// 聊天记录页的派生数据：会话标题表、消息计数与搜索结果都只构建一次。
-private struct ChatSnapshot {
-    let conversationCount: Int
-    let totalMessages: Int
-    let messageCounts: [String: Int]
-    let searchResults: [ChatMessage]
-    let filteredConversations: [Conversation]
-    let selectedMessages: [ChatMessage]
-    let conversationTitles: [String: String]
+/// 记忆卡右栏派生数据：计数、筛选、搜索、权重与排序都只算一次。
+private struct MemoryCardSnapshot {
+    let now: Date
+    let settings: MemorySettings
+    let isAggregate: Bool
+    let characterID: String?
+    let summary: CharacterSummary?
+    let counts: MemoryCardCounts
+    let filterCounts: [MemoryFilter: Int]
+    let visible: [ScoredMemory]
+    let totalLoaded: Int
+    let characterTitles: [String: String]
+    let hasSearch: Bool
+
+    var title: String {
+        if let summary, !summary.title.isEmpty { return summary.title }
+        return isAggregate ? L("全部角色") : (characterID ?? L("未命名角色"))
+    }
+
+    var kind: ConversationKind {
+        summary?.kind ?? .direct
+    }
 }
 
-/// 记忆库：长期记忆的新增/编辑/核心标记 + 会话/消息浏览与清理。
+/// 记忆库：记忆卡的新增/编辑/筛选/导出。
 struct MemoryView: View {
     @Environment(AppStore.self) private var store
     @Environment(ToastCenter.self) private var toast
 
-    @State private var mode: MemoryMode = .longTerm
-    @State private var search = ""
-    @State private var selectedConversationID: String?
-    @State private var selectedFolder: MemoryFolder = .all
+    @State private var characterSearch = ""
+    @State private var memorySearch = ""
+    @State private var filter: MemoryFilter = .all
     @State private var sortMode: MemorySortMode = .weight
-    @State private var onlyCore = false
     @State private var showWeightInfo = false
-    @State private var showCleanup = false
-    @State private var isClearing = false
-    @State private var editingMemory: LongTermMemory?
-    @State private var pendingDeletion: LongTermMemory?
+    @State private var editingMemory: CharacterMemory?
+    @State private var editingMemoryIsNew = false
+    @State private var pendingDeleteMemory: CharacterMemory?
+    @State private var showFullArchive = false
+    @State private var showSettings = false
+    @State private var showRecallPreview = false
+    @State private var showDeleteCard = false
+    @State private var showCreateCardsConfirm = false
+    /// 切换角色时旧记忆仍留在 store 里，先隐藏列表再等新数据，避免短暂的错位展示。
+    @State private var isLoadingSelection = false
 
     var body: some View {
-        // Derived collections are built exactly once per body evaluation (the old code
-        // re-filtered/re-sorted memories and messages 3-4 times per body, and did
-        // O(folders x memories) count lookups while rendering folder rows).
-        let longTerm = mode == .longTerm ? makeLongTermSnapshot() : nil
-        let chat = mode == .chat ? makeChatSnapshot() : nil
+        let characters = makeCharacterListSnapshot()
+        let cards = makeCardSnapshot()
 
         VStack(spacing: 0) {
-            GlassToolbar(title: "记忆库", subtitle: subtitle(longTerm: longTerm, chat: chat)) {
-                Picker("", selection: $mode) {
-                    ForEach(MemoryMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
-                    }
+            GlassToolbar(
+                title: "记忆库",
+                subtitle: subtitle(characters: characters, cards: cards)
+            ) {
+                IconActionButton(symbol: "arrow.clockwise", help: "刷新角色与记忆卡") {
+                    refresh()
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 176)
-
-                SearchField(
-                    text: $search,
-                    placeholder: mode == .longTerm ? "搜索长期记忆" : "搜索会话或消息内容"
-                )
-                .frame(width: 230)
-
-                if mode == .longTerm {
-                    Button {
-                        startNewMemory()
-                    } label: {
-                        Label(L("新增记忆"), systemImage: "plus")
-                    }
-                    .buttonStyle(.glass)
-                    .accessibilityHint("新增一条长期记忆，可标记为核心记忆")
-                }
-
-                IconActionButton(symbol: "folder", help: "在 Finder 中显示数据库") {
-                    NSWorkspace.shared.activateFileViewerSelecting([AppPaths.databaseFile])
-                }
-
-                if mode == .chat {
-                    Button {
-                        showCleanup = true
-                    } label: {
-                        Label(L("清理…"), systemImage: "trash")
-                    }
-                    .buttonStyle(.glass)
-                    .disabled((chat?.totalMessages ?? 0) == 0)
+                IconActionButton(symbol: "gearshape", help: "记忆设置") {
+                    showSettings = true
                 }
             }
 
-            if let longTerm {
-                longTermPane(longTerm)
-            } else if let chat {
-                chatPanes(chat)
+            GeometryReader { proxy in
+                cardsPanes(characters, cards)
+                    .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(PageBackground())
         .onAppear {
-            selectFirstIfNeeded()
-            Task { await store.loadLongTermMemories() }
+            store.isMemoryPageVisible = true
         }
-        .sheet(isPresented: $showCleanup) {
-            MemoryCleanupSheet(
-                conversationTitle: selectedConversation?.displayTitle,
-                conversationMessages: selectedMessages.count,
-                totalMessages: totalMessages,
-                isBusy: isClearing
-            ) { scope in
-                clear(scope)
-            }
+        .onDisappear {
+            store.isMemoryPageVisible = false
+        }
+        .task(id: store.activeAccountID) {
+            await loadTask()
         }
         .sheet(item: $editingMemory) { memory in
             MemoryEditorSheet(
                 original: memory,
-                isNew: !store.longTermMemories.contains(where: { $0.id == memory.id }),
-                conversations: store.conversations,
-                onSave: saveMemory,
-                onDelete: deleteMemory
+                isNew: editingMemoryIsNew,
+                conversationTitle: characterTitle(memory.characterID),
+                settings: store.settings.bot.memorySettings
             )
         }
+        .sheet(isPresented: $showFullArchive) {
+            if let conversationID = store.selectedCharacterID {
+                CharacterFullArchive(
+                    conversationID: conversationID,
+                    title: characterTitle(conversationID)
+                )
+            }
+        }
+        .sheet(isPresented: $showSettings) {
+            MemorySettingsSheet(settings: store.settings.bot.memorySettings)
+        }
+        .sheet(isPresented: $showRecallPreview) {
+            if let conversationID = store.selectedCharacterID {
+                RecallPreviewSheet(
+                    conversationID: conversationID,
+                    title: characterTitle(conversationID)
+                )
+            }
+        }
         .confirmationDialog(
-            "删除这条长期记忆？",
+            "删除这条记忆？",
             isPresented: Binding(
-                get: { pendingDeletion != nil },
-                set: { if !$0 { pendingDeletion = nil } }
+                get: { pendingDeleteMemory != nil },
+                set: { if !$0 { pendingDeleteMemory = nil } }
             ),
             titleVisibility: .visible,
-            presenting: pendingDeletion
+            presenting: pendingDeleteMemory
         ) { memory in
             Button(L("删除"), role: .destructive) {
                 deleteMemory(memory)
-                pendingDeletion = nil
+                pendingDeleteMemory = nil
             }
-            Button(L("取消"), role: .cancel) { pendingDeletion = nil }
-        } message: { memory in
-            Text(L("「\(memory.summary.prefix(40))」删除后无法恢复，但不会影响微信聊天记录。"))
+            Button(L("取消"), role: .cancel) { pendingDeleteMemory = nil }
+        } message: { _ in
+            Text(L("删除后无法恢复；不会影响微信聊天记录与其它记忆。"))
+        }
+        .confirmationDialog(
+            "删除记忆卡？",
+            isPresented: $showDeleteCard,
+            titleVisibility: .visible
+        ) {
+            Button(L("删除记忆卡"), role: .destructive) {
+                deleteSelectedCharacterCard()
+            }
+            Button(L("取消"), role: .cancel) {}
+        } message: {
+            Text(L("整个角色目录会移到废纸篓（记忆 + 全量记录）。人格设定不受影响；下次机器人回复时会重建空记忆卡。"))
+        }
+        .confirmationDialog(
+            "为现有会话创建记忆卡？",
+            isPresented: $showCreateCardsConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(L("创建记忆卡")) { performCreateMissingCards() }
+            Button(L("取消"), role: .cancel) {}
+        } message: {
+            Text(L("将为还没有记忆卡的现有微信会话创建空记忆卡，不会提取旧聊天；之后可在各角色中导入旧记忆。"))
         }
     }
 
-    // MARK: Chat browse
+    // MARK: - Memory card panes
 
-    private func chatPanes(_ chat: ChatSnapshot) -> some View {
+    @ViewBuilder
+    private func cardsPanes(_ characters: CharacterListSnapshot, _ cards: MemoryCardSnapshot) -> some View {
         HStack(spacing: 0) {
-            conversationPane(chat)
-                .frame(width: 300)
+            characterPane(characters, cards)
+                .frame(width: 290)
                 .background(.ultraThinMaterial)
 
             Rectangle()
@@ -258,42 +298,39 @@ struct MemoryView: View {
                 .frame(width: 1)
                 .accessibilityHidden(true)
 
-            messagePane(chat)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            Group {
+                if !store.isAllCharactersSelected, store.selectedCharacterID == nil {
+                    EmptyState(
+                        symbol: "person.crop.rectangle.stack",
+                        title: "选择一个角色",
+                        message: "从左侧选择会话角色查看记忆；点「全部角色」才会打开聚合视图。",
+                        actionTitle: "查看全部角色"
+                    ) {
+                        selectCharacter(nil)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    memoryPane(cards)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    // MARK: Long-term memory
+    // MARK: Character list
 
-    /// 左侧文件夹栏 + 右侧记忆列表（与聊天模式的双栏结构一致）。
-    private func longTermPane(_ snapshot: LongTermSnapshot) -> some View {
-        HStack(spacing: 0) {
-            memoryFolderPane(snapshot)
-                .frame(width: 250)
-                .background(.ultraThinMaterial)
-
-            Rectangle()
-                .fill(Color(nsColor: .separatorColor))
-                .frame(width: 1)
-                .accessibilityHidden(true)
-
-            memoryListPane(snapshot)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    // MARK: Memory folders
-
-    private func memoryFolderPane(_ snapshot: LongTermSnapshot) -> some View {
+    private func characterPane(
+        _ characters: CharacterListSnapshot,
+        _ cards: MemoryCardSnapshot
+    ) -> some View {
         VStack(spacing: 0) {
-            HStack {
-                Text(L("文件夹"))
+            HStack(spacing: 6) {
+                Text(L("角色"))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(L("\(snapshot.totalMemoryCount) 条记忆"))
+                Text(Lf("%d 个", characters.all.count))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
@@ -303,86 +340,89 @@ struct MemoryView: View {
 
             Divider().opacity(0.5)
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 1) {
-                    memoryFolderRow(
-                        .all,
-                        counts: snapshot.folderCounts[MemoryFolder.all.id] ?? MemoryCounts(),
-                        isSelected: snapshot.activeFolder.id == MemoryFolder.all.id
-                    )
-                    memoryFolderRow(
-                        .global,
-                        counts: snapshot.folderCounts[MemoryFolder.global.id] ?? MemoryCounts(),
-                        isSelected: snapshot.activeFolder.id == MemoryFolder.global.id
-                    )
-                    ForEach(snapshot.folderSections) { section in
-                        Text(L(section.title))
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 14)
-                            .padding(.top, 10)
-                            .padding(.bottom, 2)
-                        ForEach(section.folders) { folder in
-                            memoryFolderRow(
-                                folder,
-                                counts: snapshot.folderCounts[folder.id] ?? MemoryCounts(),
-                                isSelected: snapshot.activeFolder.id == folder.id
-                            )
+            SearchField(text: $characterSearch, placeholder: "搜索角色或人格")
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+
+            Divider().opacity(0.5)
+
+            if characters.all.isEmpty && characters.global == nil {
+                VStack(spacing: 8) {
+                    Image(systemName: "brain.head.profile")
+                        .font(.system(size: 22, weight: .light))
+                        .foregroundStyle(Theme.accent)
+                    Text(L("还没有记忆卡"))
+                        .font(.caption.weight(.semibold))
+                    Text(L("机器人为某个会话生成第一次回复后会自动创建。"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(L("刷新")) { refresh() }
+                        .buttonStyle(.glass)
+                        .controlSize(.small)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(18)
+                Spacer(minLength: 0)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        aggregateRow(characters)
+                        if let global = characters.global {
+                            globalRow(global)
+                        }
+                        if characters.isSearching && characters.visible.isEmpty {
+                            Text(L("没有匹配的角色"))
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
+                        }
+                        ForEach(characters.visible) { summary in
+                            characterRow(summary)
                         }
                     }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 6)
                 }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 6)
             }
 
             Divider().opacity(0.5)
 
-            HStack(spacing: 5) {
-                Image(systemName: "star.fill")
-                    .font(.system(size: 9))
-                    .foregroundStyle(Theme.violet)
-                Text(L("核心 \(snapshot.coreMemoryCount) 条"))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                counterBadge("star.fill", count: characters.totalImportant, color: Theme.violet)
+                counterBadge("checklist", count: characters.totalTodo, color: Theme.accent)
                 Spacer()
-                Text(L("\(snapshot.folderSessionCount) 个会话文件夹"))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                Text(Lf("%d 条记忆", characters.totalActive))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
         }
     }
 
-    private func memoryFolderRow(
-        _ folder: MemoryFolder,
-        counts: MemoryCounts,
-        isSelected: Bool
-    ) -> some View {
-        Button {
-            selectedFolder = folder
+    private func aggregateRow(_ characters: CharacterListSnapshot) -> some View {
+        let isSelected = store.isAllCharactersSelected
+        return Button {
+            selectCharacter(nil)
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: folder.symbol)
-                    .font(.system(size: 11, weight: .semibold))
+                Image(systemName: "square.stack.3d.up.fill")
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(isSelected ? Theme.accent : Color.secondary)
                     .frame(width: 18)
-                Text(folder.title)
-                    .font(.caption.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 4)
-                if counts.core > 0 {
-                    HStack(spacing: 2) {
-                        Image(systemName: "star.fill").font(.system(size: 8))
-                        Text("\(counts.core)").font(.caption2.monospacedDigit())
-                    }
-                    .foregroundStyle(Theme.violet)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(L("全部角色"))
+                        .font(.caption.weight(.medium))
+                    Text(Lf("%d 个会话角色 · %d 条记忆",
+                            characters.all.count, characters.totalActive))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
-                Text("\(counts.total)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 16, alignment: .trailing)
+                Spacer(minLength: 4)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
@@ -394,110 +434,331 @@ struct MemoryView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(L("\(folder.title) · \(counts.total) 条长期记忆 · 核心 \(counts.core) 条"))
+        .help(L("聚合显示所有角色的记忆；选择具体角色后可查看全量记录与导出"))
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 
-    // MARK: Memory list
-
-    private func memoryListPane(_ snapshot: LongTermSnapshot) -> some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: snapshot.isSearching ? "magnifyingglass" : snapshot.activeFolder.symbol)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
-                Text(listTitle(snapshot))
-                    .font(.caption.weight(.semibold))
-                Text(L("\(snapshot.memories.count) 条"))
+    private func globalRow(_ summary: CharacterSummary) -> some View {
+        let isSelected = store.selectedCharacterID == summary.conversationID
+        return Button {
+            selectCharacter(summary.conversationID)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "globe")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(isSelected ? Theme.accent : Theme.violet)
+                    .frame(width: 26, height: 26)
+                    .background(Theme.violet.opacity(0.14), in: Circle())
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(summary.title)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                    Text(L("所有会话共享"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Text(Lf("%d 条", summary.memoryCount))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
-                if snapshot.isSearching {
-                    PillLabel(text: "跨全部记忆", color: Theme.info)
-                }
-                if snapshot.filteredCoreCount > 0 {
-                    PillLabel(text: "★ 核心 \(snapshot.filteredCoreCount)", color: Theme.violet)
-                }
-                Spacer(minLength: 8)
-                FilterChip(
-                    title: "仅核心",
-                    symbol: "star.fill",
-                    isSelected: onlyCore,
-                    tint: Theme.violet
-                ) {
-                    onlyCore.toggle()
-                }
-                .help(onlyCore ? "显示全部记忆" : "只显示核心记忆")
-                memorySortMenu
-                memoryWeightInfoButton
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .background(.thinMaterial)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                isSelected ? Theme.accent.opacity(0.12) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(L("全局共享记忆会注入所有会话；只能手动维护"))
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+
+    private func characterRow(_ summary: CharacterSummary) -> some View {
+        let isSelected = store.selectedCharacterID == summary.conversationID
+        return Button {
+            selectCharacter(summary.conversationID)
+        } label: {
+            HStack(spacing: 8) {
+                AvatarView(title: summary.title, kind: summary.kind, size: 26)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 3) {
+                        Text(summary.title)
+                            .font(.caption.weight(.medium))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Text(rowSubtitle(summary))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(Lf("%d 条", summary.memoryCount))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 5) {
+                        if summary.importantCount > 0 {
+                            counterBadge("exclamationmark.circle.fill",
+                                         count: summary.importantCount, color: Theme.warning)
+                        }
+                        if summary.todoCount > 0 {
+                            counterBadge("checklist", count: summary.todoCount, color: Theme.accent)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                isSelected ? Theme.accent.opacity(0.12) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(summary.directoryPath.isEmpty ? summary.title : summary.directoryPath)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+
+    /// 左栏第二行：人格名 · 会话类型（标题、类型、人格名与计数都由 CharacterSummary 提供）。
+    private func rowSubtitle(_ summary: CharacterSummary) -> String {
+        let persona = summary.personaName.isEmpty ? L("未命名角色") : summary.personaName
+        return persona + " · " + summary.kind.label
+    }
+
+    private func counterBadge(_ symbol: String, count: Int, color: Color) -> some View {
+        HStack(spacing: 2) {
+            Image(systemName: symbol)
+                .font(.system(size: 8, weight: .semibold))
+            Text("\(count)")
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+        }
+        .foregroundStyle(color)
+        .accessibilityLabel(Lf("%d 条", count))
+    }
+
+    // MARK: Memory card pane
+
+    private func memoryPane(_ cards: MemoryCardSnapshot) -> some View {
+        VStack(spacing: 0) {
+            memoryHeader(cards)
+            Divider().opacity(0.5)
+
+            if !cards.settings.enabled {
+                memoryDisabledNotice(cards)
+            }
+
+            filterBar(cards)
 
             Divider().opacity(0.5)
 
-            if snapshot.memories.isEmpty {
-                VStack(spacing: 12) {
-                    EmptyState(
-                        symbol: "brain.head.profile",
-                        title: emptyTitle(snapshot),
-                        message: emptyMessage(snapshot)
-                    )
-                    if !snapshot.isSearching {
-                        Button {
-                            if onlyCore {
-                                onlyCore = false
-                            } else {
-                                startNewMemory()
-                            }
-                        } label: {
-                            Label(
-                                onlyCore ? "显示全部记忆" : emptyActionTitle(snapshot),
-                                systemImage: onlyCore ? "line.3.horizontal.decrease.circle" : "plus"
-                            )
+            listToolbar(cards)
+
+            Divider().opacity(0.5)
+
+            memoryList(cards)
+        }
+    }
+
+    private func memoryHeader(_ cards: MemoryCardSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 12) {
+                AvatarView(
+                    title: cards.isAggregate ? L("全部角色") : cards.title,
+                    kind: cards.isAggregate ? .group : cards.kind,
+                    size: 34
+                )
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(cards.title)
+                            .font(.headline)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if cards.isAggregate {
+                            PillLabel(text: "聚合视图", color: Theme.info)
+                        } else if cards.summary?.isGlobal == true {
+                            PillLabel(text: "全局共享", color: Theme.violet)
+                        } else {
+                            PillLabel(text: cards.kind.label, color: .secondary)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Theme.accent)
                     }
+
+                    Text(headerContext(cards))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 8) {
-                        ForEach(snapshot.memories) { memory in
-                            LongTermMemoryCard(
-                                memory: memory,
-                                onEdit: { editMemory(memory) },
-                                onToggleCore: {
-                                    Task {
-                                        await store.setLongTermMemoryCore(memory, isCore: !memory.isCore)
-                                        toast.show(memory.isCore ? "已取消核心记忆" : "已设为核心记忆",
-                                                   tone: .success,
-                                                   symbol: memory.isCore ? "star.slash" : "star.fill")
-                                    }
-                                },
-                                onDelete: { pendingDeletion = memory }
-                            )
-                        }
+
+                Spacer(minLength: 8)
+
+                HStack(spacing: 7) {
+                    Button {
+                        showFullArchive = true
+                    } label: {
+                        Label(L("全量记录"), systemImage: "archivebox")
                     }
-                    .padding(12)
+                    .buttonStyle(.glass)
+                    .disabled(cards.isAggregate || cards.summary?.isGlobal == true)
+                    .help(cards.isAggregate
+                        ? L("聚合视图没有单一全量记录；请先在左侧选择角色")
+                        : (cards.summary?.isGlobal == true
+                            ? L("全局共享记忆不属于具体会话，没有全量互动记录")
+                            : L("查看该会话永久保存的全量互动记录")))
+
+                    Menu {
+                        Button(L("Markdown")) { exportCard(format: "markdown") }
+                        Button(L("JSON")) { exportCard(format: "json") }
+                    } label: {
+                        Label(L("导出"), systemImage: "square.and.arrow.up")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .disabled(cards.isAggregate)
+                    .help(cards.isAggregate
+                        ? L("聚合视图不能导出；请先在左侧选择角色")
+                        : L("导出记忆卡（Markdown / JSON）"))
+
+                    Menu {
+                        Button(L("预览注入…"), systemImage: "text.magnifyingglass") {
+                            showRecallPreview = true
+                        }
+                        .disabled(cards.isAggregate)
+                        Button(L("导入旧记忆…"), systemImage: "tray.and.arrow.down") {
+                            importLegacyMemories()
+                        }
+                        .disabled(cards.isAggregate)
+                        Divider()
+                        Button(L("为缺失会话创建记忆卡…"), systemImage: "rectangle.stack.badge.plus") {
+                            showCreateCardsConfirm = true
+                        }
+                        Divider()
+                        Button(L("删除记忆卡…"), systemImage: "trash", role: .destructive) {
+                            showDeleteCard = true
+                        }
+                        .disabled(cards.isAggregate || cards.summary?.isGlobal == true)
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help(L("更多：预览注入 / 导入旧记忆 / 为缺失会话创建记忆卡 / 删除记忆卡"))
+                }
+                .fixedSize()
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    private func headerContext(_ cards: MemoryCardSnapshot) -> String {
+        if cards.isAggregate {
+            let globalCount = cards.characterTitles[CharacterStore.globalConversationID] == nil ? 0 : 1
+            let characters = max(0, cards.characterTitles.count - globalCount)
+            return Lf("聚合 %d 个会话角色 · 全局记忆同时并入", characters)
+        }
+        if cards.summary?.isGlobal == true {
+            let date = cards.summary?.lastUpdated
+            let updated = date.map { UIFormat.relativeShort($0, now: cards.now) } ?? "—"
+            return Lf("注入所有会话 · 更新 %@", updated)
+        }
+        let name = cards.summary?.personaName.isEmpty == false
+            ? (cards.summary?.personaName ?? cards.title)
+            : cards.title
+        let date = cards.summary?.lastUpdated
+        let updated = date.map { UIFormat.relativeShort($0, now: cards.now) } ?? "—"
+        return Lf("人设：%@（人格设定）· 更新 %@", name, updated)
+    }
+
+    private func memoryDisabledNotice(_ cards: MemoryCardSnapshot) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: "pause.circle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.warning)
+            Text(L("记忆功能已关闭：不提取、不召回；已保存的记忆仍可浏览、编辑和导出。"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            Button(L("打开设置")) { showSettings = true }
+                .buttonStyle(.glass)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Theme.warning.opacity(0.08))
+    }
+
+    private func filterBar(_ cards: MemoryCardSnapshot) -> some View {
+        FlowLayout(spacing: 6, lineSpacing: 6) {
+            ForEach(MemoryFilter.allCases) { item in
+                FilterChip(
+                    title: item.label(settings: cards.settings),
+                    symbol: item.symbol,
+                    count: cards.filterCounts[item] ?? 0,
+                    isSelected: filter == item,
+                    tint: item.tint
+                ) {
+                    filter = item
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial)
     }
 
-    /// 排序菜单：菜单里直接列出两种模式，标签只显示当前模式，避免挤压顶栏。
+    private func listToolbar(_ cards: MemoryCardSnapshot) -> some View {
+        HStack(spacing: 9) {
+            memorySortMenu
+            Text(Lf("显示 %d / %d 条", cards.visible.count, cards.totalLoaded))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 6)
+            if store.isLoadingCharacter {
+                ProgressView().controlSize(.small)
+            }
+            weightInfoButton(cards.settings)
+            SearchField(text: $memorySearch, placeholder: "搜索正文或关键词")
+                .frame(width: 200)
+            Button {
+                newMemory()
+            } label: {
+                Label(L("新增记忆"), systemImage: "plus")
+            }
+            .buttonStyle(.glass)
+            .disabled(cards.isAggregate)
+            .help(cards.isAggregate
+                ? L("先在左侧选择一个角色")
+                : L("新增一条手写记忆"))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 7)
+    }
+
     private var memorySortMenu: some View {
         Menu {
             Section(L("排序方式")) {
-                ForEach(MemorySortMode.allCases) { mode in
+                ForEach(MemorySortMode.allCases) { item in
                     Button {
-                        sortMode = mode
+                        sortMode = item
                     } label: {
                         Label(
-                            mode.label,
-                            systemImage: sortMode == mode ? "checkmark" : mode.symbol
+                            item.label,
+                            systemImage: sortMode == item ? "checkmark" : item.symbol
                         )
                     }
                 }
@@ -509,1072 +770,781 @@ struct MemoryView: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help(L("排序方式：综合权重（核心优先）/ 最近更新"))
-        .accessibilityLabel(L("排序方式：\(sortMode.label)"))
+        .help(L("排序方式：综合权重（默认）/ 最近更新 / 重要度"))
+        .accessibilityLabel(Lf("排序方式：%@", sortMode.label))
     }
 
-    /// 顶栏只保留「权重」短标签；公式放进 help 与点击弹出的 popover。
-    private var memoryWeightInfoButton: some View {
+    private func weightInfoButton(_ settings: MemorySettings) -> some View {
         Button {
             showWeightInfo.toggle()
         } label: {
-            Label(L("权重"), systemImage: "info.circle")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
+            Image(systemName: "info.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help(L("综合权重公式：点击查看说明"))
         .accessibilityLabel(L("综合权重公式说明"))
         .popover(isPresented: $showWeightInfo, arrowEdge: .bottom) {
-            weightInfoPopover
+            weightInfoPopover(settings)
         }
     }
 
-    private var weightInfoPopover: some View {
+    private func weightInfoPopover(_ settings: MemorySettings) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(L("综合权重"), systemImage: "scalemass")
                 .font(.headline)
-            Text(Lf("权重越高越优先进入提示词；核心记忆优先占用注入名额（最多 %d 条），核心之间也按权重排序。基础权重可在记忆编辑器中自由调整（0.1~10×）。", ChatEngine.longTermMemoryLimit))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Text(Lf(
+                "权重越高越优先召回；置顶记忆不衰减，最近 %d 小时内的记忆最多获得 1.5× 加成。半衰期 %d/%d 天。",
+                settings.recentWindowHours, settings.normalHalfLifeDays,
+                settings.importantHalfLifeDays
+            ))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
             Divider()
-            Text(weightFormula)
+            Text(weightFormula(settings))
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            Text(L("编辑、合并或召回都会抬高权重；基础权重可手工调整并参与排序；越近、越常用的记忆优先级越高。"))
+            Text(L("编辑、置顶或召回都会改变权重锚点；来源与召回次数不会因编辑丢失。"))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
-        .frame(width: 350, alignment: .leading)
+        .frame(width: 360, alignment: .leading)
     }
 
-    /// 公式引用模型里的系数常量，避免界面说明与实现漂移。
-    private var weightFormula: String {
-        let importanceGrowth = String(format: "%.2f", LongTermMemory.importanceGrowth)
-        let usageGrowth = String(format: "%.2f", LongTermMemory.usageGrowth)
-        let halfLifeDays = Int(LongTermMemory.halfLifeDays)
+    /// 公式引用当前设置，避免界面说明与实现漂移（§5.1）。
+    private func weightFormula(_ settings: MemorySettings) -> String {
         if L10n.language == "en" {
             return """
-            Weight = Base weight × Importance × Usage boost × Time decay
-            Importance = 1 + \(importanceGrowth) × log₂(1 + merged count)
-            Usage boost = 1 + \(usageGrowth) × min(recalls, \(LongTermMemory.usageCap))
-            Time decay = 0.5^(days since last update/recall / \(halfLifeDays))
+            score = importance × recency × usage × decay
+            recency = 1 + 0.5 × max(0, 1 − hours since activity / \(settings.recentWindowHours))
+            usage = 1 + 0.02 × min(recalls, 20)
+            decay = 1 (pinned)
+            decay = 0.5^(days / \(settings.normalHalfLifeDays)) (normal)
+            decay = 0.5^(days / \(settings.importantHalfLifeDays)) (important)
             """
         }
         return """
-        权重 = 基础权重 × 重要度 × 使用强化 × 时间衰减
-        重要度 = 1 + \(importanceGrowth) × log₂(1 + 合并条数)
-        使用强化 = 1 + \(usageGrowth) × min(召回次数, \(LongTermMemory.usageCap))
-        时间衰减 = 0.5^(距最近更新或召回天数 / \(halfLifeDays))
+        权重 = 重要度 × 最近加成 × 使用强化 × 时间衰减
+        最近加成 = 1 + 0.5 × max(0, 1 − 距最近活动小时数 / \(settings.recentWindowHours))
+        使用强化 = 1 + 0.02 × min(召回次数, 20)
+        时间衰减 = 1（置顶）
+        时间衰减 = 0.5^(距最近活动天数 / \(settings.normalHalfLifeDays))（普通）
+        时间衰减 = 0.5^(距最近活动天数 / \(settings.importantHalfLifeDays))（重要）
         """
     }
 
-    // MARK: Memory folder derivation
-
-    /// 选中的文件夹若已没有记忆（例如删掉最后一条），回退到「全部」。
-    private var activeFolder: MemoryFolder {
-        folderExists(selectedFolder) ? selectedFolder : .all
-    }
-
-    private func folderExists(_ folder: MemoryFolder) -> Bool {
-        switch folder {
-        case .all, .global: return true
-        case .conversation(let id, _, _), .orphaned(let id):
-            return store.longTermMemories.contains { $0.conversationID == id }
-        }
-    }
-
-    /// 新增记忆时若选中会话文件夹则预填 conversationID；全局/全部文件夹预填空。
-    private func startNewMemory() {
-        let prefill: String
-        switch activeFolder {
-        case .all, .global: prefill = ""
-        case .conversation, .orphaned: prefill = activeFolder.conversationID
-        }
-        editingMemory = LongTermMemory(conversationID: prefill, summary: "")
-    }
-
-    private func editMemory(_ memory: LongTermMemory) {
-        editingMemory = memory
-    }
-
-    private func saveMemory(_ memory: LongTermMemory) {
-        Task {
-            await store.saveLongTermMemory(memory)
-            toast.show("长期记忆已保存", tone: .success, symbol: "checkmark.circle.fill")
-        }
-    }
-
-    private func deleteMemory(_ memory: LongTermMemory) {
-        Task {
-            await store.deleteLongTermMemory(id: memory.id)
-            toast.show("已删除长期记忆", tone: .info, symbol: "trash")
-        }
-    }
-
-    // MARK: Conversation pane
-
-    private func conversationPane(_ chat: ChatSnapshot) -> some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(L("会话"))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text("\(chat.conversationCount)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
+    @ViewBuilder
+    private func memoryList(_ cards: MemoryCardSnapshot) -> some View {
+        if isLoadingSelection || (store.isLoadingCharacter && cards.totalLoaded == 0) {
+            LoadingState(title: "读取记忆卡…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if !cards.isAggregate, cards.summary == nil, !store.isLoadingCharacter {
+            EmptyState(
+                symbol: "exclamationmark.triangle",
+                title: "无法读取记忆卡",
+                message: "角色目录可能已被删除，或账号正在切换。重新选择角色或查看全部角色。",
+                actionTitle: "查看全部角色"
+            ) {
+                selectCharacter(nil)
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
-            .padding(.bottom, 7)
-
-            Divider().opacity(0.5)
-
-            if chat.filteredConversations.isEmpty {
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if cards.totalLoaded == 0 {
+            if cards.isAggregate, cards.characterTitles.isEmpty {
                 EmptyState(
-                    symbol: "brain",
-                    title: "记忆库为空",
-                    message: search.isEmpty
-                        ? "收到和发送的消息会写入本地 SQLite，可在这里浏览。"
-                        : "没有匹配的会话或消息。"
+                    symbol: "brain.head.profile",
+                    title: "还没有记忆卡",
+                    message: "机器人为某个会话生成第一次回复后会自动创建记忆卡，之后每批维护把聊天内容提取成原子记忆。",
+                    actionTitle: "刷新"
+                ) {
+                    refresh()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if cards.isAggregate {
+                EmptyState(
+                    symbol: "sparkles",
+                    title: "记忆卡还是空的",
+                    message: "选中左侧角色后可新增手写记忆；机器人下一次回复后也会自动提取。"
                 )
-                Spacer(minLength: 0)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 1) {
-                        ForEach(chat.filteredConversations) { conversation in
-                            memoryConversationRow(
-                                conversation,
-                                count: chat.messageCounts[conversation.id] ?? 0
-                            )
-                        }
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 6)
+                EmptyState(
+                    symbol: "sparkles",
+                    title: cards.summary?.isGlobal == true ? "全局记忆还是空的" : "这个角色还没有记忆",
+                    message: cards.summary?.isGlobal == true
+                        ? "新增的记忆会注入所有会话；全局记忆只支持手动维护。"
+                        : "可以新增一条手写记忆，或等待机器人回复后自动提取。",
+                    actionTitle: "新增记忆"
+                ) {
+                    newMemory()
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-
-            Divider().opacity(0.5)
-            HStack(spacing: 5) {
-                Image(systemName: "cylinder.split.1x2")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                Text(L("\(chat.totalMessages) 条消息"))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                CopyButton(text: AppPaths.databaseFile.path, accessibilityText: "复制数据库路径")
+        } else if cards.visible.isEmpty {
+            EmptyState(
+                symbol: "line.3.horizontal.decrease.circle",
+                title: emptyTitle(cards),
+                message: emptyMessage(cards),
+                actionTitle: "显示全部"
+            ) {
+                resetFilters()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-        }
-    }
-
-    private func memoryConversationRow(_ conversation: Conversation, count: Int) -> some View {
-        let isSelected = selectedConversationID == conversation.id
-        return Button {
-            selectedConversationID = conversation.id
-        } label: {
-            HStack(spacing: 8) {
-                AvatarView(title: conversation.displayTitle, kind: conversation.kind, size: 26)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(conversation.displayTitle)
-                        .font(.caption.weight(.medium))
-                        .lineLimit(1)
-                    Text(L("\(count) 条 · \(conversation.kind.label)"))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 4)
-                if let date = conversation.lastMessageAt {
-                    Text(UIFormat.relativeShort(date))
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                isSelected ? Theme.accent.opacity(0.12) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
-    }
-
-    // MARK: Message pane
-
-    private func messagePane(_ chat: ChatSnapshot) -> some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                if !search.isEmpty {
-                    Label(L("搜索结果"), systemImage: "magnifyingglass")
-                        .font(.caption.weight(.medium))
-                    Text(L("\(chat.searchResults.count) 条匹配"))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                } else if let conversation = selectedConversation {
-                    AvatarView(title: conversation.displayTitle, kind: conversation.kind, size: 22)
-                    Text(conversation.displayTitle)
-                        .font(.caption.weight(.semibold))
-                    Text(L("\(chat.selectedMessages.count) 条消息"))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(L("消息"))
-                        .font(.caption.weight(.semibold))
-                }
-                Spacer()
-                Text(UIFormat.compactPath(AppPaths.databaseFile.path))
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .background(.thinMaterial)
-
-            Divider().opacity(0.5)
-
-            if search.isEmpty {
-                if selectedConversation != nil {
-                    if chat.selectedMessages.isEmpty {
-                        EmptyState(
-                            symbol: "text.bubble",
-                            title: "此会话暂无记录",
-                            message: "新的消息会自动写入记忆库。"
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(cards.visible) { item in
+                        CharacterMemoryCard(
+                            memory: item.memory,
+                            score: item.score,
+                            settings: cards.settings,
+                            characterTitle: cards.isAggregate
+                                ? cards.characterTitles[item.memory.characterID]
+                                : nil,
+                            now: cards.now,
+                            onEdit: { editMemory(item.memory) },
+                            onTogglePinned: { togglePinned(item.memory) },
+                            onToggleArchived: { toggleArchived(item.memory) },
+                            onCompress: { compress(item.memory) },
+                            onCancelSupersede: { cancelSupersede(item.memory) },
+                            onDelete: { pendingDeleteMemory = item.memory }
                         )
-                    } else {
-                        messageList(chat.selectedMessages, showConversation: false, titles: chat.conversationTitles)
                     }
-                } else {
-                    EmptyState(
-                        symbol: "brain",
-                        title: "选择左侧会话",
-                        message: "浏览本地保存的聊天记录。"
-                    )
                 }
-            } else {
-                if chat.searchResults.isEmpty {
-                    EmptyState(
-                        symbol: "magnifyingglass",
-                        title: "没有匹配的消息",
-                        message: "尝试其他关键词，搜索会匹配消息文本与会话标题。"
-                    )
-                } else {
-                    messageList(chat.searchResults, showConversation: true, titles: chat.conversationTitles)
-                }
+                .padding(12)
             }
         }
     }
 
-    private func messageList(
-        _ messages: [ChatMessage],
-        showConversation: Bool,
-        titles: [String: String]
-    ) -> some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(messages) { message in
-                    MemoryMessageRow(
-                        message: message,
-                        conversationTitle: showConversation
-                            ? (titles[message.conversationID] ?? message.conversationID)
-                            : nil
-                    )
-                    .equatable()
-                    Divider().opacity(0.35)
-                }
-            }
-            .padding(.vertical, 2)
-        }
+    private func emptyTitle(_ cards: MemoryCardSnapshot) -> String {
+        if cards.hasSearch { return L("没有匹配的记忆") }
+        return L("当前筛选暂无记忆")
     }
 
-    // MARK: Snapshot derivation
-
-    /// 长期记忆页的一次性派生数据。旧实现里 `filteredMemories` 每次 body 至少求值
-    /// 3-4 次，`memoryFolderSections`/`memoryCounts(for:)` 还会对每个文件夹、每次
-    /// 排序比较都重新遍历全部记忆（O(文件夹 × 记忆数)）；这里统一为一次遍历 + 一次排序。
-    private func makeLongTermSnapshot() -> LongTermSnapshot {
-        let keyword = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isSearching = !keyword.isEmpty
-        let allMemories = store.longTermMemories
-
-        var allCounts = MemoryCounts()
-        var globalCounts = MemoryCounts()
-        var perConversation: [String: MemoryCounts] = [:]
-        var existingConversationIDs = Set<String>()
-        for memory in allMemories {
-            allCounts.total += 1
-            if memory.isCore { allCounts.core += 1 }
-            if memory.isGlobal {
-                globalCounts.total += 1
-                if memory.isCore { globalCounts.core += 1 }
-            }
-            let conversationID = memory.conversationID
-            guard !conversationID.isEmpty else { continue }
-            existingConversationIDs.insert(conversationID)
-            var counts = perConversation[conversationID] ?? MemoryCounts()
-            counts.total += 1
-            if memory.isCore { counts.core += 1 }
-            perConversation[conversationID] = counts
+    private func emptyMessage(_ cards: MemoryCardSnapshot) -> String {
+        if cards.hasSearch {
+            return L("尝试其它关键词；搜索匹配正文与关键词。也可以点「显示全部」清除筛选。")
         }
+        return L("切换其它筛选条件，或点「显示全部」回到全部记忆；已归档与已被取代的记忆在对应筛选中查看。")
+    }
 
-        var folderCounts: [String: MemoryCounts] = [:]
-        folderCounts[MemoryFolder.all.id] = allCounts
-        folderCounts[MemoryFolder.global.id] = globalCounts
-        for (conversationID, counts) in perConversation {
-            folderCounts[MemoryFolder.conversationFolderID(conversationID)] = counts
-        }
+    // MARK: - Snapshot derivation
 
-        let activeFolder: MemoryFolder = folderStillExists(selectedFolder, ids: existingConversationIDs)
-            ? selectedFolder
-            : .all
-
-        var filtered: [LongTermMemory]
-        if isSearching {
-            filtered = allMemories.filter {
-                $0.summary.localizedCaseInsensitiveContains(keyword)
-                    || $0.conversationTitle.localizedCaseInsensitiveContains(keyword)
+    private func makeCharacterListSnapshot() -> CharacterListSnapshot {
+        let keyword = characterSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let everySummary = store.characterSummaries
+        let global = everySummary.first { $0.isGlobal }
+        let all = everySummary.filter { !$0.isGlobal }
+        let visible: [CharacterSummary]
+        if keyword.isEmpty {
+            visible = all
+        } else {
+            visible = all.filter {
+                $0.title.localizedCaseInsensitiveContains(keyword)
+                    || $0.personaName.localizedCaseInsensitiveContains(keyword)
                     || $0.conversationID.localizedCaseInsensitiveContains(keyword)
             }
-        } else {
-            filtered = allMemories.filter { activeFolder.contains($0) }
         }
-        if onlyCore {
-            filtered = filtered.filter(\.isCore)
+        var totalActive = 0
+        var totalImportant = 0
+        var totalTodo = 0
+        for summary in everySummary {
+            totalActive += summary.memoryCount
+            totalImportant += summary.importantCount
+            totalTodo += summary.todoCount
         }
-        let filteredCoreCount = filtered.reduce(0) { $0 + ($1.isCore ? 1 : 0) }
+        return CharacterListSnapshot(
+            all: all,
+            global: global,
+            visible: visible,
+            totalActive: totalActive,
+            totalImportant: totalImportant,
+            totalTodo: totalTodo,
+            isSearching: !keyword.isEmpty
+        )
+    }
 
-        // 排序键只计算一次（timeWeight 涉及 log/exp/日期运算）。旧实现让排序闭包
-        // 对每次比较都调用 timeWeight()，是记忆较多时 body 变慢的主要原因之一。
-        let weighted = filtered.map { (memory: $0, weight: $0.timeWeight()) }
-        let sorted: [LongTermMemory]
+    private func makeCardSnapshot() -> MemoryCardSnapshot {
+        let now = Date()
+        let settings = store.settings.bot.memorySettings
+        let characterID = store.selectedCharacterID
+        let isAggregate = store.isAllCharactersSelected
+        let summary = characterID.flatMap { id in
+            store.characterSummaries.first(where: { $0.conversationID == id })
+        }
+        var titles: [String: String] = [:]
+        titles.reserveCapacity(store.characterSummaries.count)
+        for item in store.characterSummaries {
+            titles[item.conversationID] = item.title
+        }
+
+        let keyword = memorySearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        var counts = MemoryCardCounts()
+        var filterCounts: [MemoryFilter: Int] = [:]
+        var filtered: [ScoredMemory] = []
+
+        for memory in store.characterMemories {
+            let score = memory.score(now: now, settings: settings)
+            let isActive = !memory.archived && !memory.isSuperseded
+            if isActive {
+                counts.active += 1
+            }
+
+            for item in MemoryFilter.allCases
+            where item.matches(memory, settings: settings, now: now) {
+                filterCounts[item, default: 0] += 1
+            }
+
+            guard filter.matches(memory, settings: settings, now: now) else { continue }
+            if !keyword.isEmpty && !Self.matchesSearch(memory, keyword: keyword) { continue }
+            filtered.append(ScoredMemory(memory: memory, score: score))
+        }
+
+        let sorted: [ScoredMemory]
         switch sortMode {
         case .weight:
-            sorted = weighted.sorted { lhs, rhs in
-                if lhs.memory.isCore != rhs.memory.isCore { return lhs.memory.isCore && !rhs.memory.isCore }
-                if abs(lhs.weight - rhs.weight) > 0.000001 { return lhs.weight > rhs.weight }
+            sorted = filtered.sorted { lhs, rhs in
+                if abs(lhs.score - rhs.score) > 0.000_001 { return lhs.score > rhs.score }
                 return lhs.memory.updatedAt > rhs.memory.updatedAt
-            }.map { $0.memory }
+            }
         case .recentlyUpdated:
-            sorted = weighted.sorted { lhs, rhs in
+            sorted = filtered.sorted { lhs, rhs in
                 if lhs.memory.updatedAt != rhs.memory.updatedAt {
                     return lhs.memory.updatedAt > rhs.memory.updatedAt
                 }
-                return lhs.weight > rhs.weight
-            }.map { $0.memory }
-        }
-
-        let known = Dictionary(
-            store.conversations.map { ($0.id, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        var sections: [MemoryFolderSection] = []
-        var claimed = Set<String>()
-        for kind in [ConversationKind.direct, .group, .official] {
-            let folders = existingConversationIDs
-                .filter { id in known[id]?.kind == kind }
-                .compactMap { id -> MemoryFolder? in
-                    guard let conversation = known[id] else { return nil }
-                    return .conversation(id: id, title: conversation.displayTitle, kind: kind)
-                }
-                .sorted { lhs, rhs in
-                    let left = folderCounts[lhs.id]?.total ?? 0
-                    let right = folderCounts[rhs.id]?.total ?? 0
-                    if left != right { return left > right }
-                    return lhs.title.localizedCompare(rhs.title) == .orderedAscending
-                }
-            guard !folders.isEmpty else { continue }
-            for folder in folders { claimed.insert(folder.conversationID) }
-            sections.append(MemoryFolderSection(id: kind.rawValue, title: kind.label, folders: folders))
-        }
-
-        let orphanedIDs = existingConversationIDs.subtracting(claimed).sorted()
-        if !orphanedIDs.isEmpty {
-            sections.append(MemoryFolderSection(
-                id: "orphaned",
-                title: "未关联会话",
-                folders: orphanedIDs.map { MemoryFolder.orphaned(id: $0) }
-            ))
-        }
-
-        return LongTermSnapshot(
-            activeFolder: activeFolder,
-            isSearching: isSearching,
-            memories: sorted,
-            filteredCoreCount: filteredCoreCount,
-            totalMemoryCount: allMemories.count,
-            coreMemoryCount: allCounts.core,
-            folderSections: sections,
-            folderSessionCount: sections.reduce(0) { $0 + $1.folders.count },
-            folderCounts: folderCounts
-        )
-    }
-
-    private func folderStillExists(_ folder: MemoryFolder, ids: Set<String>) -> Bool {
-        switch folder {
-        case .all, .global: return true
-        case .conversation(let id, _, _), .orphaned(let id): return ids.contains(id)
-        }
-    }
-
-    private func isAllFolderScope(_ folder: MemoryFolder) -> Bool {
-        if case .all = folder { return true }
-        return false
-    }
-
-    private func listTitle(_ snapshot: LongTermSnapshot) -> String {
-        snapshot.isSearching ? "搜索结果" : snapshot.activeFolder.title
-    }
-
-    private func emptyTitle(_ snapshot: LongTermSnapshot) -> String {
-        if snapshot.isSearching { return "没有匹配的长期记忆" }
-        if onlyCore { return "没有核心记忆" }
-        return isAllFolderScope(snapshot.activeFolder) ? "还没有长期记忆" : "此文件夹暂无长期记忆"
-    }
-
-    private func emptyMessage(_ snapshot: LongTermSnapshot) -> String {
-        if snapshot.isSearching {
-            var text = "尝试其他关键词；搜索会跨全部记忆匹配摘要、会话标题与 ID。"
-            if onlyCore { text += "当前仅显示核心记忆。" }
-            return text
-        }
-        if onlyCore {
-            return "当前范围没有标记★的核心记忆；关闭「仅核心」可查看全部记忆。"
-        }
-        if isAllFolderScope(snapshot.activeFolder) {
-            return "短期窗口外攒够 \(ChatEngine.overflowBatchThreshold) 条旧消息后会自动批量总结；也可以手动新增一条手写记忆。"
-        }
-        return "新增的记忆默认归入当前文件夹，也可以在编辑器中改到其它会话。"
-    }
-
-    private func emptyActionTitle(_ snapshot: LongTermSnapshot) -> String {
-        isAllFolderScope(snapshot.activeFolder) ? "新增第一条长期记忆" : "新增记忆"
-    }
-
-    private func subtitle(longTerm: LongTermSnapshot?, chat: ChatSnapshot?) -> String {
-        if mode == .longTerm {
-            return "\(longTerm?.totalMemoryCount ?? 0) 条长期记忆 · 核心 \(longTerm?.coreMemoryCount ?? 0)"
-                + " · 短期窗口 \(ChatEngine.shortTermMemoryLimit) 条"
-                + " · 每 \(ChatEngine.overflowBatchThreshold) 条批量总结 · 本地 SQLite"
-        }
-        return "\(chat?.conversationCount ?? 0) 个会话 · \(chat?.totalMessages ?? 0) 条消息 · 本地 SQLite"
-    }
-
-    /// 聊天记录页的一次性派生数据。旧实现里 `searchResults` 每个 body 被求值 2-3 次，
-    /// 且逐条消息调用 `conversationTitle(for:)` 做线性查找（O(消息 × 会话)）。
-    private func makeChatSnapshot() -> ChatSnapshot {
-        let keyword = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isSearching = !keyword.isEmpty
-        let conversations = store.conversations
-
-        var titles: [String: String] = [:]
-        titles.reserveCapacity(conversations.count)
-        for conversation in conversations {
-            titles[conversation.id] = conversation.displayTitle
-        }
-
-        var totalMessages = 0
-        var messageCounts: [String: Int] = [:]
-        messageCounts.reserveCapacity(store.messages.count)
-        for (conversationID, list) in store.messages {
-            totalMessages += list.count
-            messageCounts[conversationID] = list.count
-        }
-
-        let searchResults: [ChatMessage]
-        if isSearching {
-            var matches: [ChatMessage] = []
-            for list in store.messages.values {
-                for message in list {
-                    let title = titles[message.conversationID] ?? message.conversationID
-                    if message.text.localizedCaseInsensitiveContains(keyword)
-                        || message.senderName.localizedCaseInsensitiveContains(keyword)
-                        || title.localizedCaseInsensitiveContains(keyword) {
-                        matches.append(message)
-                    }
-                }
+                return lhs.score > rhs.score
             }
-            matches.sort { $0.timestamp > $1.timestamp }
-            searchResults = matches
-        } else {
-            searchResults = []
-        }
-
-        let filteredConversations: [Conversation]
-        if isSearching {
-            let matchedIDs = Set(searchResults.map(\.conversationID))
-            filteredConversations = conversations
-                .filter {
-                    matchedIDs.contains($0.id)
-                        || $0.displayTitle.localizedCaseInsensitiveContains(keyword)
-                        || $0.id.localizedCaseInsensitiveContains(keyword)
+        case .importance:
+            sorted = filtered.sorted { lhs, rhs in
+                if lhs.memory.importance != rhs.memory.importance {
+                    return lhs.memory.importance > rhs.memory.importance
                 }
-                .sorted { ($0.lastMessageAt ?? .distantPast) > ($1.lastMessageAt ?? .distantPast) }
-        } else {
-            filteredConversations = conversations
-                .sorted { ($0.lastMessageAt ?? .distantPast) > ($1.lastMessageAt ?? .distantPast) }
+                return lhs.score > rhs.score
+            }
         }
 
-        // store.messages 中每个会话数组由 appendMessage/loadMessages 保持 timestamp
-        // 升序，因此不再为每次 body 重新排序。
-        let selectedMessages: [ChatMessage] = selectedConversationID.flatMap { store.messages[$0] } ?? []
-
-        return ChatSnapshot(
-            conversationCount: conversations.count,
-            totalMessages: totalMessages,
-            messageCounts: messageCounts,
-            searchResults: searchResults,
-            filteredConversations: filteredConversations,
-            selectedMessages: selectedMessages,
-            conversationTitles: titles
+        return MemoryCardSnapshot(
+            now: now,
+            settings: settings,
+            isAggregate: isAggregate,
+            characterID: characterID,
+            summary: summary,
+            counts: counts,
+            filterCounts: filterCounts,
+            visible: sorted,
+            totalLoaded: store.characterMemories.count,
+            characterTitles: titles,
+            hasSearch: !keyword.isEmpty
         )
     }
 
-    // MARK: Derived
-
-    private var selectedConversation: Conversation? {
-        guard let selectedConversationID else { return nil }
-        return store.conversations.first(where: { $0.id == selectedConversationID })
-    }
-
-    /// 仅供清理确认弹窗计数使用；消息数组本身已按时间升序维护。
-    private var selectedMessages: [ChatMessage] {
-        guard let selectedConversationID else { return [] }
-        return store.messages[selectedConversationID] ?? []
-    }
-
-    /// 仅供清理确认弹窗计数使用（弹窗内容按需求值，不参与页面 body 渲染）。
-    private var totalMessages: Int {
-        store.messages.values.reduce(0) { $0 + $1.count }
-    }
-
-    private func selectFirstIfNeeded() {
-        if selectedConversationID == nil
-            || !store.conversations.contains(where: { $0.id == selectedConversationID }) {
-            selectedConversationID = store.conversations.first?.id
+    private static func matchesSearch(_ memory: CharacterMemory, keyword: String) -> Bool {
+        if memory.content.localizedCaseInsensitiveContains(keyword) { return true }
+        if let compressed = memory.compressedContent,
+           compressed.localizedCaseInsensitiveContains(keyword) {
+            return true
         }
+        return memory.keywords.contains { $0.localizedCaseInsensitiveContains(keyword) }
     }
 
-    // MARK: Cleanup
+    private func subtitle(
+        characters: CharacterListSnapshot,
+        cards: MemoryCardSnapshot
+    ) -> String {
+        let count = characters.all.count + (characters.global == nil ? 0 : 1)
+        if store.settings.bot.memorySettings.enabled {
+            return Lf("%d 个记忆卡 · %d 条生效记忆 · 本地 SQLite",
+                      count, characters.totalActive)
+        }
+        return Lf("%d 个记忆卡 · 记忆功能已关闭 · 本地 SQLite", count)
+    }
 
-    private func clear(_ scope: MemoryClearScope) {
-        isClearing = true
+    // MARK: - Selection & loading
+
+    private func loadTask() async {
+        store.isMemoryPageVisible = true
+        await store.loadCharacterSummaries()
+        // 栏目入口只展示列表；聚合页也必须由用户点击后才打开。
+        store.clearCharacterSelection()
+    }
+
+    private func refresh() {
         Task {
-            if scope == .current, let conversationID = selectedConversationID {
-                await store.clearMessages(conversationID: conversationID)
-                toast.show("已清理当前会话记忆", tone: .success, symbol: "trash")
+            await store.loadCharacterSummaries()
+            if store.isAllCharactersSelected {
+                await store.selectCharacter(nil)
+            } else if let id = store.selectedCharacterID {
+                await store.selectCharacter(id)
             } else {
-                await store.clearMessages(conversationID: nil)
-                toast.show("已清空记忆库", tone: .success, symbol: "trash")
+                store.clearCharacterSelection()
             }
-            isClearing = false
-            showCleanup = false
         }
+    }
+
+    private func selectCharacter(_ conversationID: String?) {
+        if conversationID == store.selectedCharacterID,
+           (conversationID != nil || store.isAllCharactersSelected) {
+            return
+        }
+        memorySearch = ""
+        isLoadingSelection = true
+        Task {
+            await store.selectCharacter(conversationID)
+            isLoadingSelection = false
+        }
+    }
+
+    private func resetFilters() {
+        filter = .all
+        memorySearch = ""
+    }
+
+    private func characterTitle(_ conversationID: String) -> String {
+        if let summary = store.characterSummaries.first(
+            where: { $0.conversationID == conversationID }) {
+            return summary.title
+        }
+        if store.selectedCharacterID == conversationID,
+           let summary = store.characterSummaries.first(
+                where: { $0.conversationID == conversationID }) {
+            return summary.title.isEmpty ? conversationID : summary.title
+        }
+        return conversationID
+    }
+
+    // MARK: - Memory actions
+
+    private func performCreateMissingCards() {
+        Task {
+            let count = await store.createMissingCharacterCards()
+            if count > 0 {
+                toast.show(
+                    Lf("已为 %d 个会话创建记忆卡", count),
+                    tone: .success,
+                    symbol: "rectangle.stack.badge.plus"
+                )
+            } else {
+                toast.show(
+                    L("没有可创建的会话：可能都已创建，或只剩系统会话"),
+                    tone: .info,
+                    symbol: "info.circle"
+                )
+            }
+        }
+    }
+
+    private func newMemory() {
+        guard let characterID = store.selectedCharacterID else {
+            toast.show(L("请先在左侧选择一个角色"), tone: .warning)
+            return
+        }
+        var memory = CharacterMemory(characterID: characterID, content: "")
+        memory.source = .manual
+        memory.category = .fact
+        editingMemoryIsNew = true
+        editingMemory = memory
+    }
+
+    private func editMemory(_ memory: CharacterMemory) {
+        editingMemoryIsNew = false
+        editingMemory = memory
+    }
+
+    private func togglePinned(_ memory: CharacterMemory) {
+        var updated = memory
+        updated.pinned.toggle()
+        Task {
+            let saved = await store.saveCharacterMemory(updated)
+            if saved {
+                toast.show(
+                    updated.pinned ? L("已置顶记忆") : L("已取消置顶"),
+                    tone: .success,
+                    symbol: updated.pinned ? "pin.fill" : "pin.slash"
+                )
+            } else {
+                toast.show(L("保存记忆失败，请查看日志"), tone: .error)
+            }
+        }
+    }
+
+    private func toggleArchived(_ memory: CharacterMemory) {
+        var updated = memory
+        updated.archived.toggle()
+        Task {
+            let saved = await store.saveCharacterMemory(updated)
+            if saved {
+                toast.show(
+                    updated.archived ? L("已归档记忆") : L("已恢复记忆"),
+                    tone: .info,
+                    symbol: updated.archived ? "archivebox" : "tray.and.arrow.up"
+                )
+            } else {
+                toast.show(L("保存记忆失败，请查看日志"), tone: .error)
+            }
+        }
+    }
+
+    private func compress(_ memory: CharacterMemory) {
+        Task {
+            await store.compressCharacterMemory(memory)
+            toast.show(L("压缩完成，结果可在日志中查看"), tone: .info, symbol: "rectangle.compress.vertical")
+        }
+    }
+
+    private func cancelSupersede(_ memory: CharacterMemory) {
+        Task {
+            await store.cancelSupersede(memory)
+            toast.show(L("已取消取代标记"), tone: .success, symbol: "arrow.uturn.backward")
+        }
+    }
+
+    private func deleteMemory(_ memory: CharacterMemory) {
+        Task {
+            await store.deleteCharacterMemory(memory)
+            toast.show(L("已删除记忆"), tone: .info, symbol: "trash")
+        }
+    }
+
+    private func importLegacyMemories() {
+        guard let conversationID = store.selectedCharacterID else { return }
+        Task {
+            let count = await store.importLegacyMemories(conversationID: conversationID)
+            if count > 0 {
+                toast.show(Lf("已导入 %d 条旧记忆", count), tone: .success)
+            } else {
+                toast.show(L("没有可导入的旧记忆"), tone: .info)
+            }
+        }
+    }
+
+    private func deleteSelectedCharacterCard() {
+        guard let conversationID = store.selectedCharacterID else { return }
+        Task {
+            await store.deleteCharacterCard(conversationID: conversationID)
+            await store.selectCharacter(nil)
+            await store.loadCharacterSummaries()
+            resetFilters()
+            toast.show(L("已删除记忆卡"), tone: .info, symbol: "trash")
+        }
+    }
+
+    // MARK: - Export
+
+    private func exportCard(format: String) {
+        guard let conversationID = store.selectedCharacterID else { return }
+        let title = characterTitle(conversationID)
+        Task {
+            guard let text = await store.exportCharacter(
+                conversationID: conversationID, format: format) else {
+                toast.show(L("导出失败：没有可导出的记忆卡"), tone: .error)
+                return
+            }
+            presentSavePanel(text: text, format: format, title: title)
+        }
+    }
+
+    /// 导出内容在后台生成，NSSavePanel 回到 MainActor 再弹（模态），最后写 UTF-8。
+    private func presentSavePanel(text: String, format: String, title: String) {
+        let isJSON = format == "json"
+        let panel = NSSavePanel()
+        panel.title = L("导出记忆卡")
+        panel.nameFieldStringValue = Lf("记忆卡-%@", safeFileTitle(title))
+            + "." + (isJSON ? "json" : "md")
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.allowedContentTypes = [isJSON ? .json : .plainText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            toast.show(Lf("已导出到 %@", url.path), tone: .success)
+        } catch {
+            toast.show(Lf("导出失败：%@", error.localizedDescription), tone: .error)
+        }
+    }
+
+    private func safeFileTitle(_ raw: String) -> String {
+        let invalid = CharacterSet(charactersIn: "/:\\?%*|\"<>")
+        let cleaned = raw
+            .components(separatedBy: invalid)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return "character" }
+        return String(cleaned.prefix(60))
     }
 }
 
-// MARK: - Long-term memory card
+// MARK: - Memory card
 
-private struct LongTermMemoryCard: View {
-    let memory: LongTermMemory
+/// 一条记忆的卡片：正文、类别/状态徽标、关键词、权重与操作菜单。
+private struct CharacterMemoryCard: View {
+    let memory: CharacterMemory
+    let score: Double
+    let settings: MemorySettings
+    var characterTitle: String?
+    let now: Date
     let onEdit: () -> Void
-    let onToggleCore: () -> Void
+    let onTogglePinned: () -> Void
+    let onToggleArchived: () -> Void
+    let onCompress: () -> Void
+    let onCancelSupersede: () -> Void
     let onDelete: () -> Void
 
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Button(action: onToggleCore) {
-                Image(systemName: memory.isCore ? "star.fill" : "star")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(memory.isCore ? Theme.violet : Color.secondary)
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(memory.isCore ? "取消核心记忆" : "设为核心记忆")
-            .accessibilityLabel(memory.isCore ? "取消核心记忆" : "设为核心记忆")
+    private var tint: Color { memory.category.tint }
 
-            VStack(alignment: .leading, spacing: 7) {
-                Text(memory.summary)
+    private var resolvedKind: MemoryKind {
+        memory.resolvedKind(threshold: settings.importanceThreshold)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: memory.category.symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 22, height: 22)
+                    .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .accessibilityHidden(true)
+
+                Text(memory.content)
                     .font(.callout)
                     .foregroundStyle(.primary)
-                    .lineLimit(5)
+                    .lineLimit(6)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-                HStack(spacing: 6) {
-                    PillLabel(
-                        text: memory.isGlobal ? "全局" : (memory.conversationTitle.isEmpty ? memory.conversationID : memory.conversationTitle),
-                        color: memory.isGlobal ? Theme.info : Theme.accent
+                Menu {
+                    Button(L("编辑…"), systemImage: "pencil", action: onEdit)
+                    Button(
+                        memory.pinned ? L("取消置顶") : L("置顶"),
+                        systemImage: memory.pinned ? "pin.slash" : "pin",
+                        action: onTogglePinned
                     )
-                    PillLabel(
-                        text: memory.source == "manual" ? "手写" : "自动滚动",
-                        color: memory.source == "manual" ? Theme.warning : Color.secondary
+                    Button(
+                        memory.archived ? L("恢复") : L("归档"),
+                        systemImage: memory.archived ? "tray.and.arrow.up" : "archivebox",
+                        action: onToggleArchived
                     )
-                    if memory.isCore {
-                        PillLabel(text: "★ 核心", color: Theme.violet)
+                    Button(L("压缩"), systemImage: "rectangle.compress.vertical", action: onCompress)
+                        .disabled(memory.content.count <= 300 && memory.compressedContent == nil)
+                    if memory.isSuperseded || memory.supersedes != nil {
+                        Button(L("取消取代"), systemImage: "arrow.uturn.backward") {
+                            onCancelSupersede()
+                        }
                     }
-                    if memory.hasCustomBaseWeight {
-                        PillLabel(
-                            text: "基础 ×\(String(format: "%.1f", memory.baseWeight))",
-                            color: Theme.info
-                        )
-                        .help(L("手工调整的基础权重，会改变该记忆的排序"))
+                    Divider()
+                    Button(L("删除"), systemImage: "trash", role: .destructive, action: onDelete)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .accessibilityLabel(L("记忆操作"))
+            }
+
+            badges
+
+            if !memory.keywords.isEmpty {
+                FlowLayout(spacing: 5, lineSpacing: 5) {
+                    ForEach(memory.keywords, id: \.self) { keyword in
+                        Text(keyword)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.primary.opacity(0.05), in: Capsule())
                     }
-                    PillLabel(text: "权重 \(memory.weightLabel)", color: Theme.success)
-                    Spacer(minLength: 4)
-                    Text(activitySummary)
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .help(activityHelp)
                 }
             }
 
-            Menu {
-                Button(L("编辑…"), systemImage: "pencil", action: onEdit)
-                Button(memory.isCore ? "取消核心记忆" : "设为核心记忆",
-                       systemImage: memory.isCore ? "star.slash" : "star",
-                       action: onToggleCore)
-                Divider()
-                Button(L("删除"), systemImage: "trash", role: .destructive, action: onDelete)
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text(activitySummary)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(Lf("权重 %.2f", score))
+                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Theme.success)
+                    .help(L("综合权重；置顶记忆不衰减"))
             }
-            .menuStyle(.borderlessButton)
-            .frame(width: 24)
-            .accessibilityLabel(L("长期记忆操作"))
         }
         .padding(12)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .strokeBorder(memory.isCore ? Theme.violet.opacity(0.28) : Color.primary.opacity(0.05), lineWidth: 1)
+        .background(
+            Color.primary.opacity(0.035),
+            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
         )
+        .overlay {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(borderColor, lineWidth: 1)
+        }
         .contentShape(Rectangle())
         .onTapGesture(perform: onEdit)
         .accessibilityElement(children: .contain)
     }
 
-    /// 合并条数/召回次数与更新时间合并成一行，避免卡片徽标过多挤压布局。
-    private var activitySummary: String {
-        var parts: [String] = []
-        if isStale { parts.append("7 天以上未更新") }
-        parts.append("更新 \(UIFormat.relativeShort(memory.updatedAt))")
-        if memory.sourceCount > 0 { parts.append("合并 \(memory.sourceCount) 条") }
-        if memory.accessCount > 0 { parts.append("召回 \(memory.accessCount) 次") }
-        return parts.joined(separator: " · ")
-    }
-
-    /// 超过 7 天没更新时给出衰减提示；只读现有字段，不新增模型属性。
-    private var isStale: Bool {
-        Date().timeIntervalSince(memory.updatedAt) > 7 * 86_400
-    }
-
-    private var activityHelp: String {
-        var text = "最近更新 \(UIFormat.fullDateTime.string(from: memory.updatedAt))"
-        if let lastAccessedAt = memory.lastAccessedAt {
-            text += "；最近召回 \(UIFormat.fullDateTime.string(from: lastAccessedAt))"
+    @ViewBuilder
+    private var badges: some View {
+        FlowLayout(spacing: 5, lineSpacing: 5) {
+            PillLabel(text: memory.category.label, color: tint, symbol: memory.category.symbol)
+            if memory.pinned {
+                PillLabel(text: "置顶", color: Theme.accent, symbol: "pin.fill")
+            }
+            if resolvedKind == .important && !memory.pinned {
+                PillLabel(text: "重要", color: Theme.warning,
+                          symbol: "exclamationmark.circle.fill")
+            }
+            if memory.archived {
+                PillLabel(text: "已归档", color: .secondary, symbol: "archivebox")
+            }
+            if memory.isSuperseded {
+                PillLabel(text: "已被取代", color: Theme.danger,
+                          symbol: "arrow.triangle.branch")
+            }
+            if let characterTitle {
+                Text(characterTitle)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(Theme.info)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Theme.info.opacity(0.12), in: Capsule())
+                    .lineLimit(1)
+            }
+            PillLabel(text: memory.source.label, color: .secondary)
+            if memory.mergeCount > 0 {
+                PillLabel(text: Lf("合并 %d", memory.mergeCount), color: .secondary)
+            }
+            if memory.accessCount > 0 {
+                PillLabel(text: Lf("召回 %d", memory.accessCount), color: .secondary)
+            }
+            PillLabel(
+                text: Lf("重要度 %d", Int(memory.importance.rounded())),
+                color: .secondary
+            )
         }
-        text += "。距最近更新/召回越久，权重按 \(Int(LongTermMemory.halfLifeDays)) 天半衰期衰减。"
-        if isStale { text += "该记忆已超过 7 天未更新。" }
-        return text
+    }
+
+    private var borderColor: Color {
+        if memory.isSuperseded { return Theme.danger.opacity(0.25) }
+        if memory.pinned { return Theme.violet.opacity(0.28) }
+        if resolvedKind == .important { return Theme.warning.opacity(0.22) }
+        return Color.primary.opacity(0.05)
+    }
+
+    private var activitySummary: String {
+        var parts: [String] = [Lf("更新 %@", UIFormat.relativeShort(memory.updatedAt, now: now))]
+        if let lastAccessedAt = memory.lastAccessedAt {
+            parts.append(Lf("召回 %@", UIFormat.relativeShort(lastAccessedAt, now: now)))
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
-// MARK: - Long-term memory editor
+// MARK: - Recall preview
 
-private struct MemoryEditorSheet: View {
+/// 「预览注入」：输入一句模拟消息，展示该会话当前会注入的「相关历史记忆」。
+///
+/// 只读：`recordAccess: false`，不会累加召回次数、不修改记忆（§8.3）。
+private struct RecallPreviewSheet: View {
+    @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
-    let original: LongTermMemory
-    let isNew: Bool
-    let conversations: [Conversation]
-    let onSave: (LongTermMemory) -> Void
-    let onDelete: (LongTermMemory) -> Void
 
-    @State private var summary: String
-    @State private var conversationID: String
-    @State private var isCore: Bool
-    @State private var baseWeight: Double
-    @State private var confirmDelete = false
+    let conversationID: String
+    let title: String
 
-    init(
-        original: LongTermMemory,
-        isNew: Bool,
-        conversations: [Conversation],
-        onSave: @escaping (LongTermMemory) -> Void,
-        onDelete: @escaping (LongTermMemory) -> Void
-    ) {
-        self.original = original
-        self.isNew = isNew
-        self.conversations = conversations
-        self.onSave = onSave
-        self.onDelete = onDelete
-        _summary = State(initialValue: original.summary)
-        _conversationID = State(initialValue: original.conversationID)
-        _isCore = State(initialValue: original.isCore)
-        _baseWeight = State(initialValue: LongTermMemory.clampBaseWeight(original.baseWeight))
-    }
+    @State private var query = ""
+    @State private var result: String?
+    @State private var isLoading = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 11) {
-                Image(systemName: isCore ? "star.fill" : "brain.head.profile")
+                Image(systemName: "text.magnifyingglass")
                     .font(.system(size: 22))
-                    .foregroundStyle(isCore ? Theme.violet : Theme.accent)
+                    .foregroundStyle(Theme.info)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(L(isNew ? "新增长期记忆" : "编辑长期记忆")).font(.headline)
-                    Text(L("核心记忆在所属会话内优先注入并可自由调整权重；关联“全局记忆”时对所有会话生效"))
+                    Text(L("预览注入")).font(.headline)
+                    Text(title)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(1)
                 }
                 Spacer()
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text(L("记忆内容")).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                TextEditor(text: $summary)
-                    .font(.body)
-                    .frame(minHeight: 150, maxHeight: 220)
-                    .padding(6)
-                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-                    )
-                Text(L("例如：对方叫小林，喜欢猫；我们约好周五晚上讨论旅行计划。"))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-
-            if isNew {
-                InlineNotice(
-                    kind: .info,
-                    title: "手写记忆",
-                    message: "自动总结不会覆盖手写内容，并会作为后续合并的权威参考。"
-                )
-            } else if original.source != "manual" {
-                InlineNotice(
-                    kind: .warning,
-                    title: "保存后转为手写记忆",
-                    message: "自动总结不再覆盖这条记忆，并作为后续合并的权威参考。"
-                )
-            }
-
-            HStack(spacing: 14) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(L("关联会话")).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    Picker(L("关联会话"), selection: $conversationID) {
-                        Text(L("全局记忆（所有会话）")).tag("")
-                        ForEach(conversations) { conversation in
-                            Text(conversation.displayTitle).tag(conversation.id)
-                        }
-                        if !conversationID.isEmpty,
-                           !conversations.contains(where: { $0.id == conversationID }) {
-                            Text(conversationID).tag(conversationID)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .frame(minWidth: 200, alignment: .leading)
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 5) {
-                    Toggle(L("核心记忆"), isOn: $isCore)
-                        .toggleStyle(.switch)
-                        .tint(Theme.violet)
-                    Text(L("核心记忆优先注入；核心之间也按综合权重排序"))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text(L("基础权重")).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    Spacer()
-                    Text(String(format: "%.1f×", baseWeight))
-                        .font(.caption.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(hasCustomWeight ? Theme.accent : Color.secondary)
-                    Button(L("重置")) { baseWeight = LongTermMemory.defaultBaseWeight }
-                        .buttonStyle(.plain)
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(Theme.accent)
-                        .disabled(!hasCustomWeight)
-                        .help(L("恢复默认基础权重 1.0×"))
-                }
-                Slider(
-                    value: $baseWeight,
-                    in: LongTermMemory.baseWeightRange,
-                    step: 0.1
-                ) {
-                    Text(L("基础权重"))
-                } minimumValueLabel: {
-                    Text("0.1×").font(.system(size: 9)).foregroundStyle(.tertiary)
-                } maximumValueLabel: {
-                    Text("10×").font(.system(size: 9)).foregroundStyle(.tertiary)
-                }
-                .tint(baseWeight >= LongTermMemory.defaultBaseWeight ? Theme.accent : Theme.warning)
-                .accessibilityLabel(L("基础权重"))
-                .accessibilityValue(String(format: "%.1f 倍", baseWeight))
-
-                HStack(spacing: 6) {
-                    ForEach(LongTermMemory.baseWeightPresets, id: \.self) { preset in
-                        FilterChip(
-                            title: String(format: "%.1f×", preset),
-                            isSelected: abs(baseWeight - preset) < 0.0001,
-                            action: { baseWeight = preset }
-                        )
-                    }
-                    Spacer(minLength: 4)
-                    Text(Lf("保存后综合权重约 %.2f", estimatedWeight))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .help(L("按当前基础权重与保存时刷新的更新时间估算"))
-                }
-                Text(Lf("核心记忆优先占用注入名额（最多 %d 条），核心之间也按综合权重排序；保存会刷新更新时间，时间衰减从头计算。", ChatEngine.longTermMemoryLimit))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             InlineNotice(
                 kind: .info,
-                title: "综合权重",
-                message: "权重 = 基础权重 × 重要度(1 + 0.12 × log2(1 + 合并条数))"
-                    + " × 使用强化(1 + 0.02 × 召回次数，最多 +40%)"
-                    + " × 0.5^(距最近更新/召回天数 / 30)。基础权重可在上方自由调整；"
-                    + "保存会刷新更新时间，越近、越常用的长期记忆优先级越高。"
+                title: "只读预览",
+                message: "预览不会累加召回次数，也不会修改记忆内容；关闭记忆功能后仍可用于检查。"
             )
 
-            HStack {
-                if !isNew {
-                    Button(L("删除"), systemImage: "trash", role: .destructive) {
-                        confirmDelete = true
-                    }
-                    .buttonStyle(.glass)
-                }
-                Spacer()
-                Button(L("取消")) { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button(L("保存")) { save() }
+            HStack(spacing: 8) {
+                TextField(
+                    L("模拟消息"),
+                    text: $query,
+                    prompt: Text(L("输入一句话，预览会命中哪些记忆"))
+                )
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { Task { await loadPreview() } }
+                Button(L("预览")) { Task { await loadPreview() } }
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.accent)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .padding(22)
-        .frame(width: 560)
-        .background(.regularMaterial)
-        .confirmationDialog("删除这条长期记忆？", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button(L("删除"), role: .destructive) {
-                onDelete(original)
-                dismiss()
-            }
-            Button(L("取消"), role: .cancel) {}
-        } message: {
-            Text(L("删除后无法恢复，但不会影响微信聊天记录。"))
-        }
-    }
-
-    /// 基础权重是否偏离默认值。
-    private var hasCustomWeight: Bool {
-        abs(baseWeight - LongTermMemory.defaultBaseWeight) > 0.0001
-    }
-
-    /// 保存后的综合权重估算：沿用现有重要度/召回因子，更新时间按保存时刻计算。
-    private var estimatedWeight: Double {
-        var preview = original
-        preview.baseWeight = LongTermMemory.clampBaseWeight(baseWeight)
-        preview.updatedAt = Date()
-        return preview.timeWeight()
-    }
-
-    private func save() {
-        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        var updated = original
-        updated.summary = trimmed
-        updated.conversationID = conversationID
-        updated.conversationTitle = conversations.first(where: { $0.id == conversationID })?.displayTitle
-            ?? (conversationID.isEmpty ? "" : conversationID)
-        updated.isCore = isCore
-        updated.baseWeight = LongTermMemory.clampBaseWeight(baseWeight)
-        updated.updatedAt = Date()
-        // 用户编辑后转为手动记忆，避免后续自动总结覆盖手写内容。
-        updated.source = "manual"
-        onSave(updated)
-        dismiss()
-    }
-}
-
-// MARK: - Cleanup sheet
-
-enum MemoryClearScope {
-    case current
-    case all
-}
-
-private struct MemoryCleanupSheet: View {
-    let conversationTitle: String?
-    let conversationMessages: Int
-    let totalMessages: Int
-    let isBusy: Bool
-    let onClear: (MemoryClearScope) -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var scope: MemoryClearScope = .current
-    @State private var confirmed = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            HStack(spacing: 11) {
-                Image(systemName: "trash.fill")
-                    .font(.system(size: 22))
-                    .foregroundStyle(Theme.danger)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(L("清理记忆库")).font(.headline)
-                    Text(L("此操作不可撤销")).font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
+                    .disabled(isLoading)
             }
 
-            Text(L("删除本地 SQLite 中保存的聊天记录。微信端的消息不会受影响。"))
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Divider().opacity(0.5)
 
-            VStack(alignment: .leading, spacing: 8) {
-                if let conversationTitle {
-                    scopeRow(
-                        scope: .current,
-                        title: "仅清理当前会话",
-                        detail: "\(conversationTitle) · \(conversationMessages) 条消息"
+            Group {
+                if isLoading {
+                    LoadingState(title: "生成预览…")
+                } else if let result, !result.isEmpty {
+                    ScrollView {
+                        Text(result)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                    }
+                    .background(
+                        Color.primary.opacity(0.035),
+                        in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    )
+                } else {
+                    EmptyState(
+                        symbol: "text.magnifyingglass",
+                        title: "没有可注入的记忆",
+                        message: "当前没有命中的生效记忆，或该会话还没有记忆卡。可先输入关键词再试。"
                     )
                 }
-                scopeRow(
-                    scope: .all,
-                    title: "清空全部记忆",
-                    detail: "\(totalMessages) 条消息，所有会话"
-                )
             }
-            .padding(10)
-            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-
-            InlineNotice(
-                kind: .warning,
-                title: "清理前请确认",
-                message: "清理后无法恢复，AI 也将失去这段上下文。建议先在「设置 → 数据」中备份。"
-            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             HStack {
                 Spacer()
-                Button(L("取消")) { dismiss() }
+                Button(L("关闭")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button(isBusy ? "清理中…" : "确认清理") {
-                    onClear(scope)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.danger)
-                .keyboardShortcut(.defaultAction)
-                .disabled(isBusy)
             }
         }
-        .padding(22)
-        .frame(width: 470)
+        .padding(20)
+        .frame(width: 660, height: 580)
         .background(.regularMaterial)
-        .onAppear {
-            if conversationTitle == nil { scope = .all }
-        }
+        .task { await loadPreview() }
     }
 
-    private func scopeRow(scope target: MemoryClearScope, title: String, detail: String) -> some View {
-        Button {
-            scope = target
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: scope == target ? "largecircle.fill.circle" : "circle")
-                    .font(.system(size: 13))
-                    .foregroundStyle(scope == target ? Theme.danger : Color.secondary)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(L(title)).font(.callout)
-                    Text(L(detail)).font(.caption2).foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-            .padding(6)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(scope == target ? [.isSelected] : [])
-    }
-}
-
-// MARK: - Message row
-
-private struct MemoryMessageRow: View, Equatable {
-    let message: ChatMessage
-    var conversationTitle: String?
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            AvatarView(title: message.displaySender, kind: .direct, size: 22)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(message.displaySender)
-                        .font(.caption.weight(.medium))
-                    if message.isOutgoing {
-                        PillLabel(text: "我", color: Theme.accent)
-                    }
-                    if let conversationTitle {
-                        PillLabel(text: conversationTitle, color: Theme.info)
-                    }
-                    Spacer(minLength: 4)
-                    Text(UIFormat.stamp(message.timestamp))
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                }
-                Text(displayText)
-                    .font(.callout)
-                    .foregroundStyle(.primary)
-                    .lineLimit(3)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
-        .accessibilityElement(children: .combine)
-    }
-
-    private var displayText: String {
-        if !message.text.isEmpty { return message.text }
-        switch message.kind {
-        case .image: return "[图片]"
-        case .voice: return "[语音]"
-        case .emoji: return "[表情]"
-        case .file: return "[文件]"
-        case .video: return "[视频]"
-        case .link: return "[链接]"
-        case .system: return "[系统消息]"
-        case .text: return "[空消息]"
-        }
+    private func loadPreview() async {
+        isLoading = true
+        result = await store.previewCharacterRecall(
+            conversationID: conversationID,
+            query: query.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        isLoading = false
     }
 }

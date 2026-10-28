@@ -28,9 +28,18 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
   可 @ 拍的人；「引用机器人」默认可选，别人引用机器人的消息时唤醒）；
   **唤醒后免唤醒词**（默认关闭，同一发送者在 1–60 分钟窗口内继续发言无需再次唤醒）
 - **白 / 黑名单**（会话 ID 或 wxid）、冷却、每分钟限流、工作时段，均可按会话覆盖
-- **按会话人格** / 系统提示词 / 模型与温度覆盖；DeepSeek、OpenAI、Ollama 或任意 OpenAI 兼容端点
-- **记忆**：10 条短期窗口 + 8 条批量总结；会话文件夹；综合权重 = 基础 × 重要度 × 召回 × 30 天半衰期，基础权重可调
-- **多微信账号数据隔离**：聊天记录、长期记忆、会话设置、机器人配置、人格、定时任务与新媒体
+- **按会话选择人格** / 通道与模型覆盖，温度按模型配置；DeepSeek、OpenAI、Ollama 或任意 OpenAI 兼容端点
+- **记忆 v2（2026-10-28）**：一个微信会话一个记忆卡目录（`characters/<会话>/memory.sqlite`）；
+  人格统一来自「人格设定」（会话只记录绑定，不再每会话复制 `persona.md`）；
+  事实/决策/待办/经验四类记忆，最近 72h/重要/关键词相关
+  加权召回（新卡默认空，机器人回复后自动提取）；0.92 相似度自动折叠、冲突 supersede 留档、
+  普通 30 天/重要 180 天半衰期与自动归档；
+  每 N 条互动后台批量 AI 提取，全量互动永久保存；另有固定**全局共享记忆**
+  （`characters/c-__global__/`，手动维护、注入所有会话、不自动提取且不可删除）；
+  App 记忆面板支持查看/编辑/置顶/压缩/导出（Markdown/JSON），旧记忆手动导入；
+  聊天记录清理在具体会话内操作（只删本地消息，不动记忆卡/全量记录），不开放微信 `/记忆` 指令。
+  详见 [`docs/memory.md`](docs/memory.md)
+- **多微信账号数据隔离**：聊天记录、记忆卡（角色目录）、会话设置、机器人配置、人格、定时任务与新媒体
   按当前微信账号自动切换；AI 模型、Hook、OneBot、Keychain、语音模型与文件日志全局共享。
   升级旧版时旧单库/旧媒体只复制保留、不删除；运行中换号会停止机器人，需手动重新启动。
   详见 [`docs/accounts.md`](docs/accounts.md)
@@ -63,7 +72,7 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
 
 | 模块 | 状态 |
 | --- | --- |
-| SwiftUI App / Swift 核心 | ✅ 473 项测试（8 项按环境跳过：模型未下载/联网/真实 E2E）；4.1.15.55 / 4.2.0.5 文本真机 E2E |
+| SwiftUI App / Swift 核心 | ✅ 504 项测试（8 项按环境跳过：模型未下载/联网/真实 E2E）；4.1.15.55 / 4.2.0.5 文本真机 E2E |
 | OneBot bridge（Go） | ✅ 构建 / 鉴权 / 真机附加 / 64 顶层 · 76 子测试通过 |
 | 首启向导 / 安装 | ✅ CLT 检测与安装引导、微信版本 / Hook 预检、备份约 665MB（磁盘需 ≥2.5GB） |
 | 微信 4.1.12.53 | ✅ legacy 收发 + 主动发送 |
@@ -87,8 +96,8 @@ WeChatAI.app (SwiftUI)          bridge/onebot (Go)              WeChat.app
 
 ### 快速开始
 
-- **普通用户**：下载 [`WeChat-AI-1.6.2.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.6.2/WeChat-AI-1.6.2.zip)
-  （约 72 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.6.2/WeChat-AI-1.6.2.zip.sha256)），
+- **普通用户**：下载 [`WeChat-AI-1.7.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.7.0/WeChat-AI-1.7.0.zip)
+  （约 72 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.7.0/WeChat-AI-1.7.0.zip.sha256)），
   按下面步骤安装；历史版本见 [Tags](https://github.com/Gusion1017/Mac-WeChat-ChatBot/tags)。
 
   1. 解压得到 `WeChat AI.app`，拖到 `~/Applications`（当前用户，无需管理员）或 `/Applications`（所有用户）。
@@ -146,7 +155,7 @@ App 内可在 设置 → Hook → 还原官方微信 一键还原（还原前先
 ### 目录结构
 
 ```
-app/        SwiftUI App（SwiftPM）+ 473 项测试；app/Vendor/（sherpa-onnx 静态库）不入库
+app/        SwiftUI App（SwiftPM）+ 504 项测试；app/Vendor/（sherpa-onnx 静态库）不入库
 bridge/     Go OneBot 桥接（GPL-3.0 衍生，改动见 NOTICE）；silkenc/ SILK 编码，testdata/ 测试样本
 hook/       script.js（唯一事实来源）与版本地址表
 tools/      Hook 安装、备份、还原
@@ -163,16 +172,16 @@ dist/       发布产物（zip / sha256，不入库）
 ### 开发与测试
 
 ```bash
-bash scripts/check.sh               # 静态检查 + Swift 473 项测试
+bash scripts/check.sh               # 静态检查 + Swift 测试
 bash scripts/build_bridge.sh        # Go 构建 + Go 测试
 bash scripts/fetch_sherpa.sh        # sherpa-onnx 静态库（build_app 会自动补）
 bash scripts/package_release.sh     # Releases 用 zip + sha256
 make release                        # 同上：构建 → 打包 → 签名校验 → sha256
 ```
 
-发布产物为 `dist/WeChat-AI-1.6.2.zip`（约 72MB）与 `.sha256`。打包脚本会自动
+发布产物为 `dist/WeChat-AI-1.7.0.zip`（约 72MB）与 `.sha256`。打包脚本会自动
 `codesign --verify --strict`；`spctl -a -vv` 对 ad-hoc 未公证包预期返回 `rejected`（属正常），
-分发前在 `dist/` 内用 `shasum -a 256 -c WeChat-AI-1.6.2.zip.sha256` 校验。
+分发前在 `dist/` 内用 `shasum -a 256 -c WeChat-AI-1.7.0.zip.sha256` 校验。
 
 改了 `hook/script.js` 记得跑 `bash scripts/sync_hook_script.sh`。接口 / 行为变更先改 `docs/` 再改代码。
 GitHub Actions 只跑 Linux 可完成的检查（文档链接、脚本语法、副本一致、无构建产物）。
@@ -225,15 +234,25 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
   sender can keep chatting for a 1–60 minute window)
 - **Allow / block lists** (conversation ID or wxid), cooldown, per-minute rate limit and working
   hours, all overridable per conversation
-- **Per-conversation personas**, system prompts, model and temperature overrides; DeepSeek, OpenAI,
-  Ollama or any OpenAI-compatible endpoint
-- **Memory**: 10-message short-term window + batch summaries of 8; conversation folders; combined
-  weight = base × importance × recall × 30-day half-life, with an adjustable base weight
-- **Multi-account data isolation**: chats, long-term memory, conversation settings, bot config,
-  personas, schedules and new media automatically follow the current WeChat account, while AI models,
-  hook, OneBot, Keychain, voice models and file logs stay global. Upgrading copies the legacy
-  database/media without deleting them; a running bot stops on account switch and must be restarted
-  manually. See [`docs/accounts.md`](docs/accounts.md)
+- **Per-conversation persona selection** plus channel and model overrides, with temperature
+  configured per model; DeepSeek, OpenAI, Ollama or any OpenAI-compatible endpoint
+- **Memory v2 (2026-10-28)**: one memory-card directory per WeChat conversation
+  (`characters/<conversation-key>/memory.sqlite`); persona comes from the single "Persona"
+  settings template (conversations only store the binding — no per-conversation `persona.md`);
+  typed memories (fact/decision/todo/lesson) recalled by last 72 h → important → keyword
+  relevance (new cards start empty and fill from extracted replies); ≥0.92 similarity auto-merge,
+  conflicting memories kept via supersede,
+  30/180-day half-lives with auto-archiving; background AI extraction every N messages plus a full
+  interaction archive. A fixed **global shared memory** card (`characters/c-__global__/`) is
+  manually maintained and injected into every conversation (never auto-extracted, cannot be
+  deleted). The App memory panel supports view/edit/pin/compress/export (Markdown/JSON), manual
+  legacy import; chat cleanup is per-conversation (local messages only, cards/archive untouched);
+  no WeChat `/memory` command. See [`docs/memory.md`](docs/memory.md)
+- **Multi-account data isolation**: chats, memory cards (character directories), conversation
+  settings, bot config, personas, schedules and new media automatically follow the current WeChat
+  account, while AI models, hook, OneBot, Keychain, voice models and file logs stay global.
+  Upgrading copies the legacy database/media without deleting them; a running bot stops on account
+  switch and must be restarted manually. See [`docs/accounts.md`](docs/accounts.md)
 - **Human-like delay**, reply progress countdown, sleep prevention, scheduled messages, live
   conversation board and runtime logs
 - **Device & Account**: the Overview card and menu-bar popover show the Mac's battery percentage,
@@ -269,7 +288,7 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
 
 | Component | Status |
 | --- | --- |
-| SwiftUI app / Swift core | ✅ 473 tests passing (8 environment-gated skips: models not downloaded / network / live E2E); text E2E on 4.1.15.55 / 4.2.0.5 |
+| SwiftUI app / Swift core | ✅ 504 tests (8 environment-gated skips: models not downloaded / network / live E2E); text E2E on 4.1.15.55 / 4.2.0.5 |
 | OneBot bridge (Go) | ✅ builds / auth / device attach / 64 top-level · 76 subtest cases passing |
 | First-run wizard / install | ✅ CLT detection and install guidance, WeChat version / hook preflight, ~665MB backup (needs ≥2.5GB disk) |
 | WeChat 4.1.12.53 | ✅ legacy send + receive |
@@ -296,8 +315,8 @@ Contracts in [`docs/architecture.md`](docs/architecture.md); document index in
 ### Quick Start
 
 - **Regular users**: download
-  [`WeChat-AI-1.6.2.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.6.2/WeChat-AI-1.6.2.zip)
-  (~72 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.6.2/WeChat-AI-1.6.2.zip.sha256))
+  [`WeChat-AI-1.7.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.7.0/WeChat-AI-1.7.0.zip)
+  (~72 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.7.0/WeChat-AI-1.7.0.zip.sha256))
   and follow these steps; older versions are on [Tags](https://github.com/Gusion1017/Mac-WeChat-ChatBot/tags).
 
   1. Unzip `WeChat AI.app` and drag it to `~/Applications` (current user, no admin) or
@@ -361,7 +380,7 @@ remain in the known-supported list and install directly (their version files are
 ### Repository Layout
 
 ```
-app/        SwiftUI app (SwiftPM) + 473 tests; app/Vendor/ (sherpa-onnx static libs) is not committed
+app/        SwiftUI app (SwiftPM) + 504 tests; app/Vendor/ (sherpa-onnx static libs) is not committed
 bridge/     Go OneBot bridge (GPL-3.0 derivative, changes listed in NOTICE); silkenc/ official SILK encoder, testdata/
 hook/       script.js (single source of truth) and version address tables
 tools/      hook install, backup and restore
@@ -378,17 +397,17 @@ Rebuildable, never committed: `app/.build*`, `app/Vendor/`, `bridge/onebot`, `di
 ### Build and Test
 
 ```bash
-bash scripts/check.sh               # static checks + 470 Swift tests
+bash scripts/check.sh               # static checks + Swift tests
 bash scripts/build_bridge.sh        # Go build + Go tests
 bash scripts/fetch_sherpa.sh        # sherpa-onnx static libs (build_app fetches if missing)
 bash scripts/package_release.sh     # release zip + sha256
 make release                        # same: build → package → signature check → sha256
 ```
 
-The release artifacts are `dist/WeChat-AI-1.6.2.zip` (~72MB) and `.sha256`. Packaging runs
+The release artifacts are `dist/WeChat-AI-1.7.0.zip` (~72MB) and `.sha256`. Packaging runs
 `codesign --verify --strict`; `spctl -a -vv` reports `rejected` for an ad-hoc, non-notarized bundle
 (that is expected). Verify before publishing with
-`cd dist && shasum -a 256 -c WeChat-AI-1.6.2.zip.sha256`.
+`cd dist && shasum -a 256 -c WeChat-AI-1.7.0.zip.sha256`.
 
 After editing `hook/script.js`, run `bash scripts/sync_hook_script.sh`. Change `docs/` before code
 for interface or behaviour changes. GitHub Actions only runs Linux-friendly checks (docs links,

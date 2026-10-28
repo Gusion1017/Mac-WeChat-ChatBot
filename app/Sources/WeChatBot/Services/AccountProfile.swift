@@ -50,12 +50,17 @@ struct AccountLayout: Equatable, Sendable {
         directory(for: id).appendingPathComponent("logs", isDirectory: true)
     }
 
+    /// 记忆 v2 的角色目录（每会话一个记忆卡；人格来自人格设定）。
+    func charactersDirectory(for id: String) -> URL {
+        directory(for: id).appendingPathComponent("characters", isDirectory: true)
+    }
+
     /// 旧版迁移标记（仅迁移目标账号有）。
     func legacyMigrationMarkerFile(for id: String) -> URL {
         directory(for: id).appendingPathComponent("legacy-migration.json")
     }
 
-    /// 幂等创建账号目录（accounts/、账号目录、media/、logs/）。
+    /// 幂等创建账号目录（accounts/、账号目录、media/、logs/、characters/）。
     /// 非法 ID（含 `_unassigned` 以外的保留名/路径穿越）直接忽略；调用方负责先校验。
     func ensureDirectories(for id: String) {
         guard id == AppAccount.unassignedID || AppAccount.isValidID(id) else { return }
@@ -65,6 +70,7 @@ struct AccountLayout: Equatable, Sendable {
             directory(for: id),
             mediaDirectory(for: id),
             logsDirectory(for: id),
+            charactersDirectory(for: id),
         ] {
             try? fileManager.createDirectory(at: url, withIntermediateDirectories: true)
         }
@@ -227,6 +233,12 @@ enum AccountProfile {
     static var logsDirectory: URL {
         let snapshot = currentState()
         return snapshot.layout.logsDirectory(for: snapshot.activeID)
+    }
+
+    /// 当前账号的记忆 v2 角色目录（`accounts/<id>/characters/`）。
+    static var charactersDirectory: URL {
+        let snapshot = currentState()
+        return snapshot.layout.charactersDirectory(for: snapshot.activeID)
     }
 
     // MARK: Detection

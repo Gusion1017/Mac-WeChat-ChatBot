@@ -1291,6 +1291,16 @@ struct BotSettings: Codable, Hashable {
         set { voice = newValue }
     }
 
+    /// 记忆 v2 设置（2026-10-28 起）。nil 表示旧配置，使用默认值。
+    /// 随账号 `profile.json` 保存；缺键不会影响旧配置解码。
+    var memory: MemorySettings?
+
+    /// 记忆设置的读写入口：nil 时返回默认值并收敛范围。
+    var memorySettings: MemorySettings {
+        get { (memory ?? MemorySettings.default).sanitized }
+        set { memory = newValue.sanitized }
+    }
+
     /// 生效的语音转写总开关（旧配置缺省开启）。
     var voiceTranscriptionEnabled: Bool {
         get { voiceSettings.transcriptionEnabled }
@@ -1497,7 +1507,7 @@ extension BotSettings {
         case enabled, dryRun, replyToDirect, groupTrigger, groupTriggers, keywords
         case commandPrefix, ignoreSelf, ignoreOfficialAccounts, cooldownSeconds
         case maxRepliesPerMinute, maxContextMessages, workingHours, humanize
-        case defaultProviderID, defaultPersonaID, pat, wakeWindow, voice
+        case defaultProviderID, defaultPersonaID, pat, wakeWindow, voice, memory
         case imageFetchEnabled, selfMentionNames, whitelistEntries, blacklistEntries
         case whitelistConversations, blacklistConversations, whitelistUsers, blacklistUsers
     }
@@ -1535,6 +1545,7 @@ extension BotSettings {
         pat = try? container.decodeIfPresent(PatReplySettings.self, forKey: .pat)
         wakeWindow = try? container.decodeIfPresent(WakeWindowSettings.self, forKey: .wakeWindow)
         voice = try? container.decodeIfPresent(VoiceSettings.self, forKey: .voice)
+        memory = try? container.decodeIfPresent(MemorySettings.self, forKey: .memory)
         imageFetchEnabled = try? container.decodeIfPresent(Bool.self, forKey: .imageFetchEnabled)
         selfMentionNames = try? container.decodeIfPresent(
             [String: String].self, forKey: .selfMentionNames)

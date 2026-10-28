@@ -1,386 +1,569 @@
-# 记忆系统（短期窗口 + 批量长期总结）
+# 记忆系统 v2：会话记忆卡 · 人格设定
 
-记忆系统由三部分组成：
+> 2026-10-28 起，记忆系统按「SurfCore 记忆方案」重做。旧的「10 条短期窗口 + 每 8 条滚动总结」
+> 长期记忆页进入只读兼容期：表结构、数据和单测继续保留，但运行中的召回、提取与记忆页
+> 全部切换到 v2。旧记忆不会自动迁移，可在「记忆卡」页用「导入旧记忆」手动导入。
+>
+> **一句话**：一个微信会话 = 一个记忆卡目录（`characters/<key>/memory.sqlite`）；
+> 人格统一来自「人格设定」（全局 `Persona`），不再为每个会话复制人设卡。记忆分
+> 事实/决策/待办/经验四类、普通/重要两级，按时间、重要度、使用频率加权，支持
+> 0.92 相似度自动折叠、冲突 supersede 留档、72 小时最近记忆优先召回、全量互动记录永久保存，
+> 并可导出 Markdown/JSON。
+>
+> **人格单一来源（2026-10-28）**：删除每会话 `persona.md`；角色目录只保留 `memory.sqlite`。
+> 人格名称/摘要/系统提示词/模型都以人格设定为准，修改后下一轮回复立即生效；旧版残留的
+> `persona.md` 会在创建/加载记忆卡时 best-effort 移到废纸篓，不再读取。
+>
+> **新卡默认空（2026-10-28）**：创建记忆卡不再写入「角色名/初始设定」初始记忆；
+> 旧库中的相关行在打开时迁移（见 §4.3）。
 
-- **短期记忆**：每个会话最近 10 条消息，进入当轮提示词；
-- **长期记忆**：短期窗口之外的旧消息攒够一批后由 AI（或本地兜底）总结，
-  以「记忆文件夹」的形式在记忆页浏览、编辑和标记核心；
-- **本会话早期片段召回**：当轮消息关键词命中本会话窗口外的旧消息时，
-  最多注入 3 条带说话人标注的片段，并明确提示可能已过时。
+## 1. 变更摘要
 
-数据全部保存在本地 SQLite（当前微信账号的 `accounts/<wxid>/chatbot.sqlite`），不依赖云端。
-
-> **多微信账号（2026-10-27）**：短期窗口、长期记忆、`memory_state` 游标与记忆页都绑定
-> **当前微信账号的账号库**；换一个微信账号登录后，看到的是该账号自己的记忆，不会串号。
-> 旧版单库在首次升级时复制到旧 `self_id` 对应的账号档案（只 copy 不删）；旧媒体仍保留在根
-> `media/`。隔离矩阵、识别与切号流程见 [`accounts.md`](accounts.md)。
-
-## 1. 短期记忆窗口
-
-### 1.1 窗口大小与拼装
-
-- 每个会话的短期窗口固定为 **最多 10 条消息**（`ChatEngine.shortTermMemoryLimit`）。
-- `ChatEngine.buildMessages` 取历史 `suffix(min(settings.bot.maxContextMessages, 10))`；
-  设置页 `maxContextMessages` 上限同样是 10。
-- 近期上下文按方向映射 `user` / `assistant`，同角色相邻消息合并；当前消息保证在末尾。
-- 超出 10 条的旧消息不进入本轮提示词：由后台批量总结写入长期记忆（§3），
-  或被本会话早期片段召回（§2）。
-
-### 1.2 群聊发言人标注
-
-- **群聊**：每条 incoming 消息（历史 user 消息与当前消息）内容统一为
-  **「昵称(wxid)：内容」**（`senderName` 为空时直接为「wxid：内容」）：
-  - 发言人优先取 `senderName`，同时附上 `senderID`；为空时回退 `senderID`；
-  - `我` / `系统` / `self` 等占位名不作为发言人，保留原文；
-  - 自己的历史消息作为 `assistant` 原文发送，不加前缀。
-- **为什么带 wxid**：长期记忆里的人员对应关系以 wxid 为键（「wxid：称呼」）；
-  群昵称会被成员修改、也可能重名。只给昵称时模型无法把发言人与记忆精确对齐，
-  会凭印象套用别人的称呼（真机误叫他人的直接原因）。带上 wxid 后，
-  消息与记忆共享同一个稳定键。
-- **私聊**：不加发言人前缀，减少提示词噪声。
-- **本轮身份硬约束**：群聊每轮在 system prompt **最后**再追加一条
-  「【本轮发言人身份】昵称（wxid）…」，由核心/手写记忆里的 `wxid：称呼`
-  解析得到（`ChatEngine.speakerIdentityNote` / `personMappings(in:)`）。
-  该条明确：群聊里其他人的玩笑、临时外号、自称或“某人其实是某人”的说法
-  不能作为身份依据，不要附和；当前 wxid 不在映射表时提示不要套用别人的称呼。
-- 群聊的 system prompt 说明消息格式、括号内是微信 ID，要求**以 wxid 对照长期记忆**；
-  记忆里找不到该 wxid 时直接使用消息里的昵称或「你」，**回复时不要输出 wxid**。
-- 实现：`ChatEngine.attributedUserText(_:message:isGroupChat:)`、
-  `ChatEngine.promptSpeakerLabel(for:)`、`ChatEngine.speakerIdentityNote(...)`
-  与 `ChatEngine.speakerLabel(for:)`。
-
-## 2. 本会话早期片段召回
-
-`ChatEngine.recallEarlierMessages(conversation:incoming:history:)` 在每轮拼装提示词时
-按关键词召回**本会话**较早的相关片段：
-
-- **只搜当前会话**：其它会话的消息原文不再进入当前对话。
-- **排除范围**：短期窗口内的消息（`history.suffix(shortTermMemoryLimit)`）、
-  当前消息本身、系统消息，以及时间晚于当前消息的消息。
-- **关键词**：当前消息去空白后长度 ≥ 2 字，用 `memoryTokens` 按 CJK / ASCII 切词，
-  最多取前 2 个 token 分别做 SQLite `LIKE` 检索（每个 token 取 12 条候选）。
-- **上限与去重**：去重后最多 **3 条**（`ChatEngine.earlierRecallLimit`），
-  每条片段截取前 120 字。
-- **标注**：发出去的消息标「我：」；私聊收到的消息标「对方：」；
-  群聊收到的消息显示发言人（`promptSpeakerLabel`：`senderName(wxid)`，
-  `senderName` 为空时直接用 wxid），取不到时显示「对方」。
-- **注入标题**固定为：
-
-  ```
-  本会话较早的相关片段（可能已过时，仅供参考）：
-  ```
-
-  明确提醒模型这些是较早的原文片段、可能已被后续对话修正，不能当作最新事实。
-- 与长期记忆注入（§4）同时存在，作为两段独立的提示词内容。
-
-## 3. 批量总结策略
-
-相关常量（`ChatEngine`）：
-
-| 常量 | 值 | 含义 |
+| 维度 | 旧机制（v1，只读兼容） | 新机制（v2） |
 | --- | --- | --- |
-| `shortTermMemoryLimit` | 10 | 短期窗口保留条数 |
-| `overflowBatchThreshold` | 8 | 窗口外未总结消息攒够多少条触发一次总结 |
-| `maxOverflowBatch` | 40 | 单次总结的消息上限 |
-| `summaryCharacterLimit` | 600 | 长期记忆正文长度上限 |
-| `summaryBulletLimit` | 5 | 长期记忆正文的要点条数上限 |
+| 存储 | 账号库 `chatbot.sqlite` 的 `memories` 表 | 每会话目录 `characters/<key>/memory.sqlite`（只有记忆卡，没有 `persona.md`） |
+| 人格 | 全局人格模板（profile.json） | **人格设定（全局 `Persona`）唯一来源**；会话只记录 `personaID` 绑定，不复制人设卡 |
+| 记忆形态 | 每会话一条滚动摘要（600 字） | 多条原子记忆，带类别/重要度/关键词/来源消息 |
+| 全局记忆 | 无 | 固定伪角色 `__global__`（「全局共享」），只手动维护，注入所有会话 |
+| 初始状态 | 首条摘要由窗口外消息生成 | 新卡默认空；机器人回复后按批量提取写入 |
+| 记忆分类 | 无 | `fact` / `decision` / `todo` / `lesson` |
+| 记忆等级 | 无 | `normal` / `important`；置顶不衰减 |
+| 老化 | 30 天半衰期 + 使用强化 | 普通 30 天、重要 180 天半衰期；置顶不衰减；长期未访问压缩归档 |
+| 去重 | 滚动合并成一条 | 相似度 ≥ 0.92 自动折叠；冲突 supersede，双方留档 |
+| 召回 | 核心/手写/自动总结，最多 6 条 | 最近 72h → 重要 → 关键词相关，按 token 预算裁剪 |
+| 提取 | 每 8 条窗口外消息 AI 总结 | 每 N 条（默认 8）互动 AI 批量提取结构化记忆 |
+| 全量记录 | 仅账号消息表 | 记忆卡内 `interactions` 永久保存文本互动，不随聊天记录清理删除 |
+| 指令 | 无 | 不开放微信 `/记忆`；只在 App 记忆面板查看/编辑/置顶/压缩/导出 |
+| 账号隔离 | 账号库隔离 | 账号目录 `accounts/<id>/characters/` 隔离，随账号切换 |
 
-### 3.1 游标与批量判定
-
-`MemoryStore.pendingMemoryOverflow(conversationID:keep:minOverflow:maxMessages:)`：
-
-- 用 `messages.rowid` 保留最近 `keep`（默认 10）条消息，得到 cutoff；
-- `memory_state.last_summarized_rowid` 记录每个会话的总结游标，避免重复总结；
-- 统计游标与 cutoff 之间**未总结消息总数**：
-  - 若 `未总结数 < minOverflow` → 返回 `nil`，本次不总结；
-  - 否则按 rowid 升序返回最多 `maxMessages` 条，`lastRowID` 用于推进游标；
-- 游标推进后，剩下的窗口外消息继续累积，等攒够下一个批量阈值再总结。
-
-`ChatEngine.summarizeOverflow` 使用 `minOverflow = overflowBatchThreshold`、
-`maxMessages = maxOverflowBatch`。阈值 8 把「窗口外尚未总结」的遗忘区间压到最多 7 条：
-
-- **12 条消息**：窗口外只有 2 条，不足 8 条，不总结；
-- **18 条消息**：窗口外 8 条，一次总结最早的 **8 条**（累计 8 条，自动记忆仍只有 1 条）；
-- **26 条消息**：窗口外未总结的下一批又攒够 8 条，再总结 **8 条**（累计 16 条）；
-- **70 条消息**（续上例）：窗口外待总结 44 条，单批上限 40 条，本次只取最早的 40 条，
-  剩余 4 条继续累积；
-- 之后每新增 8 条窗口外消息触发一次 AI 调用，单次最多 40 条。
-
-### 3.2 滚动合并、手写记忆与历史清理
-
-- 同一会话只保留一条自动记忆（`source = "summary"` 且 `is_core = 0`）：
-  `sourceCount` 累加、`updatedAt` 刷新、摘要滚动更新。
-- 总结前若发现同一会话存在**多条**历史自动总结（旧版本遗留）：
-  - 累加它们的 `sourceCount`；
-  - 用 `MemorySummaryCompactor` 合并摘要；
-  - 保留最新一条，删除其余（best-effort，失败只记日志、不阻塞总结）。
-- **核心/手写记忆优先**：同会话的 `source = "manual"` 记忆（含编辑过的自动记忆）
-  与 `is_core = 1` 的记忆都独立保留，自动总结不会覆盖；总结时会把**核心 + 手写**
-  作为「权威参考」传入合并提示（`fetchMemoriesForPrompt` 过滤后传入
-  `ChatEngine.summaryPrompt`），要求保留原意、不重复罗列。
-- **人物归属防污染**：当核心/手写记忆里存在本会话的 `wxid：称呼` 映射时：
-  - 总结提示明确要求模型**不要输出「人物与称呼」段**，也不要记录群聊里的玩笑、
-    互称、临时外号、自称或“某人其实是某人”的玩梗；冲突时以手写记忆为准；
-  - 传入模型的「已有自动记忆」会先剔除人物段；
-  - 模型输出与本地兜底摘要都会再过一次 `removingPersonMappingLines`，
-    即使模型不遵守也不会写回长期记忆。
-- 核心记忆独立于自动滚动记忆；其作用域与优先级见 §4。
-- `MemoryStore.autoMemories(conversationID:)` 返回同一会话的全部自动总结
-  （按 `updated_at` 降序，正常情况下只有一条）。
-
-### 3.3 AI 提示与本地兜底
-
-AI 提示要求：
-
-- 正文按 **「人物与称呼 / 偏好 / 约定与待办 / 其他」** 结构化组织；
-  **但本会话存在核心/手写 `wxid：称呼` 映射时，明确要求模型不输出「人物与称呼」段**，
-  该部分由权威映射维护；
-- 最多 **5 条要点**（`summaryBulletLimit`），每行以 `- ` 开头，总长不超过 **600 字**；
-- 与已有自动记忆**合并去重**；
-- 保留事实、偏好、约定和未完成事项；
-- 删除已解决或过时的细节；**不要编造**；
-- **不要把群聊里的玩笑、互称、临时外号、自称或“某人其实是某人”的玩梗写成人物归属**；
-  与手写/核心记忆冲突时以手写/核心为准，宁可不写也不要记录冲突说法；
-- **不要罗列成员 wxid 清单**，提到人时优先使用已知称呼；
-- 以会话标题/类型（如「小林（私聊）」）作为上下文；
-- 核心 + 手写记忆作为「权威参考」传入，明确要求保留原意、不要覆盖或重复罗列
-  （`ChatEngine.summaryPrompt` 纯函数，便于测试）。
-
-无 Key 或 AI 失败时使用本地兜底 `ChatEngine.localSummary(existing:transcript:)`：
-已有摘要 + 新对话拼接后交给 `MemorySummaryCompactor`，同样不超过 600 字符，
-**不再截取 1800 字原文**。
-
-日志会写清批量条数与累计条数，例如：
+## 2. 目录与文件
 
 ```
-长期记忆已更新（小林，批量合并 8 条旧消息（单批上限 40），累计 16 条，权重 1.82）
+accounts/<微信账号 id>/
+├── chatbot.sqlite                 # 会话/消息/日志/设置（仍由 MemoryStore 管理）
+├── profile.json                   # 人格设定、机器人设置、定时任务
+└── characters/
+    ├── c-__global__/
+    │   └── memory.sqlite          # 全局共享记忆卡（手动维护，注入所有会话）
+    ├── c-wxid_friend01/
+    │   └── memory.sqlite          # 记忆卡（SQLite，WAL）
+    └── c-123456789@chatroom/
+        └── memory.sqlite
 ```
 
-## 4. 长期记忆作用域与提示词注入
+- **一个微信会话一个目录**（用户 2026-10-28 确认）。私聊、群聊、公众号都按会话 ID 建目录；
+  目录在机器人首次为该会话生成回复时惰性创建，`filehelper` 等系统会话未实际回复则不建卡。
+- **新卡默认空**（2026-10-28）：创建时只建 `memory.sqlite` 与 meta
+  （`conversation_id` / `conversation_title` / `conversation_kind` / `persona_id` /
+  `persona_name`、`last_extracted_at`），不写「角色名/初始设定」行。首次使用时可新增手写记忆、
+  导入旧记忆，或等机器人回复后批量提取。
+- **全局共享记忆卡**：固定伪会话 ID `__global__`、标题「全局共享」，
+  目录 `characters/c-__global__/memory.sqlite`；每个微信账号各自一份，见 §4.4。
+- 目录名由会话 ID 编码而来（`CharacterDirectory.key(for:)`）：
+  - 只保留 `A-Z a-z 0-9 . _ - @`，其余 UTF-8 字节按 `%XX` 转义；
+  - 统一加 `c-` 前缀；编码后超过 160 字符时用 `c-<前 60 字符>-<sha256 前 16 位>`；
+  - 权威会话 ID 存在 `memory.sqlite` 的 `meta.conversation_id`，目录名可随时重建。
+- **角色目录只有 `memory.sqlite`**（2026-10-28 人格单一来源）：不再创建、不再读取 `persona.md`。
+  人格名称/摘要/系统提示词/模型来自 `profile.json` 的人格设定，见 §3。
+- 旧版本在同一目录留下的 `persona.md` 会在创建/加载该角色记忆卡时 best-effort 移到废纸篓，
+  不阻塞回复、不删除记忆卡；只含 `persona.md` 的旧目录不会被当作有效角色卡，等该会话首次
+  回复时按当前人格设定重建记忆卡。
+- 账号目录整体由 `AccountProfile` 管理：旧版单库迁移、`_unassigned` 认领都会递归复制
+  `accounts/<id>/` 下的全部内容，因此 `characters/` 自动跟随，不需要单独迁移脚本。
+- 记忆卡**只属于当前微信账号**；换号后看到的是新账号自己的角色目录。人格设定同样随账号
+  `profile.json` 切换。
+- 写入约定：`memory.sqlite` WAL + `synchronous=NORMAL`；所有 DB 操作在 `CharacterStore`
+  actor 内串行，不占主线程。
 
-`ChatEngine.recallLongTermMemory` 调用
-`MemoryStore.fetchMemoriesForPrompt(conversationID:limit:)`（默认最多 6 条）：
+## 3. 人格来源（人格设定）
 
-- **作用域**：只注入「**当前会话 + 全局**」记忆（`conversation_id` 为当前会话或为空）；
-  核心记忆同样遵守作用域，**其它会话的核心记忆不再注入本会话**。
-  记忆页仍展示全部记忆；作用域限制只影响提示词注入。
-- **优先级**：核心 → 手写 → 自动总结；同一优先级内按综合权重降序，
-  权重相同时按更新时间降序；摘要相同的记忆去重。
-  核心记忆之间同样按综合权重排序，可在编辑器调整**基础权重**改变先后顺序；
-  注入总数受 `ChatEngine.longTermMemoryLimit`（默认 6 条）限制，核心记忆优先占用名额，
-  超出时保留权重更高的核心记忆。
-- **冲突规则**：核心/手写记忆优先于自动总结，冲突时以核心/手写为准；
-  自动总结仅供参考。具体落地：
-  - 当本会话存在核心/手写 `wxid：称呼` 映射时，自动总结的「人物与称呼」段
-    **不注入提示词**（`ChatEngine.promptSummary(...)` → `removingPersonMappingLines`），
-    避免和权威映射打架；自动总结仍保留偏好/约定/其他内容；
-  - 群聊每轮在 system prompt 末尾追加「本轮发言人身份」硬约束
-    （`speakerIdentityNote`），明确群聊里的玩笑/自称/临时外号不能覆盖映射；
-  - 没有核心/手写映射时，自动总结的人物信息仍会注入，作为兜底。
-- **注入格式**：每条记忆一行，带来源/作用域/权重标签：
+### 3.1 唯一来源
 
-  ```
-  - [★核心·本会话·权重 1.82] 用户叫小林，喜欢猫
-  - [手写·全局·权重 1.41] 回复尽量简短
-  - [自动·本会话·权重 1.20] 约定周末去杭州
-  ```
+- 人格设定（`PersonasView` / `profile.json` 的 `personas`）是人格名称、摘要、系统提示词与
+  模型的**唯一来源**。人格设定是模板库，不再为每个会话复制人设卡。
+- 会话→人格绑定固定为 `conversation.personaID ?? bot.defaultPersonaID`；解析不到人格时，
+  提示词回退 `Persona.defaultSystemPrompt`，展示名回退会话标题。
+- 没有每会话人设卡编辑器，也没有每会话模型/提示词覆盖；在人格设定里修改后，所有使用该
+  人格的会话**下一轮回复立即生效**，不需要重启。
+- `Persona.model` 非空时由运行时应用到该会话的回复请求（语义与旧版一致）。
+- 记忆卡只缓存展示用的 `persona_id` / `persona_name` meta；**不保存 systemPrompt 副本**，
+  人格始终以人格设定为准。
 
-  段首说明为「长期记忆（核心/手写优先，自动总结仅供参考，冲突时以核心/手写为准；
-  权重越高表示越重要、越近或越常用）」。
-- **召回即使用**：注入后 best-effort 调用 `MemoryStore.recordMemoryAccess(ids:at:)`，
-  只做 `access_count + 1` 并刷新 `last_accessed_at`，
-  **不修改摘要、`updated_at` 或 `source_count`**。
+### 3.2 记忆卡的创建
 
-## 5. 综合权重
+- 首次为某会话生成回复时，调用方按 `conversation.personaID ?? bot.defaultPersonaID` 解析
+  人格设定，再调用 `CharacterStore.ensureCharacter(conversation:persona:activationTimestamp:)`：
+  1. 新建角色目录、建 `memory.sqlite`（新卡为空，只写 meta）；
+  2. 初始化 `last_extracted_at = 触发消息时间戳 - 0.001`，让本轮触发消息与其回复进入
+     第一批提取，但不回挖历史聊天。
+- 已存在时只同步 `conversation_title` / `conversation_kind` / `persona_id` / `persona_name`
+  等元信息；**不写初始记忆，也不覆盖任何记忆正文**。
+- 人格设定变化只影响下一轮提示词与新建卡的展示 meta，不需要刷新记忆卡内容。
+- `listCharacters(settings:personas:now:)` 接收「会话 → 当前人格设定快照」映射，仅用于左栏
+  人格名展示；它不写任何人设副本或记忆。
 
-```
-importanceFactor = 1 + 0.12 × log2(1 + max(0, sourceCount))
-usageFactor      = 1 + 0.02 × min(max(0, accessCount), 20)
-decayAnchor      = max(updatedAt, lastAccessedAt ?? .distantPast)
-timeWeight       = max(0.0001, baseWeight × importanceFactor × usageFactor
-                                × 0.5^(距 decayAnchor 天数 / 30))
-```
+### 3.3 旧 `persona.md` 清理
 
-- **重要度**：随合并消息条数对数增长、逐渐饱和，常用范围内约 1~2.2；
-- **使用强化**：每次召回 +2%，最多 20 次（+40%）；
-- **时间衰减**：30 天半衰期；衰减锚点取「最近更新」与「最近召回」中较晚者，
-  更新或召回都会让权重回升，避免每次滚动更新都把旧记忆刷成满权重；
-- **基础权重可调**：`baseWeight` 默认 1.0，可在记忆编辑器里用滑块/预设调整为
-  **0.1~10.0**（步长 0.1）；越界或 NaN 会自动收敛。核心记忆之间也按综合权重排序，
-  调高某条核心记忆的基础权重即可把它排到更前并优先占用注入名额；
-  保存会刷新 `updatedAt`，时间衰减从头计算，编辑器会实时显示保存后的综合权重估算。
-  自动总结/历史合并只做范围收敛，不会把用户调整过的基础权重重置为 1.0。
-- `timeWeight(now:)` / `weightLabel` 接口保留；综合权重用于记忆页排序/展示与
-  提示词同优先级内的排序。
+- 旧版本在每个角色目录复制 `persona.md`。统一人格设定后它只是冗余副本：
+  创建/列出记忆卡时 `CharacterStore` 用 `FileManager.trashItem` best-effort 移到废纸篓。
+- 旧 `persona.md` 里的自定义正文**不会被读取或迁移**；需要保留的提示词请在人格设定中维护。
+  记忆卡 `memory.sqlite` 中的历史记忆不受影响。
 
-## 6. 记忆文件夹（记忆页 · 长期记忆模式）
+## 4. 记忆卡 `memory.sqlite`
 
-- 页面为**左侧文件夹栏 + 右侧记忆列表**（与「聊天记录」模式的双栏结构一致）。
-- 记忆页只读取当前微信账号的账号库：换账号后文件夹、搜索、聊天记录都切到该账号；
-  「全部记忆」= 该账号内的全部记忆，不跨微信账号。
-- 文件夹：
-  - **全部记忆**：所有长期记忆；默认选中；
-  - **全局记忆**：`conversation_id` 为空的全局记忆；
-  - **按会话分组**：只显示有记忆的会话，按会话类型分为「私聊 / 群聊 / 公众号」小节；
-  - **未关联会话**：会话已被删除、但记忆仍残留的兜底文件夹（显示原始会话 ID）。
-- 每个文件夹行显示文件夹名、长期记忆条数、核心记忆条数（星标）；选中项高亮。
-- 选中文件夹后消失（例如删掉最后一条记忆）时自动回退到「全部记忆」。
-- 搜索**跨全部记忆**（忽略当前文件夹），标题提示「跨全部记忆」与结果条数；
-  无搜索时按当前文件夹过滤。
-- 列表工具栏新增：
-  - **排序菜单**：「综合权重」（默认，核心记忆前置、其余按 `timeWeight()` 降序）
-    与「最近更新」（按 `updatedAt` 降序、不强制核心前置，同刻用权重兜底）；
-  - **「仅核心」筛选开关**：只显示核心记忆；
-  - 排序、筛选、搜索与文件夹过滤可叠加。
-- 顶部显示当前文件夹标题、条数、核心数；**综合权重公式不再常驻展示，
-  改为 info 按钮的说明面板**（悬停/点开查看公式与含义）；说明面板注明基础权重可调
-  （0.1~10×）与核心记忆的注入名额。
-- 新增记忆：
-  - 选中**会话文件夹**时预填该 `conversationID`；
-  - **全局文件夹 / 全部文件夹**预填空（全局记忆）；
-  - 编辑 sheet 中仍可改关联会话、核心标记、基础权重与摘要。
-- 卡片保留摘要、来源会话/全局、★核心、权重、更新时间；
-  手工调整过基础权重时额外显示「基础 ×N.N」徽标；
-  新增**来源徽标**：「手写」（`source = "manual"`）或「自动滚动」（`source = "summary"`），
-  以及「合并 N 条」（`sourceCount > 0`）与「召回 N 次」（`accessCount > 0`）信息。
-- 编辑器提示：
-  - **基础权重**：滑块 0.1~10.0×（步长 0.1）+ 0.5×/1×/2×/3×/5× 预设与重置，
-    实时显示保存后的综合权重估算；核心记忆之间也按该权重排序，
-    注入名额最多 `ChatEngine.longTermMemoryLimit` 条。
-  - **核心作用域**：核心记忆也只注入「当前会话 + 全局」，不会注入其它会话；
-    需要所有会话共享时请建**全局记忆**；
-  - **自动转手写**：编辑自动滚动记忆并保存后，该条会转为手写记忆
-    （`source = "manual"`），后续自动总结不会覆盖。
-- 空状态文案区分「记忆库为空」「文件夹为空」「搜索无结果」；
-  阈值说明**引用常量** `ChatEngine.overflowBatchThreshold`，不在 UI 里写死数字。
-- 原有新增/编辑/删除/核心星标/清理 sheet/聊天记录浏览功能保持不变。
-
-## 7. 数据表与迁移
+### 4.1 Schema
 
 ```sql
-memories(id, conversation_id, summary, is_core, base_weight,
-         created_at, updated_at, last_accessed_at,
-         source_count, source, access_count)
-memory_state(conversation_id, last_summarized_rowid, updated_at)
+PRAGMA user_version = 1;
+
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY NOT NULL,
+    value TEXT NOT NULL
+);
+-- 常用键：conversation_id, conversation_title, conversation_kind, schema_version,
+--         persona_id, persona_name, last_extracted_at, last_archive_at,
+--         interactions_backfilled, interactions_synced_at
+
+CREATE TABLE memories (
+    id                 TEXT PRIMARY KEY NOT NULL,
+    category           TEXT NOT NULL,              -- fact | decision | todo | lesson
+    kind               TEXT NOT NULL,              -- normal | important
+    content            TEXT NOT NULL,
+    compressed_content TEXT,                       -- 压缩后的提示词版本；原文仍保留
+    keywords           TEXT NOT NULL DEFAULT '',   -- 空格分隔，用于关键词召回
+    importance         REAL NOT NULL DEFAULT 3.0,  -- 1.0...10.0
+    pinned             INTEGER NOT NULL DEFAULT 0, -- 用户置顶：不衰减、优先召回
+    archived           INTEGER NOT NULL DEFAULT 0, -- 归档：默认不召回，仍可查看/导出
+    superseded_by      TEXT,                       -- 被哪条新记忆取代
+    supersedes         TEXT,                       -- 取代了哪条旧记忆
+    superseded_at      REAL,
+    source             TEXT NOT NULL DEFAULT 'extraction', -- extraction|manual|legacy-import
+    source_message_ids TEXT NOT NULL DEFAULT '',   -- JSON 数组字符串
+    merge_count        INTEGER NOT NULL DEFAULT 0, -- 自动折叠次数
+    access_count       INTEGER NOT NULL DEFAULT 0, -- 被提示词召回次数
+    created_at         REAL NOT NULL,
+    updated_at         REAL NOT NULL,
+    last_accessed_at   REAL
+);
+CREATE INDEX idx_memories_recall
+    ON memories (archived, superseded_by, kind, category, updated_at DESC);
+
+CREATE TABLE interactions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id  TEXT NOT NULL UNIQUE,   -- 对应账号 messages.id
+    direction   TEXT NOT NULL,          -- incoming | outgoing
+    sender_id   TEXT NOT NULL DEFAULT '',
+    sender_name TEXT NOT NULL DEFAULT '',
+    content     TEXT NOT NULL,
+    timestamp   REAL NOT NULL,          -- 消息时间；提取游标用它，不随清空消息重置
+    created_at  REAL NOT NULL
+);
+CREATE INDEX idx_interactions_time ON interactions (timestamp DESC);
 ```
 
-`base_weight` 是用户可调的基础权重（默认 1.0，范围 0.1~10.0），
-该列在旧库中已存在，可调权重不需要新的表结构迁移。
+- `kind` 与 `importance/pinned` 的关系：`pinned` 永久且最高优先；
+  `importance >= 7` 视为「重要」（慢衰减）；其余为「普通」。
+- 「最近记忆」不是存储类型：创建或最近访问在 `recentWindowHours`（默认 72h）内的记忆
+  在召回与展示上进入「最近」组并享受权重加成。
+- 记忆正文长度：单条普通记忆 ≤ 300 字（提取时裁剪）；用户手动新增可到 2000 字。
+  `compressed_content` 用于提示词与卡片摘要，原文不丢。
 
-迁移（`MemoryStore.migrate`）：
+### 4.2 全量互动 `interactions`
 
-- 新库直接按最新结构建表（`memories.access_count INTEGER NOT NULL DEFAULT 0`）。
-- **旧库升级**：
-  - `user_version < 2`：初始化 `memory_state` 游标为各会话当前最大 rowid，
-    升级前的历史消息不批量补总结，只总结升级后的新消息；
-  - `access_count` 列用 `PRAGMA table_info` 做列探测，缺失时
-    `ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;`
-    （旧记忆的召回次数从 0 开始）；
-  - 迁移结束 `PRAGMA user_version=4;`。
-- 会话 `working_hours` 仍用列探测的方式补列，不需要单独的版本号。
+- 角色卡创建后，运行时把该会话历史消息（最多最近 **5000 条**）一次性**回填**进
+  `interactions`；之后每批维护按游标增量同步新消息，`message_id` 唯一，
+  语音转写/识图描述更新时覆盖同一条。
+- 内容只存文本：沿用 `ChatEngine.promptText`（语音转写、图片描述、引用文本）；
+  单条上限 4000 字，系统消息跳过。
+- `interactions` 不参与衰减、不压缩，是「全量记忆卡」的载体；**清理聊天记录
+  （具体会话头部菜单 `ChatCleanupSheet`，仅该会话）不会删除它**。
+- 只有删除整个记忆卡/会话时才会移除（移到废纸篓，见 §10）。
 
-### 7.1 按微信账号的数据库与旧版迁移
+### 4.3 移除起点记忆（2026-10-28 迁移）
 
-- 每个微信账号有自己的 `accounts/<id>/chatbot.sqlite`，`user_version`、`memories`、`memory_state`
-  与 `settings` KV 都在各自库内。`MemoryStore.open()` 打开当前账号库时才执行 `migrate`；
-  A 账号的迁移不会影响 B 账号。
-- 旧版单库升级时，`AccountProfile.runLegacyMigrationIfNeeded()` 先用 SQLite Backup API 把旧
-  `chatbot.sqlite` 复制成一致快照（含 WAL 已提交内容）到旧库 `settings.onebot.self_id` 对应的
-  账号目录，再打开该库并跑同样的 schema 迁移；旧库原文件（含 `-wal`/`-shm`）保留，不移动、不重命名。
-- 旧记忆里的 `mediaPath` 是**绝对路径**：旧版根目录 `media/` 原样保留，旧图片/语音继续可读；
-  升级后新产生的媒体写入 `accounts/<id>/media/`，不迁移旧文件。手动移动/删除根 `media/`
-  会让旧记忆对应媒体失效。
-- 删除聊天/会话只作用于当前账号库；不会删除其它账号的长期记忆或 `memory_state`。
-  账号级隔离与切号见 [`accounts.md`](accounts.md) §5、§8。
+旧版本创建记忆卡时会生成一条 `kind = origin` 的「角色名/初始设定」起点记忆；现在新卡不再生成。
 
-## 8. 验证
+- 打开旧 `memory.sqlite` 时，`CharacterDatabase.migrate()` 执行一次性迁移：
+  - `meta.origin_edited != '1'`（生成型起点）→ `DELETE FROM memories WHERE kind = 'origin'`；
+  - `meta.origin_edited = '1'`（用户编辑过）→ 转为普通置顶手写记忆：
+    `kind = 'normal'`、`pinned = 1`、`importance = MAX(importance, 10)`、`source = 'manual'`；
+  - 最后删除 `meta.origin_edited`。
+- 迁移在数据库打开时执行、幂等；没有 origin 行的库不受影响。
+- 迁移后的记忆就是普通/置顶记忆：参与权重、归档、supersede（置顶不被自动取代）与导出，
+  不再有「固定最前/不可删除」等特殊待遇。
+- 该迁移目前没有独立单测（旧 origin 相关用例已删除/改写）。
 
-单元测试（`app/Tests/WeChatAITests/CoreServicesTests.swift`，使用临时目录/独立
-`MemoryStore`，不触碰真实数据库）：
+### 4.4 全局共享记忆
 
-- **批量总结（8 条阈值）**：12 条不总结；18 条一次总结 8 条；26 条再总结 8 条，
-  自动记忆始终 1 条、`sourceCount` 依次为 8/16；70 条时单批最多 40 条。
-- **游标与阈值**：默认 `minOverflow = 1` 的兼容行为；`minOverflow = 8` 时
-  12 条返回 `nil`；游标推进后不重复总结；单批最多 `maxMessages` 条。
-- **群聊发言人标注**：群聊历史与当前 user 消息为「昵称(wxid)：内容」
-  （`senderName` 为空时直接「wxid：内容」）；私聊不加前缀；
-  system prompt 包含「以 wxid 对照长期记忆」与「回复不输出 wxid」。
-- **本轮身份硬约束**：由核心/手写记忆解析 `wxid：称呼`；当前发言人命中时
-  注入其权威称呼并禁止附和群聊玩笑，未命中时提示不要套用他人称呼；
-  断言 system prompt 最后一行是本轮身份约束。
-- **人物映射解析**：`personMappings(in:)` 正确解析多行 `wxid：称呼1/称呼2`，
-  包括「项目负责人……：wxid_owner：负责人」这类带前缀的行。
-- **自动总结人物段过滤**：有本会话核心/手写映射时，`promptSummary` 与
-  `removingPersonMappingLines` 会剔除自动总结的「人物与称呼」段、保留其它要点；
-  手写/核心记忆本身不被裁剪；没有权威映射时保留自动总结的人物信息。
-- **总结提示词**：有权威映射时包含「人物与称呼由用户手写的核心记忆维护」、
-  「不要记录群聊玩笑」、「以手写记忆为准」等约束，并传入权威映射原文。
-- **核心记忆作用域**：`fetchMemoriesForPrompt` 只返回当前会话 + 全局记忆；
-  其它会话的核心记忆不注入；当前会话/全局核心记忆注入且排在自动总结之前；
-  核心/手写在冲突时优先。
-- **同会话早期召回**：只在当前会话检索；排除短期窗口内消息与当前消息；
-  最多 3 条；发出标「我」，私聊收到标「对方」，群聊收到标发言人（`speakerLabel`）；
-  标题为「本会话较早的相关片段（可能已过时，仅供参考）」；
-  不返回其它会话消息。
-- **手写记忆合并**：同会话核心 + 手写记忆作为权威参考传入合并提示，
-  自动总结不覆盖手写内容；自动记忆仍只保留一条，历史多条自动记忆合并为 1 条。
-- **历史清理**：预置两条自动记忆后触发总结，合并为 1 条，
-  `sourceCount = 5 + 7 + 8`，摘要包含双方要点。
-- **压缩器**：去重（忽略空白/大小写）、空行、`- ` 要点组织、超长输入与超长单行
-  均 `<= 600` 且保留尾部最新内容。
-- **权重**：60 天衰减约 0.25；`accessCount` 持久化、召回后权重提升且单次幅度很小；
-  使用强化上限 +40%；`sourceCount` 对数增长有界；`baseWeight` 可调（范围 0.1~10 收敛、
-  NaN 回落默认、持久化），同为核心记忆时高基础权重排在前面；核心记忆超过 6 条注入上限时
-  按综合权重保留前 6 条。
-- **迁移**：手工创建无 `access_count` 的旧表（`user_version = 2`），
-  `open()` 后补列、旧数据可读写，`user_version` 变为 4。
-- **账号库切换**：用临时目录建立 A/B 两个 `MemoryStore` 库，写入各自的会话/消息/长期记忆/
-  `memory_state`/日志/KV 后切换 `switchDatabase(to:)`，断言互不可见；切回 A 数据仍在。
-  旧单库复制到账号目录后，会话/消息/长期记忆条数与旧库一致（只 copy，不删除旧库）。
-- **模型页总开关**：`ChatEngine.forceStream(for:)` 在「流式回复」关闭时返回
-  `false`（所有通道非流式），开启时返回 `nil`（按各 provider 的 `stream`）。
+- **固定伪角色**：`CharacterStore.globalConversationID = "__global__"`、标题「全局共享」，
+  目录 `characters/c-__global__/memory.sqlite`；每个微信账号各自一份。
+- **惰性创建**：`CharacterStore.ensureGlobalCharacter()` 在记忆页加载与 `MemoryEngine.recall`
+  时调用；创建的是**空卡**（不写初始记忆），没有 `interactions`，不参与批量提取，
+  也不随任何会话删除。
+- **只手动维护**：从记忆页新增/编辑/置顶/压缩/删除；不会自动提取，清理某个会话的聊天记录
+  也不会删除它。
+- **召回注入**：`MemoryEngine.recall` 把当前会话记忆与全局记忆合并，按正文去重、统一排序与
+  token 预算；在全局卡自己的预览里不重复叠加。提示词标签在类别前加「全局」；
+  召回后的访问计数按各自 `characterID` 回写到全局/会话记忆库。
+  群聊「本轮发言人身份」映射同样合并全局记忆。
+- **UI**：左栏固定「全局共享 / 所有会话共享」行（globe 图标，位于会话角色之上）；
+  选中后标题/筛选显示「全局共享」，header 文案「注入所有会话」，可新增/编辑/删除/置顶/压缩；
+  `全量记录` 按钮禁用（没有 interactions），`删除记忆卡` 禁用（运行时也拒绝）。
+  聚合「全部角色」把全局记忆与会话记忆一起显示，header 为
+  「聚合 N 个会话角色 · 全局记忆同时并入」。
+- **导出**：全局卡可导出 Markdown/JSON，使用当前人格设定（无会话时用默认人格）；
+  全量记录不导出。
+- **账号隔离**：`c-__global__` 在账号目录内，换微信账号后看到的是新账号自己的全局记忆，
+  不会跨账号共享。
 
-构建检查：
+## 5. 权重、衰减与归档
+
+### 5.1 综合权重
+
+```
+activityAt  = max(updated_at, last_accessed_at ?? created_at)
+ageDays     = max(0, now - activityAt) / 86400
+recency     = 1 + 0.5 × max(0, 1 - 距上次活动小时数 / recentWindowHours)   // 72h 内最高 1.5
+usage       = 1 + 0.02 × min(access_count, 20)                              // 最多 +40%
+base        = importance                                                   // 1...10
+decay       = 1                                                             // pinned
+            = 0.5 ^ (ageDays / importantHalfLifeDays)                       // kind=important
+            = 0.5 ^ (ageDays / normalHalfLifeDays)                          // 其余
+score       = max(0.0001, base × recency × usage × decay)
+```
+
+- `kind` 在写入时计算：`pinned` 或 `importance >= 7` → `important`，否则 `normal`。
+- 每次召回 `access_count + 1`、刷新 `last_accessed_at`（best-effort，不改正文/`updated_at`）。
+- 置顶/取消置顶、修改重要度会重算 `kind` 并刷新 `updated_at`，时间衰减从头计算。
+
+### 5.2 自动归档
+
+- 每次成功提取后 best-effort 执行 `archiveStale`：
+  - 条件：`kind = normal`、未置顶、未归档、未被取代、最近活动（`created_at`/`updated_at`/`last_accessed_at` 取最晚）距今超过
+    `archiveAfterDays`（默认 90 天）、`access_count < 3`；
+  - 动作：`archived = 1`；正文超过 300 字时用确定性压缩器写 `compressed_content`
+    （保留原文，提示词只用压缩版）。
+- 归档记忆不进入自动召回，但记忆卡 `已归档` 筛选可见、可恢复、可导出。
+- 不做自动删除；删除只由用户显式操作。
+
+## 6. 合并（折叠）与冲突（supersede）
+
+### 6.1 相似度
+
+`MemorySimilarity.score(a, b)`（纯函数，可单测）：
+
+1. 归一化：去掉标点/空白、全角转半角、ASCII 小写；
+2. 字符 bigram 词频向量余弦（中文无需分词）；
+3. 若较短文本（≥4 字）完整出现在较长文本中，得分取 `max(余弦, 0.95)`；
+4. 输出 `0...1`。
+
+相似度 ≥ `mergeSimilarity`（默认 **0.92**）视为重复。
+
+### 6.2 自动折叠
+
+提取到新记忆时，在同类别、未归档、未被取代的记忆里找最高相似度：
+
+- `≥ 0.92` → **合并**到已有记忆：
+  - 保留已有 `id`；正文取较长的一条（更完整），等长时保留已有正文；
+  - `keywords` 并集；`importance = max`；`merge_count += 1`；`updated_at = now`；
+  - `source_message_ids` 并集；`kind` 按 §5.1 重算；
+- `< 0.92` → 新增一条。
+
+### 6.3 冲突 supersede
+
+- 提取提示词会把候选旧记忆的 `id/content` 交给模型；模型判定新记忆与某旧记忆矛盾时，
+  在新记忆里返回 `supersedes: ["<旧 id>"]`。
+- 落库规则：
+  - 新记忆正常插入；`supersedes = 旧 id`；
+  - 旧记忆写 `superseded_by = 新 id`、`superseded_at = now`，**不删除、不覆盖正文**；
+  - 已置顶记忆不被自动取代（日志警告，保留双方，由用户手动编辑/删除或取消取代）；
+  - 双方都在记忆卡中可见，旧记忆显示「已被取代」徽标。
+- 召回只注入 `superseded_by IS NULL` 的记忆；导出保留全部历史。
+- UI 提供「取消取代」：清空双方的 supersede 字段，恢复旧记忆召回。
+
+## 7. 批量提取
+
+### 7.1 触发与游标
+
+- `MemorySettings.enabled = true` 且会话已有记忆卡时，每次消息落库后调用
+  `scheduleMemoryMaintenance`（后台任务，按会话去重，不阻塞回复）。
+- 维护任务：
+  1. `syncInteractions`：首次把该会话最多 5000 条历史消息回填进 `interactions`，之后按
+     `interactions_synced_at` 游标增量同步新消息（单批最多 500 条）；
+  2. `pendingInteractions`：取 `timestamp > meta.last_extracted_at` 的互动，
+     按时间升序，单批最多 40 条；
+  3. 未处理条数 `< extractionBatchSize`（默认 8）→ 本次不提取；
+  4. AI 提取 → 合并/取代 → 推进 `last_extracted_at` 到本批最大时间戳；
+  5. 归档维护；日志记录新增/合并/取代/归档数量。
+- AI 成功或本地兜底成功后推进游标；失败保留游标，下次有新消息时重试（不会无限空转：没有新互动就不触发）。
+- 无 API Key / AI 失败 / 返回不可解析时，使用**本地兜底**：
+  把本批互动压缩成 1 条 `fact` 记忆（重要度 2，关键词取前 2 个；正文 ≤ 400 字），
+  保证离线也有可用记忆；日志标注「本地兜底」。
+
+### 7.2 模型输出
+
+系统提示要求只输出 JSON：
+
+```json
+{
+  "memories": [
+    {
+      "category": "fact|decision|todo|lesson",
+      "content": "一句可独立理解的中文记忆，≤300 字",
+      "importance": 1,
+      "keywords": ["关键词1", "关键词2"],
+      "supersedes": ["旧记忆 id"]
+    }
+  ]
+}
+```
+
+- 每批最多 8 条新记忆；`importance` 1–10；`keywords` 最多 8 个；
+- 只记录可核实的信息：用户偏好/身份/约定/决定/未完成事项/互动规律；
+- 不记录群聊玩笑、临时外号、自称或「某人其实是某人」的玩梗；
+- 与已有记忆矛盾时用 `supersedes`，不要改写旧记忆；
+- 没有值得长期记住的内容时返回 `{"memories":[]}`（也要推进游标）。
+
+解析器容错：去掉 Markdown 代码围栏，截取第一个 `{` 到最后一个 `}`；字段缺失/类型错误
+逐条丢弃；超长裁剪；非法 JSON 记为失败并走本地兜底。
+
+### 7.3 提取上下文
+
+提示词包含：
+
+- 角色名/摘要（来自**人格设定**；只传摘要，不传完整 system prompt，省 token）；
+- 本批互动（`我：` / `对方：` / `昵称：` 格式）；
+- 最多 12 条参考记忆（置顶 → 重要 → 本批关键词命中 → 按更新时间补齐）及其 `id`，
+  供合并/取代引用；
+- 当前时间与会话标题/类型；
+- 已有待办提醒（`todo` 类别）优先保留，已完成的可由模型省略。
+
+## 8. 召回与注入
+
+### 8.1 召回分组
+
+每次生成回复前，`MemoryEngine.recall(conversationID:query:settings:now:recordAccess:)`：
+先合并**当前会话记忆 + 全局共享记忆**（全局卡自己的预览不重复叠加），再按同一套规则分组。
+
+1. **最近**：`activityAt >= now - recentWindowHours`，按 score 降序，最多 4 条；
+2. **重要**：`pinned = 1` 或 `kind = important`，按 score 降序，最多 4 条；
+3. **相关**：对当前消息做关键词切分（复用 `ChatEngine.memoryTokens`），命中
+   `content/keywords` 的事实/经验记忆，按 score 降序，最多 4 条；
+4. **补位**：仍未达到 `maxRecallCount` 时按 score 降序补齐（最多 12 条）。
+
+- 过滤：`archived = 0`、`superseded_by IS NULL`；
+- 去重：同一 `id` 只出现一次；正文完全相同只保留最高分一条（全局与会话重复时只注入一条）；
+- token 控制：注入正文总长 ≤ `maxRecallCharacters`（默认 1200）；超限时按
+  最近 → 重要 → 相关 的优先级保留，低优先级丢弃并在段尾注明省略条数；
+  单条正文超过 240 字时优先用 `compressed_content`，否则截断并加「…」。
+- 空记忆卡（含只有全局卡为空）直接返回空召回，不注入任何占位行；
+  全局记忆不会覆盖同正文的会话记忆。
+
+### 8.2 提示词格式
+
+注入到 system prompt 的「相关历史记忆」段：
+
+```
+记忆上下文（最近/重要/相关；已被取代的记忆不注入）：
+- [事实·最近·重要度 6] 用户喜欢猫
+- [全局·事实·重要度 8] 用户是 GPL-3.0 项目的维护者
+- [待办·重要·置顶] 下次提醒用户更新微信版本
+- [经验·相关] 用户发梗图时适合用玩梗风格回复
+```
+
+- 全局记忆在类别前加「全局」标签；其它标签（置顶/重要/最近/重要度）规则不变。
+- 人格正文来自**人格设定**（`Persona.systemPrompt`），不再有每会话人设卡正文；
+  人格缺失时回退 `Persona.defaultSystemPrompt`。
+- 保留现有群聊身份硬约束：从**本会话 + 全局**记忆卡的置顶/重要/fact 记忆里解析
+  `wxid：称呼`，在 system prompt 末尾追加「本轮发言人身份」；群聊玩笑/临时外号不能覆盖。
+- 召回成功的记忆 best-effort `access_count + 1`，并按 `characterID` 回写到各自的记忆库。
+
+### 8.3 手动注入/查看
+
+- 不开放微信 `/记忆` 指令（用户 2026-10-28 确认）。
+- App 记忆面板：
+  - 置顶记忆 = 永久优先召回；
+  - 「预览注入 / 召回测试」输入一句模拟消息，显示按当前会话生成的记忆上下文与字符估算；
+  - 支持把记忆标记为 `archived`、`pinned`，调整重要度（≥ 阈值即「重要」），
+    或编辑正文/类别/关键词。
+
+## 9. 对话上下文与短期窗口
+
+- 对话历史仍取最近 `min(maxContextMessages, 10)` 条，保持现有行为；
+- v2 不再把短期窗口外的消息批量改写成一条摘要；它们进入 `interactions`，
+  由 §7 的批量提取生成原子记忆；
+- 旧 `ChatEngine.summarizeOverflow` / `MemoryStore` 旧记忆方法保留给旧单测与只读兼容，
+  运行时不调用；
+- 群聊发言人标注、语音转写、图片描述、引用文本规则不变。
+
+## 10. App 记忆面板（记忆库页）
+
+### 10.1 结构
+
+- 记忆库页只有**记忆卡**模式（2026-10-28 起移除页内「聊天记录」浏览/清理；聊天记录清理
+  在**具体会话**的头部菜单，见下方「清理聊天记录」）。
+- **入口不自动打开聚合**：进入记忆库（包括再次点击侧边栏「记忆库」）只显示左侧角色列表；
+  右栏显示空状态「选择一个角色」，说明点「全部角色」才会打开聚合视图。**不会自动加载或
+  展示任何角色/聚合页**。只有显式点击左栏「全部角色」或空状态「查看全部角色」才加载聚合；
+  点击全局/具体角色切换选择。刷新、创建记忆卡、删除记忆卡后保持「无选择」状态，
+  不自动跳回聚合。
+- 记忆卡模式 = 左侧角色列表 + 右侧记忆卡：
+  - 左栏：`全部角色`（聚合）+ **固定「全局共享 / 所有会话共享」行**（globe 图标，位于会话
+    角色之上）+ 各会话（标题/类型/人格名/记忆数/重要数/待办数）；
+    支持按标题/人格名搜索；还没有任何记忆卡时整页显示空状态，提供「为现有会话创建记忆卡」
+    （只建空卡，不写记忆、不提取旧聊天，之后可新增/导入旧记忆），避免升级后必须等机器人回复。
+  - 右栏顶部：会话标题/类型、人格名（来自**人格设定**）、更新时间；全局行显示
+    「全局共享」+「注入所有会话」。**没有「人设卡」按钮/sheet**，也**没有重复的统计行**
+    （记忆/最近/重要/待办/归档）。总数只出现在工具栏副标题
+    （`N 个记忆卡 · N 条生效记忆`，**包含全局卡**），各筛选数量只出现在筛选 chip 上。
+    聚合视图 header 为「聚合 N 个会话角色 · 全局记忆同时并入」。
+  - 按钮：`全量记录`、`导出`、`更多`（预览注入 / 导入旧记忆 /
+    为缺失会话创建记忆卡 / 删除记忆卡）；记忆设置入口是工具栏齿轮；聚合视图隐藏或禁用
+    角色专属按钮。**全局卡禁用「全量记录」与「删除记忆卡」**（没有 interactions，且不允许删除），
+    但可导出/新增/编辑/置顶/压缩/删除单条记忆。
+  - 筛选：全部 / 最近 72h / 重要 / 待办 / 事实 / 决策 / 经验 / 已归档 / 已被取代；
+    排序：综合权重（默认）/ 最近更新 / 重要度；搜索正文/关键词。
+  - 卡片：正文、类别徽标、置顶/重要徽标、重要度、权重、合并次数、召回次数、
+    来源（自动提取/手写/旧记忆导入）、`已被取代` 徽标；菜单：编辑、置顶/取消、
+    归档/恢复、压缩、取消取代、删除。所有记忆都可编辑/删除。
+  - 新增记忆：预填当前会话，类别默认 fact，来源 manual。
+- 全量记录 sheet：`interactions` 列表（时间/方向/发言人/正文），搜索、上限 1000 条；
+  首次打开某个角色时自动补齐最多 5000 条历史互动，之后增量同步；
+  主工具栏「导出」包含全部互动记录；sheet 内不提供删除（随记忆卡删除）。
+- 导出：Markdown / JSON 两种格式，使用 `NSSavePanel` 保存；人格内容来自当前人格设定。
+  - 全局卡可导出（无会话时用默认人格），但不导出全量记录（它没有 interactions）。
+  - Markdown：角色信息 + 人设（人格设定，摘要/系统提示词/模型）+
+    分类记忆（重要项带「重要/置顶」标记）+ 已归档/已被取代 + 全量互动；
+  - JSON：`format`、`exportedAt`、`character`、`memories`、`interactions`。
+    `character` 含 `conversationID` / `title` / `kind` / `personaID` / `name` / `summary` /
+    `model` / `systemPrompt` / `personaSource = "persona-settings"`；
+    不再包含每会话人设卡字段或时间戳。
+- 记忆设置 sheet：§11 的开关与数值，保存到当前账号 `profile.json` 的 `bot.memory`。
+- 导入旧记忆：把旧 `memories` 表中本会话 + 全局记忆导入当前记忆卡（内容拆分/分类启发式，
+  来源 `legacy-import`，核心记忆置顶）；不自动执行，需用户点击。
+- **清理聊天记录（会话内操作）**：打开具体会话 → 详情头部「More（会话设置）」菜单 →
+  「清理聊天记录…」→ `ChatCleanupSheet`；**只清理当前会话，没有“全部会话”选项**。
+  只删除该会话本地 `messages`（及旧 `memory_state` 游标），**不删除**记忆卡、`interactions`
+  全量记录，也不影响微信端消息；确认框条数来自账号库 `messageCount`（真实 DB 总数，
+  不是已加载的最近 60 条）。
+- 删除记忆卡：二次确认，整个角色目录移到废纸篓；**人格设定不受影响**，下次回复会按当前
+  人格设定重建空记忆卡。全局共享卡不可删除（UI 禁用，运行时也拒绝）。
+- 删除会话：沿用现有确认，删除本地聊天记录并同时把角色目录移到废纸篓。
+
+### 10.2 空状态与错误
+
+- 未选择角色：左栏保持可见，右栏显示「选择一个角色」并说明点「全部角色」才会打开聚合，
+  提供「查看全部角色」按钮；这是进入记忆库的默认状态，不自动打开聚合。
+- 无记忆卡：说明「机器人为该会话生成第一次回复后自动创建」，并可直接「为现有会话创建记忆卡」。
+- 有记忆卡但 0 条记忆：聚合视图显示「记忆卡还是空的」；单角色显示「这个角色还没有记忆」
+  并提供「新增记忆」——新卡默认空；全局卡显示「全局记忆还是空的」并说明只支持手动维护、
+  新增后注入所有会话。
+- 某筛选为空：说明当前筛选条件，提供「显示全部」。
+- 有记忆卡但 0 条不等同于读取失败；数据库/目录读写失败仍用 Toast + 日志，不静默吞掉。
+
+## 11. 设置
+
+`BotSettings.memory: MemorySettings`（可选存储，缺省用默认值；随账号 `profile.json`）：
+
+| 字段 | 默认 | 范围 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | true | – | 关闭后不提取/不召回/不写全量记录；人格仍来自人格设定 |
+| `extractionBatchSize` | 8 | 4–20 | 每多少条新互动触发一次提取 |
+| `recentWindowHours` | 72 | 1–168 | 「最近记忆」窗口 |
+| `normalHalfLifeDays` | 30 | 1–365 | 普通记忆半衰期 |
+| `importantHalfLifeDays` | 180 | 1–730 | 重要记忆半衰期 |
+| `importanceThreshold` | 7.0 | 5–10 | 判为「重要」的重要度阈值 |
+| `mergeSimilarity` | 0.92 | 0.80–1.0 | 自动折叠阈值 |
+| `archiveAfterDays` | 90 | 7–3650 | 自动归档的未访问天数 |
+| `maxRecallCount` | 12 | 3–30 | 单轮注入条数上限 |
+| `maxRecallCharacters` | 1200 | 300–6000 | 单轮注入正文长度上限 |
+| `autoArchive` | true | – | 是否自动归档 |
+
+所有数值写入前收敛到范围；NaN 回退默认。设置变更下一轮回复生效，不需要重启。
+
+## 12. 生命周期、账号切换与并发
+
+- `CharacterStore` 是 actor，按需打开 `memory.sqlite`，LRU 缓存最多 4 个连接；
+  未打开/切号中显式报 `notActive`，调用方按 best-effort 处理。
+- 启动：账号库 `memory.open()` 成功后 `characterStore.activate()`。
+- 切号（`switchAccount`）顺序：
+  1. `drainBackgroundWorkForAccountSwitch()` 取消并 await 记忆维护任务；
+  2. `characterStore.suspend()` 关闭全部角色连接；
+  3. `memory.suspend()` → 认领/激活账号 → `memory.switchToActiveAccountDatabase()`；
+  4. `characterStore.activate()` 指向新账号的 `characters/`；
+  5. 清空内存中的角色/记忆状态并重新加载。
+- 记忆维护任务按会话去重，切号/关闭机器人时取消；关键 await 后比对 `accountEpoch`，
+  避免把 A 账号的提取结果写进 B 账号。
+- 删除会话/记忆卡在 `CharacterStore` actor 内串行执行；目录移动用
+  `FileManager.trashItem`（失败则删除并记日志）。
+
+## 13. 旧数据与兼容
+
+- 旧 `memories` / `memory_state` 表**保留只读**，不再写入；旧 MemoryStore 记忆方法与旧单测保留，
+  运行时不调用；升级不会自动删除或改写旧数据。
+- App 启动/记忆页不再加载或持有旧长期记忆运行时数组（`longTermMemories` 及其 CRUD 已移除）；
+  唯一读取入口是「导入旧记忆」。
+- 人格设定仍在 `profile.json`（`personas`）。旧版每会话 `persona.md` 不再读取：
+  创建/加载记忆卡时 best-effort 移到废纸篓；未迁移的自定义正文不会被采用。
+  「人格统一、记忆从空开始」是用户 2026-10-28 的确认行为。
+- 旧记忆卡中的 `kind='origin'` 行在数据库打开时迁移（见 §4.3）：生成型起点删除、
+  用户编辑过的转普通置顶手写记忆；新卡不再生成起点。
+- 需要旧记忆时在记忆卡页点「导入旧记忆」，映射规则：
+  - `is_core = 1` → `kind = important`、`pinned = 1`、`importance = 8`；
+  - `source = manual` → `source = legacy-import`、重要度 6；
+  - 自动总结按 `- ` 要点拆成多条，按关键词启发式分类（提醒/下次→todo；约定/决定→decision；
+    喜欢/叫/是→fact；规律/经验→lesson；默认 fact）；
+  - 正文 > 300 字截断；相同正文按 0.92 折叠；已在旧表则原样保留（不改旧表）。
+- `c-__global__` 与普通角色卡一起位于账号 `characters/` 下；切号后使用新账号自己的全局
+  记忆，不会跨账号共享。
+- 旧版 app 回滚：旧表、旧代码仍在，回滚后仍能读取旧记忆；新 `characters/` 目录旧版不识别，
+  不影响启动。
+
+## 14. 验证
+
+单测（`app/Tests/WeChatAITests/CharacterMemoryTests.swift`、`ChatEngineV2Tests.swift`，
+临时目录，不碰真实网络/数据），当前 `swift test` **504 项**（8 项按环境跳过）：
+
+- 目录 key 编码/超长哈希/特殊字符；
+- 创建角色：只生成 `memory.sqlite`（不生成 `persona.md`），**新卡 0 条记忆**
+  （不生成初始记忆）、人格 meta、`last_extracted_at` 初始化；再次 ensure 不清掉已有记忆；
+- SQLite schema、interactions upsert 去重、按时间游标提取、全量记录字段裁剪、
+  首次回填/增量同步游标；
+- 相似度：≥0.92 合并、<0.92 新增、关键词并集、`merge_count`；
+- supersede：新旧双方标记、旧记忆不召回、置顶不被自动取代；
+- 权重：72h recent 加成、30/180 天半衰期、置顶不衰减；
+- 归档：90 天未访问 + 低召回才归档，归档不召回、可恢复；压缩保留原文；
+- 召回：分组顺序、关键词命中、token 裁剪、访问计数、群聊身份映射；
+- 提取：JSON 解析容错、代码围栏、空结果推进游标、失败不推进、本地兜底、
+  落库结果合并/来源保护；
+- 导出：Markdown/JSON 含人格设定内容、各分类、归档/取代、interactions；
+- 设置 clamp、旧配置缺 `memory` 键解码默认值；
+- 旧记忆导入映射（可选用临时旧库）；
+- 全局共享：`ensureGlobalCharacter` 独立列出（`isGlobal`/标题/空卡）、
+  全局记忆合并进任意会话召回（含去重/标签/访问回写）。
+- ChatEngine v2：人格设定正文 + 记忆卡召回、记忆关闭/记忆卡不可用时回退人格设定、
+  旧 v1 路径保留、群聊身份映射来自会话 + 全局记忆。
+
+门禁：
 
 ```bash
-cd app && swift build --build-tests --scratch-path .build-memory
+cd app && SWIFT_DISABLE_SANDBOX=1 swift build --build-tests
+cd app && SWIFT_DISABLE_SANDBOX=1 swift test          # 504 项（8 项按环境跳过）
+bash scripts/check.sh                                 # 文档/脚本/符号检查
 ```
 
-## 9. 限制
+## 15. 限制与已知取舍
 
-- 总结内容由模型生成，可能有压缩误差；可在记忆页直接编辑
-  （编辑自动记忆后转为手写记忆，不再被自动总结覆盖）。
-- 「本轮发言人身份」是**提示词级**硬约束，不是数据库级校验：如果群里多人持续、
-  一致地刷屏错误称呼（例如“你就是某某”“他自己都认了”），模型仍可能被带偏。
-  这类情况需要清理该群最近消息/自动记忆，或把正确映射写成核心记忆后重启；
-  自动总结的人物段在有权威映射时不会注入，也不会再写回。
-- 批量总结在消息写入后的后台维护中判定：聊天停止时，窗口外未满 8 条的消息
-  不会主动补总结，等下次有新消息时继续累积。
-- 批量阈值固定为 8 条，窗口外最多有 7 条消息暂时不在长期记忆中；
-  这是「减少模型调用」与「遗忘区间」的折中。
-- 升级前的旧历史消息不自动补总结，避免升级瞬间产生大量 AI 调用；
-  需要时可在记忆页手动新增核心记忆。
-- 早期片段召回是**关键词 `LIKE`** 的轻量方案：只覆盖当前会话、最多 3 条、
-  单条截断 120 字，长文本或换一种说法可能漏召；片段可能已过时，
-  不能当作最新事实，也不会召回其它会话的原文。
-- 其它会话的原文不会进入当前对话；需要多个会话共享的信息请写成**全局记忆**
-  或当前会话的手写记忆。
-- **记忆按微信账号隔离**：所谓「全局记忆」只在**当前微信账号**内对所有会话生效，
-  不会跨微信账号共享；换账号后看到的是该账号自己的记忆库。
-- **旧媒体路径不迁移**：旧记忆里的图片来源仍是根 `media/` 绝对路径；换账号或升级都不会
-  移动这些文件，删除旧媒体会让对应记忆的媒体失效。
-- **账号删除/切走不会删除记忆**：旧账号的记忆仍保留在 `accounts/<旧账号>/chatbot.sqlite`；
-  需要时切回该微信账号查看，App 不提供跨账号查看或迁移记忆的入口。
-- 核心记忆只注入「当前会话 + 全局」，并非所有会话都可见；
-  需要多个会话生效的核心设定应设为全局记忆。
-- 核心记忆优先占用注入名额，但总数仍受 `ChatEngine.longTermMemoryLimit`
-  （默认 6 条）限制；超过时按综合权重取前 6，可用基础权重调整核心之间的优先级。
-- 群聊发言人标注带 `senderName(wxid)`；bridge 未提供昵称时只显示 wxid。
-  模型被要求以 wxid 对照长期记忆、回复时不输出 wxid，但仍可能出现昵称与记忆
-  对不上或模型不遵守约束的情况；关键人物关系建议写在**本会话手写核心记忆**的
-  「wxid：称呼」清单里，不要只依赖自动总结。
-- `accessCount` 只在提示词召回时记录；注入名额内的当前会话/全局核心记忆每轮都会加入上下文，
-  召回次数会较快到达 +40% 上限，这是有意为之。
-- 「未关联会话」文件夹只展示已删除会话残留的记忆，无法恢复会话标题/类型；
-  删除会话仍会同时删除该会话的长期记忆与总结游标。
-- 搜索基于 SQLite `LIKE`（摘要/会话标题/ID），不是全文索引。
+- 每会话一个 SQLite：会话很多时首次列表要逐个打开读计数；`CharacterStore` 缓存 +
+  限制并发打开数；聚合视图最多加载 2000 条记忆。
+- 提取质量依赖模型；本地兜底只保证「有记忆」，分类/合并质量低于 AI。
+- 相似度是字符 bigram + 包含关系，不是语义向量；同义不同说法可能漏合并，
+  可在记忆面板手动编辑/删除，或对已有的取代关系「取消取代」。
+- supersede 只在 AI 明确返回时发生；模型不返回时按新增/折叠处理，用户可手动标取代。
+- 全量互动文本会额外占用磁盘（每条消息一份文本副本）；不复制媒体文件。单会话历史回填上限 5000 条，更早的历史只保留在账号消息表（清理聊天记录后不再有副本）。
+- 记忆卡按会话隔离，但**全局共享记忆**会注入所有会话；需要跨会话信息时写进全局共享记忆，
+  或在人格设定中维护。全局记忆只手动维护、不自动提取、不进入全量记录、不可删除。
+- 新卡默认空：创建时不再写入初始记忆，首次使用需要机器人回复后自动提取，或手动新增/导入旧记忆。
+- 人格不按会话隔离：修改人格设定会影响所有使用该人格的会话；没有每会话人设卡/提示词覆盖。
+- 公众号/系统会话默认不建卡；`filehelper` 若从未回复也不会建卡。
+- 微信 `/记忆` 指令不开放，避免把私密记忆发送到聊天窗口。

@@ -1439,6 +1439,47 @@ actor MemoryStore {
         return Array(rows.reversed())
     }
 
+    /// 记忆 v2 全量互动回填专用：只取提示词需要的字段（`raw_json`/`media_path` 不再读入），
+    /// 单会话最多最近 5000 条，避免首次回填历史时把整表原始事件复制进内存。
+    func fetchMessagesForMemory(
+        conversationID: String,
+        after: Date? = nil,
+        limit: Int = 5_000
+    ) throws -> [ChatMessage] {
+        try ensureOpen()
+        let boundedLimit = Int32(max(1, min(limit, 5_000)))
+        let columns = """
+        SELECT id, conversation_id, sender_id, sender_name, direction, kind, text,
+               NULL AS media_path, media_url, timestamp, status, reply_to_id, NULL AS raw_json,
+               image_description, voice_media_path, voice_duration_ms, voice_transcript,
+               voice_transcript_confidence, voice_transcript_state
+        FROM messages
+        WHERE conversation_id = ? AND direction != 'system'
+        """
+        let sql: String
+        if after != nil {
+            // 增量同步：从上次游标开始按时间升序取，避免每来一条消息就重写最近 500 条。
+            sql = columns + " AND timestamp >= ? ORDER BY timestamp ASC LIMIT ?;"
+        } else {
+            // 首次回填：只保留最近 limit 条，按时间升序返回。
+            sql = columns + " ORDER BY timestamp DESC LIMIT ?;"
+        }
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        try bind(statement, 1, conversationID)
+        if let after {
+            try bind(statement, 2, after.timeIntervalSince1970)
+            try bind(statement, 3, boundedLimit)
+        } else {
+            try bind(statement, 2, boundedLimit)
+        }
+        var rows: [ChatMessage] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            rows.append(try decodeMessage(statement))
+        }
+        return after == nil ? Array(rows.reversed()) : rows
+    }
+
     func message(id: String) throws -> ChatMessage? {
         try ensureOpen()
         let statement = try prepare("""

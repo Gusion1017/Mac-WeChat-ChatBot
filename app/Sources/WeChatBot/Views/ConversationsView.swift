@@ -1,5 +1,12 @@
 import SwiftUI
 
+/// 清理弹窗的载荷；条数与目标会话一起快照，避免 sheet 先拿到 0 条。
+private struct ConversationCleanupTarget: Identifiable {
+    var id: String { conversation.id }
+    let conversation: Conversation
+    let messageCount: Int
+}
+
 /// 会话：会话列表 + 聊天详情 + 输入区。三栏由主窗口侧边栏、会列表和详情组成。
 struct ConversationsView: View {
     @Environment(AppStore.self) private var store
@@ -12,6 +19,8 @@ struct ConversationsView: View {
     @State private var workingHoursTarget: Conversation?
     @State private var renameTarget: Conversation?
     @State private var deleteTarget: Conversation?
+    @State private var cleanupTarget: ConversationCleanupTarget?
+    @State private var isClearing = false
     /// Coalesces deferred programmatic scrolling (see `scheduleScrollToBottom`).
     @State private var autoScrollTask: Task<Void, Never>?
 
@@ -46,7 +55,7 @@ struct ConversationsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(PageBackground())
-        .onAppear { selectFirstIfNeeded() }
+        .onAppear { validateSelection() }
         .onDisappear { autoScrollTask?.cancel() }
         .onChange(of: store.selectedConversationID) { _, newValue in
             // nil 是用户「再次点击当前会话行收起对话」的合法状态，不再自动选回第一条。
@@ -81,6 +90,15 @@ struct ConversationsView: View {
             Button(L("取消"), role: .cancel) { deleteTarget = nil }
         } message: {
             Text(L("将从本机删除该会话、聊天记录与相关记忆；微信端聊天记录不受影响。此操作无法撤销。"))
+        }
+        .sheet(item: $cleanupTarget) { target in
+            ChatCleanupSheet(
+                conversationTitle: target.conversation.displayTitle,
+                messageCount: target.messageCount,
+                isBusy: isClearing
+            ) {
+                clearChats(of: target.conversation)
+            }
         }
     }
 
@@ -314,6 +332,11 @@ struct ConversationsView: View {
                         markRead(conversationID: conversation.id)
                     }
                     .disabled(conversation.unreadCount == 0)
+                    Button {
+                        openCleanup(conversation)
+                    } label: {
+                        Label(L("清理聊天记录…"), systemImage: "trash.slash")
+                    }
                     Button(role: .destructive) {
                         deleteTarget = conversation
                     } label: {
@@ -471,6 +494,24 @@ struct ConversationsView: View {
         store.selectedConversation
     }
 
+    private func openCleanup(_ conversation: Conversation) {
+        Task {
+            let count = await store.messageCount(conversationID: conversation.id)
+            cleanupTarget = ConversationCleanupTarget(
+                conversation: conversation, messageCount: count)
+        }
+    }
+
+    private func clearChats(of conversation: Conversation) {
+        isClearing = true
+        Task {
+            await store.clearMessages(conversationID: conversation.id)
+            toast.show(L("已清理当前会话聊天记录"), tone: .success, symbol: "trash")
+            isClearing = false
+            cleanupTarget = nil
+        }
+    }
+
     private var filteredConversations: [Conversation] {
         var list = store.conversations
         switch filter {
@@ -528,12 +569,11 @@ struct ConversationsView: View {
 
     // MARK: Actions
 
-    private func selectFirstIfNeeded() {
-        if store.selectedConversationID == nil
-            || !store.conversations.contains(where: { $0.id == store.selectedConversationID }) {
-            let id = filteredConversations.first?.id ?? store.conversations.first?.id
-            store.selectedConversationID = id
-            if let id { markRead(conversationID: id) }
+    /// 栏目入口只显示会话列表，不自动打开第一条；只清理已失效的选中项。
+    private func validateSelection() {
+        guard let id = store.selectedConversationID else { return }
+        if !store.conversations.contains(where: { $0.id == id }) {
+            store.selectedConversationID = nil
         }
     }
 

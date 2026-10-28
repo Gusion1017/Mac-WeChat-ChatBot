@@ -14,7 +14,9 @@
 | `Services/WeChatAccountResolver.swift` | 识别微信客户端当前登录账号（登录标记 mtime → 账号目录活动），返回账号 ID 与图片临时目录；mask/校验 |
 | `Services/AccountProfile.swift` | 账号档案布局、`account-state.json`、启动早期 `preparePaths`、切号激活、`_unassigned` 认领、旧版单库迁移 |
 | `Services/KeychainStore.swift` | API Key 的 Keychain 读写/删除/存在性 |
-| `Services/MemoryStore.swift` | SQLite（WAL）持久化：会话/消息/日志/定时任务/长期记忆/KV |
+| `Services/MemoryStore.swift` | SQLite（WAL）持久化：会话/消息/日志/定时任务/KV；旧 `memories` / `memory_state` 表保留只读兼容 |
+| `Services/CharacterStore.swift` | 记忆 v2 角色目录：`characters/<key>/memory.sqlite`（人格来自人格设定，不写 `persona.md`）；actor 串行文件/DB、LRU 连接、切号 suspend/activate、旧 `persona.md` 清理 |
+| `Services/MemoryEngine.swift` | 记忆卡召回/批量提取/权重衰减/0.92 折叠/supersede/归档、旧记忆导入与导出 |
 | `Services/SleepPreventionService.swift` | 通用防睡眠：IOKit 空闲睡眠断言 + 电源适配器监听（事件驱动，不轮询） |
 | `Services/BatteryStatus.swift` | 本机电池快照：IOKit 电源字典解析（电量/充电/适配器/剩余时间） |
 | `Services/DeepSeekBalance.swift` | DeepSeek 账户余额：`/user/balance` 地址推导、容错解析、通道选择 |
@@ -43,7 +45,7 @@
 | `Services/PatMessage.swift` | 拍一拍目标判定与 `{name}` 文本模板 |
 | `Services/Diagnostics.swift` | `WECHATAI_SELFTEST=1` 服务层自检 |
 
-本文件聚焦 Services/Core；设置模型、记忆页文件夹与 App 生命周期（防睡眠 apply/release）
+本文件聚焦 Services/Core；设置模型、记忆卡页与 App 生命周期（防睡眠 apply/release）
 的相关改动分别见 [memory.md](memory.md)、[ui-design.md](ui-design.md) 与
 [architecture.md](architecture.md) §4。
 
@@ -66,6 +68,7 @@ func deleteAPIKey(for providerID: String) throws
 // 会话 / 消息
 func sendManualMessage(conversationID: String, text: String) async
 func clearMessages(conversationID: String?) async      // nil = 全部
+func messageCount(conversationID: String? = nil) async -> Int   // 账号库真实条数（清理确认用）
 func deleteMessage(id: String) async
 func deleteConversation(id: String) async
 @discardableResult
@@ -100,7 +103,15 @@ func refreshWeChatAccount() async -> Bool   // 仅检测到不同账号才切库
 - Keychain：`service = com.gusionw.wechatai`，`account = AIProvider.apiKeyReference`。
   `saveAPIKey` 会把 `apiKeyReference` 设为 `providerID`；`deleteAPIKey` 清空引用，
   因此 `provider.hasAPIKey` 能正确反映 UI 状态。`config.json` 中只出现引用名。
-- `clearMessages(nil)` 清空全部消息并重置所有会话预览；指定会话时仅清该会话。
+- `clearMessages(nil)` 仍可清空全部消息（内部/测试 API）；UI 只提供**具体会话**清理：
+  会话头部菜单（会话设置 → 清理聊天记录…）打开 `ChatCleanupSheet`，没有“全部会话”入口，
+  也不在记忆页。只删除本地 `messages`（及旧 `memory_state` 游标），**不删除** v2 角色目录、
+  记忆卡 `interactions` 或微信端消息。
+- `messageCount(conversationID:)` 直接对账号库 `COUNT(*)`，用于清理确认中的真实条数
+  （不是已加载条数）。
+- 记忆页选择：`selectedCharacterID`（nil = 未选择）+ `isAllCharactersSelected`（true 才表示
+  显式选中「全部角色」）。`clearCharacterSelection()` 清空选择与右侧数据、保留左栏列表，
+  **不加载任何角色或聚合页**；只有 `selectCharacter(nil)` 才加载聚合。
 - 已删除 `AppStore.swift` 里的运行时 stub；所有运行时方法在 `AppStore+Runtime.swift`
   通过扩展实现，公开属性语义不变（`isBotRunning` 仅在启动成功后为 true）。
 
@@ -115,7 +126,7 @@ AppStore.init
   └─ activeAccountID / accountSwitchNotice / savedWeChatAccounts → observable
 
 RuntimeCoordinator.performBootstrap
-  1. AppPaths.ensureDirectories()      # root + accounts/<id>/{media,logs} + bridgeLog/backups/runtime
+  1. AppPaths.ensureDirectories()      # root + accounts/<id>/{media,logs,characters} + bridgeLog/backups/runtime
   2. await Task.detached { AccountProfile.runLegacyMigrationIfNeeded() }   # 旧版迁移，阻塞 IO
   3. active 变化或迁移写入了 profile 种子时：
                      store.applyLoadedSettings(SettingsStore.load())
@@ -124,9 +135,10 @@ RuntimeCoordinator.performBootstrap
   4. await Task.detached { AccountProfile.claimUnassignedForStartup(...) }
                      # _unassigned 有数据且已识别账号：开库前认领并切到该账号
   5. memory.open()                     # 打开最终 active 的 accounts/<id>/chatbot.sqlite
-  6. LogPipeline.attach(store:memory:) # 迁移/认领完成后才接日志落库
-  7. 启动期历史修复（自消息/伪群/appmsg/引用）只在当前账号库内执行
-  8. loadPersistedState / loadStats / refreshStatus
+  6. characterStore.activate()         # 指向该账号 characters/，按需打开角色记忆卡
+  7. LogPipeline.attach(store:memory:) # 迁移/认领完成后才接日志落库
+  8. 启动期历史修复（自消息/伪群/appmsg/引用）只在当前账号库内执行
+  9. loadPersistedState / loadStats / refreshStatus
 
 RuntimeCoordinator.startRuntime
   0. bootstrapIfNeeded
@@ -142,6 +154,9 @@ RuntimeCoordinator.startRuntime
   不能提前改 active/state。
 - 旧版迁移与 `_unassigned` 认领都早于 `memory.open()`，放在后台线程（`Task.detached`）；
   `MemoryStore.shared` 在 bootstrap 前禁止隐式 open，`LogPipeline` 延后 attach。
+- 记忆 v2 的角色目录跟随账号目录（`accounts/<id>/characters/`）：`characterStore.activate()`
+  在 `memory.open()` 之后、载入角色列表之前执行；切号 `suspend()` 后禁止打开记忆卡，
+  `CharacterStore` 返回未就绪错误，调用方按 best-effort 处理（见 [`memory.md`](memory.md) §12）。
 - 注入 `AppSettings` 的测试/诊断（`AppStore(settings:)`）不触碰本机账号目录：
   `managesAccountProfiles == false`，不打开真实账号库、不 attach 日志落库、不调用
   `preparePaths`/迁移，也不允许 UI 手动切号。
@@ -182,13 +197,16 @@ RuntimeCoordinator.handle(event)
   2. 会话 upsert（标题/预览/unread/lastMessageAt）+ 消息 upsert（SQLite 批量事务）
   3. BotStats.receivedToday++
   4. RuleEngine.evaluate（白/黑名单 → 触发方式 → 冷却/频率/工作时段）
-  5. 命中：取 provider/persona → ChatEngine.generateReply（含重试、记忆召回）
+  5. 命中：取 provider/persona → ChatEngine.generateReply（含重试、记忆卡召回：最近/重要/相关）
   6. ChatReplyPlan：文字按拟人化延迟/分段逐条 HTTP 发送；已确定改发语音时默认跳过延迟
   7. 发送成功：消息状态 pending→sent、会话预览、冷却记账、统计/日志
+  8. 消息落库后 scheduleMemoryMaintenance（后台、按会话去重）：interactions 同步 → 批量提取 → 归档；不阻塞回复
 ```
 
 - 回复生成按会话串行（`inFlightConversations`），同一会话不会并发产生多条 AI 回复；
   不同会话可并行。
+- 记忆维护任务与回复解耦：同会话重复触发去重，切号/停止机器人时取消并 await；
+  失败不推进提取游标，下次新消息再重试（详细规则见 [`memory.md`](memory.md) §7）。
 - dry-run：仍调用 AI 生成，但只写入一条 `direction = .system` 的“将回复”记录并打日志，不发送。
 - 手动发送/定时任务复用同一发送路径（pending → sent/failed，含 DB 与统计）。
 - **回复进度（UI 可见）**：命中回复后，`RuntimeCoordinator` 在关键节点写入
@@ -292,15 +310,18 @@ id != active 或 active == _unassigned
 `switchAccount(to:reason:)` 的顺序固定：
 
 1. 若机器人在跑，先停止 bridge / OneBot / 调度 / 媒体队列（停止过程 flush 日志/设置/统计）；
-2. drain 后台写入任务（长记忆总结/群昵称回填/统计落盘：cancel + await）；
-3. `memory.suspend()`（close + 禁止 `ensureOpen` 隐式重开）；
-4. `claimUnassigned(by:)`（active 仍为 `_unassigned`）或 `AccountProfile.activate(id)`；
-5. `memory.switchToActiveAccountDatabase()`；
-6. 应用新账号 `profile`（`SettingsStore.load()` / `applyLoadedSettings`）；
-7. 清空内存中的会话/消息/长期记忆/日志/统计/选中会话/回复进度；
-8. 从新库载入数据，`store.persist()` 把 profile 写回新账号；
-9. 更新 `activeAccountID` / `activeAccountIsUnassigned` / `savedWeChatAccounts` /
-   `accountSwitchNotice`，关闭 `settings.bot.enabled`、`isBotRunning = false`。
+2. drain 后台写入任务（记忆维护/长记忆总结/群昵称回填/统计落盘：cancel + await），
+   关键 await 后比对 `accountEpoch`，避免把 A 账号的提取结果写进 B；
+3. `characterStore.suspend()`（关闭全部角色记忆卡连接）；
+4. `memory.suspend()`（close + 禁止 `ensureOpen` 隐式重开）；
+5. `claimUnassigned(by:)`（active 仍为 `_unassigned`）或 `AccountProfile.activate(id)`；
+6. `memory.switchToActiveAccountDatabase()`；
+7. `characterStore.activate()` 指向新账号的 `characters/`；
+8. 应用新账号 `profile`（`SettingsStore.load()` / `applyLoadedSettings`）；
+9. 清空内存中的会话/消息/角色与记忆状态/日志/统计/选中会话/回复进度；
+10. 从新库载入数据，`store.persist()` 把 profile 写回新账号；
+11. 更新 `activeAccountID` / `activeAccountIsUnassigned` / `savedWeChatAccounts` /
+    `accountSwitchNotice`，关闭 `settings.bot.enabled`、`isBotRunning = false`。
 
 切号期间 `isSwitchingAccount=true`：`startBot`/`startRuntime`/`reconcileWeChatAccount` 互斥，
 总览与菜单栏启动按钮禁用；避免 bridge 用旧档案身份启动。
@@ -319,7 +340,9 @@ id != active 或 active == _unassigned
 | --- | --- | --- |
 | `AppStore` | `@MainActor @Observable` | UI 只读；所有状态回主线程更新 |
 | `RuntimeCoordinator` | `@MainActor` | 编排、事件处理、统计；等待服务用 `await` 让出主线程 |
-| `MemoryStore` | `actor` + SQLite `FULLMUTEX` | 所有 SQL 串行；UI/服务层都 `await` |
+| `MemoryStore` | `actor` + SQLite `FULLMUTEX` | 所有 SQL 串行；UI/服务层都 `await`；旧 `memories` 表只读 |
+| `CharacterStore` | `actor` + SQLite（每会话一个库） | 角色目录/记忆卡写入串行；按需打开并 LRU 缓存最多 4 个连接，不占主线程；旧 `persona.md` 清理串行执行 |
+| `MemoryEngine` | 无共享可变状态（依赖 `CharacterStore`/`AIClient`） | 召回、权重、相似度、提取解析为纯逻辑/异步调用，可单测 |
 | `AccountProfile` | 静态状态 + `NSLock` | 账号解析/状态读写串行；迁移是阻塞 IO，调用方必须在后台线程执行 |
 | `SettingsPersistence` | `actor` | 编码、原子替换、合并写；config/profile 双写 |
 | `SchedulerService` | `actor` | 单循环 + `CheckedContinuation` 唤醒，无轮询 |
@@ -328,7 +351,7 @@ id != active 或 active == _unassigned
 | `VisionSupport` | 纯静态函数（无状态） | 候选筛选/图片编码/请求消息/描述清洗可单测；网络调用复用 `AIClient` |
 | `AIClient` | 无共享可变状态，`URLSession` async | 请求/SSE 解析在后台 |
 | `RuleEngine` | `NSLock` 保护冷却/频率状态 | 纯内存判定，无 IO |
-| `ChatEngine` | 无共享可变状态 | 只依赖 `MemoryStore`/`AIClient` |
+| `ChatEngine` | 无共享可变状态 | v2 路径用 `CharacterStore`/`MemoryEngine`/`AIClient` 拼装提示词；旧 v1 路径仍用 `MemoryStore` 供旧单测/旧装配 |
 | `HookManager` | `@MainActor`；`ProcessRunner` 后台读管道 | 脚本/bridge 输出行流式回主线程更新状态 |
 | `LogPipeline` | 内部锁 + 200ms 批量刷新 | 后台线程可写；批量合并 UI/SQLite 更新，避免逐行失效 |
 | `CrashReporter` / `MainThreadWatchdog` | 锁保护快照；看门狗独立线程 | 异常与卡顿取证不经过 MainActor，避免死锁 |
@@ -352,7 +375,7 @@ revision 未变化时直接跳过，空闲时不做 O(n) 复制 / 遍历 2000 �
   认领/激活完成后再打开，不能同时打开两个账号库。
 - 旧版根目录 `chatbot.sqlite` 迁移后保留，但不再被打开/写入；旧媒体同理。
 - 表（每个账号库独立）：`conversations`、`messages`、`logs`、`schedules`、`settings`（KV），
-  以及长期记忆的 `memories` / `memory_state` 等。
+  以及旧长期记忆的 `memories` / `memory_state`（v2 起只读兼容，运行时不再写入或召回）。
   消息表主键 `id`，`INSERT ... ON CONFLICT(id) DO UPDATE`，可安全重复投递；
   索引：`(conversation_id, timestamp DESC)`、`(timestamp DESC)`、`logs(date DESC)`。
 - 批量写：`upsertMessages` / `appendLogs` / `upsertConversations` / `replaceSchedules`
@@ -373,7 +396,15 @@ revision 未变化时直接跳过，空闲时不做 O(n) 复制 / 遍历 2000 �
 - 日志环形：App 内存最多 2000 条；DB 每累计 100 条 `pruneLogs(keep: 5000)`。
   UI 采样以 `logRevision` 为门禁（见 §4），未变化不重算。
 - 日期统一存 Unix 秒（`Double`），枚举存 rawValue 字符串。
-- 会话删除级联删除消息；`clearMessages` 同步重置会话预览/unread。
+- 会话删除级联删除消息；`clearMessages` 同步重置会话预览/unread，只删本地 `messages`
+  与旧 `memory_state`，不动 v2 记忆卡/`interactions`（清理入口在具体会话头部菜单
+  `ChatCleanupSheet`，仅该会话）。
+- 旧记忆方法（`upsertMemory` / 滚动总结 / 综合权重召回 / `recordMemoryAccess` 等）标记为
+  **legacy-only**：只服务旧单测与只读兼容，运行时不调用；新记忆见 §5.10–§5.11。
+  删除会话时旧表记录仍按既有行为清理，但 v2 的角色目录另行移到废纸篓（见 [`memory.md`](memory.md) §10）。
+- AppStore 不再持有/加载旧长期记忆运行时数组，也不再暴露
+  `loadLongTermMemories` / `saveLongTermMemory` / `deleteLongTermMemory` /
+  `setLongTermMemoryCore` 等 CRUD；旧表读取只保留给「导入旧记忆」（`importLegacyMemories`）。
 
 ### 5.2 OneBotClient
 
@@ -486,51 +517,44 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 
 ### 5.5 ChatEngine
 
-- system = persona.systemPrompt（无可用人格时回退到 `Persona.defaultSystemPrompt`）+ 真人聊天约束 +
-  当前时间/会话类型/会话名 + `conversation.note`（会话备注）+ 长期记忆注入 + 本会话早期片段召回 +
-  群聊「本轮发言人身份」硬约束（放在 system 最后，压过最近聊天里的玩梗）。
+- system = 人格设定正文（`Persona.systemPrompt`；无可用人格时回退
+  `Persona.defaultSystemPrompt`）+ 真人聊天约束 + 当前时间/会话类型/会话名 +
+  `conversation.note`（会话备注）+ 记忆卡召回 + 群聊「本轮发言人身份」硬约束
+  （放在 system 最后，压过最近聊天里的玩梗）。
+- **v2 提示词路径与回退**：人格**只来自人格设定**（`conversation.personaID ??
+  bot.defaultPersonaID`）。路径为：先 `CharacterStore.ensureCharacter(persona:)` 建/刷新记忆卡，
+  再 `MemoryEngine.recall` 注入记忆上下文；记忆卡不可用（未激活/读写失败/`enabled=false`）
+  时仍使用人格设定正文，不召回、不阻塞回复。不再有每会话 `persona.md` 或人设卡正文。
+  旧 `memories` 表只读，**不再**作为回退召回来源；旧滚动总结路径不在运行时调用。
 - 群聊：每条 incoming 消息（含历史 user 消息与当前消息）拼成「昵称(wxid)：内容」，
   `senderName` 为空时直接「wxid：内容」（`ChatEngine.attributedUserText` /
   `promptSpeakerLabel`）；私聊不加前缀；自己的消息仍作为 `assistant` 原文。
-  群聊 system prompt 说明消息格式，要求**以括号内 wxid 对照长期记忆**
+  群聊 system prompt 说明消息格式，要求**以括号内 wxid 对照记忆卡**
   （记忆里的人员关系是「wxid：称呼」），找不到该 wxid 时不要套用其他人的称呼，
   回复不输出 wxid。昵称会变、会重名，wxid 是消息与记忆之间唯一稳定的连接键。
-- 本轮身份硬约束：`ChatEngine.speakerIdentityNote` 从**核心/手写**记忆解析
-  `wxid：称呼`（`personMappings`），当前发言人命中时注入其权威称呼并明确
+- 本轮身份硬约束：`ChatEngine.speakerIdentityNote` 从**本会话 + 全局**记忆卡的
+  **置顶/重要/fact** 记忆解析 `wxid：称呼`（`personMappings`），当前发言人命中时注入其权威称呼并明确
   「群聊里的玩笑/临时外号/自称/‘某人其实是某人’不能覆盖映射，不要附和」；
   未命中时提示不要套用他人称呼。这是提示词级约束，不改变数据库。
 - 近期上下文：`history.suffix(maxContextMessages)`（上限 10），按方向映射 user/assistant，
   同角色相邻消息合并；确保当前消息在末尾。
-- 早期片段召回：只在**当前会话**内按关键词 `LIKE` 检索，排除短期窗口内消息、当前消息、
-  系统消息与晚于当前消息的内容；最多 3 条、每条截断 120 字；发出标「我」，
-  私聊收到标「对方」，群聊收到标发言人（`promptSpeakerLabel`，缺失时「对方」）；
-  标题为「本会话较早的相关片段（可能已过时，仅供参考）」；不再检索其它会话原文。
 - 拟人化：`humanize.enabled && splitMessages` 时按句末标点/长度切分，
   合并过短片段，`maxSegments` 封顶，单段最长 600 字；每段随机延迟
   `[minDelayMs, maxDelayMs]`（`ChatReplyPlan.delaysMs`，由运行时执行）。
   若本次确定改发语音且 `voice.skipHumanizeDelayForVoiceReply` 为真（默认），
   运行时把延迟归零（`VoiceReplyPacing`），避免在 TTS 合成耗时之外再等一遍。
 - dry-run 时不分段/不延迟，只产出计划文本。
-- 长期记忆召回：只注入「当前会话 + 全局」记忆，核心记忆同样遵守作用域
-  （其它会话的核心记忆不注入）；按核心 → 手写 → 自动总结的优先级、同层按**综合权重**降序，
-  默认最多 6 条（`ChatEngine.longTermMemoryLimit`，核心记忆优先占用名额）；
-  综合权重 = 基础权重 × 内容重要度 × 使用强化 × 30 天半衰期，其中基础权重可由用户
-  在记忆编辑器中自由调整（0.1~10×），核心记忆之间也按该权重排序；提示词注明核心/手写优先、
-  自动总结仅供参考、冲突时以核心/手写为准；召回后 `MemoryStore.recordMemoryAccess(ids:)`
-  以 best-effort 累加访问次数。当本会话存在核心/手写 `wxid：称呼` 映射时，
-  自动总结的「人物与称呼」段不注入（`ChatEngine.promptSummary` 剔除），
-  避免和权威映射打架；没有权威映射时仍保留自动总结的人物信息作为兜底。
-- 批量总结：短期窗口（10 条）外的未总结消息**攒够 8 条**才调用一次 AI，
-  单批最多 40 条；12 条不总结、18 条总结 8 条、26 条再总结 8 条。
-  AI 提示由 `ChatEngine.summaryPrompt` 纯函数生成：默认结构化（人物与称呼 / 偏好 /
-  约定与待办 / 其他），最多 5 条要点、总长 ≤600 字，不编造、不罗列成员 wxid 清单；
-  存在本会话核心/手写映射时，要求模型**不输出人物与称呼段**、不记录群聊玩笑/临时外号/
-  自称/“某人其实是某人”的玩梗，冲突时以手写记忆为准；传入的「已有自动记忆」会先剔除
-  人物段，模型输出与本地兜底结果再经 `removingPersonMappingLines` 兜底。
-  核心 + 手写记忆作为「权威参考」传入合并提示、不被覆盖；结果经
-  `MemorySummaryCompactor` 强制 ≤600 字符；无 Key/AI 失败时本地兜底同样压缩；
-  同一会话只保留一条自动滚动总结，历史遗留的多条自动总结会先合并清理。
-  详见 [memory.md](memory.md)。
+- 记忆卡召回（v2）：`MemoryEngine.recall` 合并**当前会话 + 全局共享**记忆，按
+  最近 72h（最多 4）→ 重要/置顶（最多 4）→ 关键词相关（最多 4）分组，
+  再按综合权重补位到 `maxRecallCount`（默认 12）；过滤已归档/已被取代，注入正文总长
+  ≤ `maxRecallCharacters`（默认 1200），超限按分组优先级裁剪；召回成功 best-effort
+  按 `characterID` 回写访问计数（全局/会话各自记忆库）。空卡直接返回空召回。
+  全局记忆在提示词中带「全局」标签，不覆盖同正文的会话记忆。权重公式、最近窗口与
+  半衰期见 [`memory.md`](memory.md) §4.4、§5、§8。
+- 短期窗口（10 条）外消息不再做运行时批量总结，也不召回原始聊天片段：它们进入记忆卡
+  `interactions`，由批量提取生成原子记忆；旧滚动总结/旧召回方法仅保留给旧单测与只读兼容。
+- 旧记忆（v1）不参与 v2 提示词：需要时在记忆面板手动「导入旧记忆」，
+  映射规则见 [`memory.md`](memory.md) §13。
 - 流式总开关：`settings.ai.streamReplies == false` 时所有通道强制非流式；
   开启时按 `provider.stream` 决定（`ChatEngine.forceStream(for:)`）。
 - 返回 `ChatReplyPlan`（segments/全文本/provider/persona/model/latency/usage/delays/上下文条数）。
@@ -619,6 +643,66 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
   （金额字符串或数字均可）；缺 Key/缺通道属于 `unavailable`，网络/HTTP/解析失败属于 `failed`，
   失败只展示原因并可重试，不伪造金额、不阻断机器人运行。
 
+### 5.10 CharacterStore（角色目录，记忆 v2）
+
+- 路径：`accounts/<当前账号>/characters/<c-key>/`，每个微信会话一个；目录名由
+  `CharacterDirectory.key(for:)` 编码（只保留 `A-Za-z0-9._-@`，其余 UTF-8 字节按 `%XX`；
+  超 160 字符用 `c-<前 60>-<sha256 前 16>`），权威会话 ID 记录在 `memory.sqlite` 的
+  `meta.conversation_id`。私聊/群聊/公众号都按会话建卡，`filehelper` 等系统会话未实际回复则不建。
+- **人格单一来源**：目录里只有 `memory.sqlite`，不创建/读取 `persona.md`。人格名称/摘要/
+  系统提示词/模型来自人格设定；`ensureCharacter(conversation:persona:activationTimestamp:)`
+  只把 `persona_id` / `persona_name` 写入 meta 供展示，不保存提示词副本。
+- `actor`：文件/DB 操作串行、不占主线程；`memory.sqlite` 为 WAL + `synchronous=NORMAL`；
+  按需打开记忆卡并 LRU 缓存最多 4 个连接；未激活/切号中返回未就绪错误，调用方 best-effort。
+- `ensureCharacter(...)`：首次为该会话生成回复时建目录、`memory.sqlite`，**新卡默认空**
+  （不写初始记忆），并把 `last_extracted_at` 初始化为触发消息时间戳 - 0.001
+  （本轮触发消息与其回复进入第一批提取，不回挖历史聊天）；已存在时同步标题/类型/人格 meta，
+  不覆盖任何记忆正文。
+- **起点记忆迁移**：打开旧 `memory.sqlite` 时 `CharacterDatabase.migrate()` 执行一次性迁移
+  ——`origin_edited != '1'` 的 `kind='origin'` 行删除；`origin_edited = '1'` 的行转
+  `kind='normal'`、`pinned=1`、`importance=MAX(importance,10)`、`source='manual'`；
+  最后删除 `origin_edited` meta。迁移幂等，无 origin 行的库不受影响。
+- **全局共享卡**：固定伪会话 `__global__`（标题「全局共享」），目录
+  `characters/c-__global__/memory.sqlite`；`ensureGlobalCharacter()` 在记忆页加载与
+  `MemoryEngine.recall` 时惰性创建（空卡、无初始记忆、无 `interactions`、不参与批量提取）。
+  每账号独立、不可删除（UI 禁用，运行时也拒绝）；记忆只手动维护，可导出。
+- `listCharacters(settings:personas:now:)` 接收「会话 → PersonaReference」映射，仅用于左栏
+  人格名展示；`CharacterSummary.isGlobal` 标出全局卡，其余计数只有记忆/重要/待办/更新时间。
+  `CharacterPersona` / `PersonaCardCodec` / `isCustomized` / 每会话模板同步已移除。
+- **旧 `persona.md` 清理**：创建/列出记忆卡时 best-effort 用 `FileManager.trashItem` 移入
+  废纸篓，不再读取；只含 `persona.md` 的旧目录不算有效角色卡，等首次回复时重建记忆卡。
+  未迁移的自定义正文不会采用，需要保留时应在人格设定中维护。
+- 生命周期：启动/切号 `activate()`，切号前 `suspend()` 关闭全部连接；删除记忆卡/会话时
+  整个角色目录移到废纸篓（失败则删除并记日志）。目录随账号目录整体复制/认领，不单独迁移。
+
+### 5.11 MemoryEngine（记忆卡）
+
+- 召回：`MemoryEngine.recall` 的分组、去重、token 预算见 §5.5 与
+  [`memory.md`](memory.md) §8；读取当前会话记忆卡 + 全局共享卡（全局卡自己的预览不重复
+  叠加），全局记忆注入所有会话但不覆盖本地记忆；提示词标签加「全局」。
+- 批量提取（后台、按会话去重）：`syncInteractions` 首次回填最多 5000 条、之后按 `interactions_synced_at` 游标增量同步到
+  `interactions` → `pendingInteractions` 取 `timestamp > meta.last_extracted_at`（升序、
+  单批 ≤40）→ 条数不足 `extractionBatchSize`（默认 8）不提取 → AI 输出 JSON →
+  合并/supersede → 推进游标 → `archiveStale()`。只有成功才推进游标；失败保留游标，
+  下次新消息重试；无 Key/AI 失败/解析失败时走本地兜底（压成 1 条 `fact`，来源 extraction）。
+- 合并/取代：`MemorySimilarity` 用字符 bigram 余弦 + 包含关系，≥`mergeSimilarity`
+  （默认 0.92）自动折叠（关键词并集、取更完整正文、`merge_count+1`）；冲突 supersede
+  双方留档、旧记忆不进入召回，置顶不被自动取代。规则见 [`memory.md`](memory.md) §6。
+- `referenceMemories` 供提取提示词引用旧记忆：置顶 → 重要 → 本批关键词命中 → 按更新时间补齐。
+- 权重/衰减/归档：综合权重 = 重要度 × 最近加成（72h）× 使用强化 × 半衰期衰减；
+  普通/重要半衰期默认 30/180 天，置顶不衰减；`archiveAfterDays` 未访问且低召回时归档，
+  归档不删除、可恢复。详见 [`memory.md`](memory.md) §5。
+- 全局记忆：只读取/写入 `__global__` 记忆库；`recall` 按 `characterID` 回写访问计数；
+  `ChatEngine.speakerIdentityNote` 合并全局记忆做群聊身份映射；全局卡不进入提取维护、
+  没有全量互动、不能被删除。
+- 设置：`BotSettings.memory`（`MemorySettings`，随账号 `profile.json`）；读取时 clamp
+  到范围、缺键用默认值，修改下一轮回复生效。字段见 [`memory.md`](memory.md) §11。
+- 提取上下文里的角色名/摘要来自**人格设定**（不传完整 system prompt）；导出
+  `CharacterMemoryExporter` 也接收当前 `Persona`，Markdown/JSON 标记
+  `personaSource = "persona-settings"`，不再输出每会话人设卡字段/时间戳。
+- 旧记忆导入：只读旧 `memories` 表，按内容拆分/关键词启发式分类（来源 `legacy-import`、
+  核心记忆置顶），只在记忆面板手动触发；不自动迁移、不改旧表。
+
 ## 6. 错误处理策略
 
 | 场景 | 行为 |
@@ -667,16 +751,16 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 `WakeWindowTests.swift`（6）、`ImageFetchTests.swift`（16）、`OneBotEventParserTests.swift`（5）、
 `DataRepairTrustTests.swift`（2）、`VisionTests.swift`（12）、`SystemVitalsTests.swift`（16），
 以及 `VoiceReadTests` / `VoiceSynthesisTests` / `VoiceRuntimeStatusTests` / `VoiceCatalogTests` 等语音测试；
-2026-10-27 账号隔离 + 2026-10-28 审查修复后为 470 项（8 项按环境跳过）：
+2026-10-27 账号隔离 + 2026-10-28 记忆 v2（含人格单一来源 + 全局共享）后为 504 项（8 项按环境跳过）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 473 tests, with 8 skipped, 0 failures
+# Executed 504 tests, with 8 skipped, 0 failures
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
-（12/18/26 条场景）、长期记忆作用域（当前会话 + 全局，核心不注入其它会话）、
+（12/18/26 条场景）、旧记忆（v1，保留为只读兼容回归）的作用域（当前会话 + 全局，核心不注入其它会话）、
 同会话早期片段召回（排除窗口内/当前消息，最多 3 条）、群聊发言人标注
 （`senderName` 优先、回退 `senderID`）、手写记忆作为权威参考合并且不被覆盖、
 长期记忆滚动合并与历史多条合并、`MemorySummaryCompactor` 去重/600 字上限、
@@ -706,8 +790,19 @@ profile seed、旧文件保留）、`claimUnassigned` 只复制不删除/不覆�
 config + profile 双文件加载/损坏备份/去重双写、`MemoryStore` 切换 A/B 库后会话/记忆/日志/KV
 互不可见。2026-10-28 审查修复另加回归：`_unassigned` 启动认领、`legacyMigrationDone` 门禁、
 空壳目标库替换、WAL 主库无 `-wal/-shm` 时的迁移、`MemoryStore.suspend()` 禁止隐式 open。
-当前 `swift test` 470 项通过
+当前 `swift test` 504 项通过
 （8 项按环境跳过）。
+
+记忆 v2（2026-10-28）新增 `CharacterMemoryTests.swift`（24 项，临时目录，不碰真实网络/数据）：
+目录 key 编码/超长哈希/特殊字符、创建角色只生成 `memory.sqlite`（不生成 `persona.md`）、
+新卡 0 条记忆、`last_extracted_at`、`memory.sqlite` schema 与 `interactions` upsert/回填游标、
+相似度 ≥0.92 合并与 <0.92 新增、supersede 双方标记/取消/置顶保护、权重与 72h/半衰期/置顶、
+归档/压缩、召回分组与 token 裁剪、提取 JSON 容错/空结果推进游标/本地兜底、
+导出 Markdown/JSON（含人格设定内容）、设置 clamp、旧记忆导入映射、suspend/activate 根目录切换、
+全局卡独立列出（`isGlobal`/空卡）与全局记忆合并进任意会话召回（去重/标签）。
+另有 `ChatEngineV2Tests.swift`（7 项）覆盖人格设定正文 + 记忆卡召回、记忆关闭/记忆卡不可用时
+回退人格设定、旧 v1 路径保留、群聊身份映射来自会话 + 全局记忆。旧记忆用例保留为只读兼容回归；
+最终用例数以上表 `swift test` 实际输出为准。
 
 ### 8.2 App 内诊断开关
 
@@ -743,10 +838,13 @@ Hook 检测 → `startBot` 失败路径（缺 API Key / 未安装 Gadget）、Ke
   回调/退出事件，避免 QA 连续 kill/重启时新 bridge 状态被旧进程覆盖。
 - **“正在输入”指示**：bridge/OneBot v11 未暴露该动作，目前仅记录日志；`humanize.typingIndicator`
   暂不影响网络行为。
-- **记忆召回**：长期记忆已做批量 AI 摘要、确定性压缩（≤600 字）与权重强化；
-  早期片段只在当前会话内按关键词 `LIKE` 召回（最多 3 条、可能已过时），
-  不再检索其它会话的原文；未做向量/语义检索，`memoryTokens` 按 CJK/ASCII 切词，
-  长文本召回可能漏召。
+- **记忆（v2）**：每会话一个 `memory.sqlite`，会话多时首次列表要逐个打开读计数
+  （`CharacterStore` LRU + 记忆页首屏只加载选中角色）；提取质量依赖模型，本地兜底只保证
+  「有记忆」；相似度是字符 bigram + 包含关系而非语义向量，同义不同说法可能漏合并
+  （记忆面板可手动处理）；supersede 只在 AI 明确返回时发生。全局共享记忆只手动维护、
+  不自动提取、没有全量记录且不可删除，但会注入所有会话。人格统一来自人格设定，
+  修改会影响所有使用该人格的会话，不再有每会话人设卡/提示词覆盖。旧 v1 `memories` 表
+  只读兼容，不参与召回；详见 [`memory.md`](memory.md) §15。
 - **日志按天切割**：当前 DB 环形裁剪（保留 5000 条）+ App 内存 2000 条；
   `logs/` 目录按天文件切割尚未实现（架构低开销目标不要求首版）。
 - **自消息 echo**：bridge 用 `-self_id` 判定发送者并输出 `is_self` + `self_id` +

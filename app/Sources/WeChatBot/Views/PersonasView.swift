@@ -54,6 +54,12 @@ struct PersonasView: View {
                 title: "人格如何生效",
                 message: "优先级：会话单独设置 > 机器人默认人格 > 全局默认。人格的系统提示词会直接发送给模型。"
             )
+
+            InlineNotice(
+                kind: .info,
+                title: "人格是模板",
+                message: "人格设定是每个会话唯一的人设来源；修改后立即对所有使用该人格的会话生效，记忆页不再复制人设卡。"
+            )
         }
         .sheet(item: $editingPersona) { persona in
             PersonaEditorSheet(persona: persona, isNew: isEditingNew) { updated in

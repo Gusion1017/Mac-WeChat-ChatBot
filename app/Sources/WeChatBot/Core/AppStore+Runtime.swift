@@ -87,6 +87,10 @@ final class RuntimeCoordinator {
     let memory = MemoryStore.shared
     let keychain = KeychainStore.shared
     let aiClient = AIClient()
+    /// 记忆 v2：每会话记忆卡存储（人格来自人格设定）。
+    let characterStore = CharacterStore.shared
+    /// 记忆 v2：召回/提取/归档/压缩。
+    let memoryEngine: MemoryEngine
     let hookManager: HookManager
     let ruleEngine = RuleEngine()
     let chatEngine: ChatEngine
@@ -121,7 +125,9 @@ final class RuntimeCoordinator {
     /// 运行时启动后等待 hook 就绪的句柄检测任务（bridge 刚启动时 /voice_status 可能暂不可用）。
     private var voiceSetupWatchTask: Task<Void, Never>?
     private var memoryMaintenanceInFlight: Set<String> = []
-    /// 已发起的长记忆总结任务；切号前必须 cancel + await，避免跨账号写 memories。
+    /// 维护任务运行期间又有新消息：任务结束后补跑一次，避免最后一条消息没同步。
+    private var memoryMaintenancePending: Set<String> = []
+    /// 已发起的长记忆维护任务；切号前必须 cancel + await，避免跨账号写 memories。
     private var memoryMaintenanceTasks: [String: Task<Void, Never>] = [:]
     private var lastSchedulerTasks: [ScheduledTask] = []
     /// 最近一次可用的通讯录目录（内存副本）；数据库缓存由 `MemoryStore` 负责。
@@ -169,7 +175,14 @@ final class RuntimeCoordinator {
     init(store: AppStore) {
         self.store = store
         self.hookManager = HookManager(wechatPath: store.settings.hook.wechatPath)
-        self.chatEngine = ChatEngine(memory: memory, aiClient: aiClient)
+        let engine = MemoryEngine(characters: characterStore, aiClient: aiClient)
+        self.memoryEngine = engine
+        self.chatEngine = ChatEngine(
+            memory: memory,
+            aiClient: aiClient,
+            characters: characterStore,
+            memoryEngine: engine
+        )
 
         // 注意：LogPipeline 不在这里 attach。attach 后日志会立即 flush 到 SQLite，
         // 可能在 bootstrap 的旧库迁移/账号认领完成前把目标库提前创建出来；
@@ -188,6 +201,11 @@ final class RuntimeCoordinator {
         chatEngine.onLog = { [weak self] level, message in
             Task { @MainActor [weak self] in
                 self?.log(level, "ChatEngine", message)
+            }
+        }
+        memoryEngine.onLog = { [weak self] level, message in
+            Task { @MainActor [weak self] in
+                self?.log(level, "Memory", message)
             }
         }
         terminationObserver = NotificationCenter.default.addObserver(
@@ -279,6 +297,11 @@ final class RuntimeCoordinator {
                 try await memory.open()
             } catch {
                 log(.error, "Database", "无法打开数据库：\(error.localizedDescription)")
+            }
+            do {
+                try await characterStore.activate()
+            } catch {
+                log(.error, "Memory", "无法打开角色记忆目录：\(error.localizedDescription)")
             }
             // 迁移/认领完成、最终账号库打开后再接日志落库，避免提前创建目标库。
             LogPipeline.shared.attach(store: store, memory: memory)
@@ -478,10 +501,6 @@ final class RuntimeCoordinator {
                 merged.removeFirst(merged.count - AppStore.logBufferLimit)
             }
             store.replaceLogs(merged)
-        }
-
-        if let memories = try? await memory.fetchMemories(limit: 500) {
-            store.longTermMemories = memories
         }
 
         // Schedules: settings JSON is canonical; DB is the crash-recovery mirror.
@@ -1142,6 +1161,13 @@ final class RuntimeCoordinator {
         pendingVoiceTranscriptionIDs.removeAll()
         voiceTranscriptionAttempted.removeAll()
         lastVoiceTranscriptionEnabled = nil
+        // 记忆维护可能正在写记忆卡：先取消并 await，避免停止后仍往数据库写。
+        let maintenanceTasks = Array(memoryMaintenanceTasks.values)
+        memoryMaintenanceTasks.removeAll()
+        memoryMaintenanceInFlight.removeAll()
+        memoryMaintenancePending.removeAll()
+        maintenanceTasks.forEach { $0.cancel() }
+        for task in maintenanceTasks { await task.value }
         await scheduler.stop()
         if store.settings.hook.autoStartBridge {
             hookManager.stopBridge()
@@ -1253,6 +1279,7 @@ final class RuntimeCoordinator {
         // 旧账号的日志/设置必须先落盘，再关库。
         await LogPipeline.shared.flushNow()
         await SettingsPersistence.shared.flush()
+        await characterStore.suspend()
         await memory.suspend()
 
         do {
@@ -1263,11 +1290,13 @@ final class RuntimeCoordinator {
             }
             try AccountProfile.activate(id)
             try await memory.switchToActiveAccountDatabase()
+            try await characterStore.activate()
         } catch {
             log(.error, "Account", "切换账号数据失败：\(error.localizedDescription)")
             // 尽力回到原账号，避免 App 停在一个“半切换”状态。
             try? AccountProfile.activate(previousID)
             try? await memory.switchToActiveAccountDatabase()
+            try? await characterStore.activate()
             store.isBotRunning = false
             store.settings.bot.enabled = false
             store.lastAccountSwitchError = "切换微信账号数据失败：\(error.localizedDescription)"
@@ -1289,6 +1318,10 @@ final class RuntimeCoordinator {
         }
         await loadPersistedState()
         await loadStats()
+        if store.isMemoryPageVisible {
+            await loadCharacterSummaries()
+            await selectCharacter(store.selectedCharacterID)
+        }
 
         store.isBotRunning = false
         store.settings.bot.enabled = false
@@ -1346,6 +1379,7 @@ final class RuntimeCoordinator {
         pendingVoiceTranscriptionIDs.removeAll()
         voiceTranscriptionAttempted.removeAll()
         memoryMaintenanceInFlight.removeAll()
+        memoryMaintenancePending.removeAll()
         lastSchedulerTasks = []
         lastVoiceTranscriptionEnabled = nil
         didAutoPromptVoiceSetup = false
@@ -1355,7 +1389,11 @@ final class RuntimeCoordinator {
         clearReplyProgresses()
         store.conversations = []
         store.messages = [:]
-        store.longTermMemories = []
+        store.characterSummaries = []
+        store.selectedCharacterID = nil
+        store.isAllCharactersSelected = false
+        store.characterMemories = []
+        store.characterInteractions = []
         store.replaceLogs([])
         store.selectedConversationID = nil
         store.stats = .zero
@@ -3685,6 +3723,15 @@ final class RuntimeCoordinator {
         }
     }
 
+    func messageCount(conversationID: String? = nil) async -> Int {
+        do {
+            return try await memory.messageCount(conversationID: conversationID)
+        } catch {
+            log(.warning, "Memory", "messageCount 失败：\(error.localizedDescription)")
+            return 0
+        }
+    }
+
     func deleteMessage(id: String) async {
         do {
             try await memory.deleteMessage(id: id)
@@ -3721,93 +3768,350 @@ final class RuntimeCoordinator {
         } catch {
             log(.warning, "Memory", "删除会话失败：\(error.localizedDescription)")
         }
+        do {
+            try await characterStore.deleteCharacter(conversationID: id)
+        } catch {
+            log(.warning, "Memory", "删除角色记忆卡失败：\(error.localizedDescription)")
+        }
         store.conversations.removeAll { $0.id == id }
         store.messages[id] = nil
         forgetReplyProgress(conversationID: id)
         if store.selectedConversationID == id { store.selectedConversationID = nil }
-        // Drop the conversation's memories locally instead of re-fetching all 500 rows.
-        store.longTermMemories.removeAll { $0.conversationID == id }
+        store.characterSummaries.removeAll { $0.conversationID == id }
+        if store.selectedCharacterID == id {
+            store.selectedCharacterID = nil
+            store.isAllCharactersSelected = false
+        }
+        if store.isMemoryPageVisible {
+            await loadCharacterSummaries()
+        }
         log(.info, "Memory", "已删除会话 \(id)")
     }
 
     // MARK: Memory maintenance
 
-    func loadLongTermMemories() async {
+    // MARK: Character memory v2 (runtime)
+
+    /// 记忆页左栏：全部角色摘要与计数。
+    func loadCharacterSummaries() async {
         do {
-            store.longTermMemories = try await memory.fetchMemories(limit: 500)
+            try? await characterStore.ensureGlobalCharacter()
+            let personas = Dictionary(uniqueKeysWithValues: store.conversations.map { conversation in
+                let persona = store.settings.persona(
+                    id: conversation.personaID ?? store.settings.bot.defaultPersonaID)
+                return (conversation.id, PersonaReference(persona))
+            })
+            var summaries = try await characterStore.listCharacters(
+                settings: store.settings.bot.memorySettings,
+                personas: personas
+            )
+            // 会话重命名后记忆卡标题可能尚未回写；列表以账号库里的当前展示名为准。
+            for index in summaries.indices {
+                if let conversation = store.conversations.first(
+                    where: { $0.id == summaries[index].conversationID }) {
+                    summaries[index].title = conversation.displayTitle
+                }
+            }
+            store.characterSummaries = summaries
         } catch {
-            log(.warning, "Memory", "读取长期记忆失败：\(error.localizedDescription)")
+            log(.warning, "Memory", "读取角色记忆卡列表失败：\(error.localizedDescription)")
         }
     }
 
-    func saveLongTermMemory(_ memory: LongTermMemory) async {
-        do {
-            var memory = memory
-            // 编辑器已收敛范围，这里再兜底一次，避免其它调用方写入越界权重。
-            memory.baseWeight = LongTermMemory.clampBaseWeight(memory.baseWeight)
-            try await self.memory.upsertMemory(memory)
-            // Patch the observable list in place instead of re-fetching and re-sorting
-            // 500 rows on every edit (which also invalidated the whole MemoryView).
-            applyMemoryChange(memory)
-            log(.info, "Memory", "已保存长期记忆：\(memory.summary.prefix(40))")
-        } catch {
-            log(.error, "Memory", "保存长期记忆失败：\(error.localizedDescription)")
+    /// 为还没有记忆卡的现有微信会话创建空记忆卡（不提取旧聊天）。
+    /// 用户在记忆页手动触发，避免升级后必须等机器人回复一次才能看到角色。
+    @discardableResult
+    func createMissingCharacterCards() async -> Int {
+        let systemIDs: Set<String> = [
+            "filehelper", "weixin", "newsapp", "fmessage", "medianote", "floatbottle"
+        ]
+        let settings = store.settings
+        var created = 0
+        for conversation in store.conversations {
+            guard !systemIDs.contains(conversation.id.lowercased()) else { continue }
+            if await characterStore.hasCharacter(conversationID: conversation.id) { continue }
+            let template = settings.persona(
+                id: conversation.personaID ?? settings.bot.defaultPersonaID)
+            do {
+                try await characterStore.ensureCharacter(
+                    conversation: conversation,
+                    persona: template,
+                    activationTimestamp: Date()
+                )
+                created += 1
+            } catch {
+                log(.warning, "Memory", "创建记忆卡失败（\(conversation.displayTitle)）：\(error.localizedDescription)")
+            }
         }
+        guard created > 0 else { return 0 }
+        await loadCharacterSummaries()
+        if store.isMemoryPageVisible {
+            if store.isAllCharactersSelected {
+                await selectCharacter(nil)
+            } else if let selected = store.selectedCharacterID {
+                await selectCharacter(selected)
+            } else {
+                clearCharacterSelection()
+            }
+        }
+        log(.info, "Memory", "已为 \(created) 个现有会话创建记忆卡")
+        return created
     }
 
-    func deleteLongTermMemory(id: String) async {
-        do {
-            try await memory.deleteMemory(id: id)
-            store.longTermMemories.removeAll { $0.id == id }
-            log(.info, "Memory", "已删除长期记忆")
-        } catch {
-            log(.error, "Memory", "删除长期记忆失败：\(error.localizedDescription)")
-        }
+    /// 清空角色选择，只保留栏目列表，不自动展示某个角色或聚合页。
+    func clearCharacterSelection() {
+        store.selectedCharacterID = nil
+        store.isAllCharactersSelected = false
+        store.characterMemories = []
+        store.characterInteractions = []
+        store.isLoadingCharacter = false
     }
 
-    /// Mirrors `MemoryStore.fetchMemories` ordering (core first, then time weight)
-    /// while touching only the changed row.
-    private func applyMemoryChange(_ memory: LongTermMemory) {
-        var updated = memory
-        if updated.conversationTitle.isEmpty, !updated.conversationID.isEmpty {
-            updated.conversationTitle = store.conversations.first { $0.id == updated.conversationID }?.title ?? ""
-        }
-        var memories = store.longTermMemories
-        if let index = memories.firstIndex(where: { $0.id == updated.id }) {
-            memories[index] = updated
-        } else {
-            memories.append(updated)
-        }
-        guard let movingIndex = memories.firstIndex(where: { $0.id == updated.id }) else {
-            store.longTermMemories = memories
+    /// 选中某个会话角色；nil 表示显式选择「全部角色」聚合视图。
+    func selectCharacter(_ conversationID: String?) async {
+        store.selectedCharacterID = conversationID
+        store.isAllCharactersSelected = (conversationID == nil)
+        store.isLoadingCharacter = true
+        defer { store.isLoadingCharacter = false }
+        guard let conversationID else {
+            do {
+                store.characterMemories = try await characterStore.fetchAllMemories(limit: 2_000)
+            } catch {
+                store.characterMemories = []
+                log(.warning, "Memory", "读取全部记忆失败：\(error.localizedDescription)")
+            }
+            store.characterInteractions = []
             return
         }
-        let item = memories.remove(at: movingIndex)
-        let now = Date()
-        let insertion = memories.firstIndex { other in
-            if item.isCore != other.isCore { return item.isCore && !other.isCore }
-            return item.timeWeight(now: now) > other.timeWeight(now: now)
-        } ?? memories.count
-        memories.insert(item, at: insertion)
-        store.longTermMemories = memories
+        do {
+            store.characterMemories = try await characterStore.fetchMemories(
+                conversationID: conversationID)
+            // 首次查看角色时补齐全量互动（最多 5000 条），之后只增量同步。
+            if let conversation = store.conversations.first(where: { $0.id == conversationID }),
+               (try? await characterStore.isInteractionsBackfilled(
+                    conversationID: conversationID)) == false {
+                await syncCharacterInteractions(conversation: conversation)
+            }
+            store.characterInteractions = try await characterStore.fetchInteractions(
+                conversationID: conversationID, limit: 1_000)
+        } catch {
+            store.characterMemories = []
+            store.characterInteractions = []
+            log(.warning, "Memory", "读取角色记忆卡失败：\(error.localizedDescription)")
+        }
     }
 
-    func setLongTermMemoryCore(_ memory: LongTermMemory, isCore: Bool) async {
-        var updated = memory
-        updated.isCore = isCore
-        updated.updatedAt = Date()
-        await saveLongTermMemory(updated)
+    @discardableResult
+    func saveCharacterMemory(_ memory: CharacterMemory) async -> Bool {
+        guard !memory.characterID.isEmpty else {
+            log(.warning, "Memory", "保存记忆失败：缺少角色会话 ID")
+            return false
+        }
+        var value = memory
+        value.normalizeKind(threshold: store.settings.bot.memorySettings.importanceThreshold)
+        do {
+            try await characterStore.upsertMemory(value)
+            if store.isMemoryPageVisible {
+                await selectCharacter(store.selectedCharacterID)
+                await loadCharacterSummaries()
+            }
+            log(.info, "Memory", "已保存记忆（\(value.category.label)，会话 \(value.characterID)）")
+            return true
+        } catch {
+            log(.error, "Memory", "保存记忆失败：\(error.localizedDescription)")
+            return false
+        }
     }
 
-    /// 后台把 10 条短期窗口之外的旧消息总结到长期记忆；不阻塞回复。
+    func deleteCharacterMemory(_ memory: CharacterMemory) async {
+        do {
+            try await characterStore.deleteMemory(
+                conversationID: memory.characterID, id: memory.id)
+            if store.isMemoryPageVisible {
+                await selectCharacter(store.selectedCharacterID)
+                await loadCharacterSummaries()
+            }
+            log(.info, "Memory", "已删除记忆")
+        } catch {
+            log(.error, "Memory", "删除记忆失败：\(error.localizedDescription)")
+        }
+    }
+
+    func compressCharacterMemory(_ memory: CharacterMemory) async {
+        let conversation = store.conversations.first(where: { $0.id == memory.characterID })
+            ?? Conversation(id: memory.characterID, kind: .direct, title: CharacterStore.globalTitle)
+        let provider = providerForMaintenance(conversation: conversation)
+        if await memoryEngine.compress(
+            memory: memory,
+            provider: provider,
+            settings: store.settings
+        ) != nil {
+            if store.isMemoryPageVisible {
+                await selectCharacter(store.selectedCharacterID)
+            }
+            log(.info, "Memory", "已压缩记忆（\(memory.category.label)）")
+        } else {
+            log(.warning, "Memory", "压缩记忆失败")
+        }
+    }
+
+    /// 取消一条记忆与它的取代对象之间的 supersede 标记（双方保留）。
+    func cancelSupersede(_ memory: CharacterMemory) async {
+        let all = store.characterMemories.filter { $0.characterID == memory.characterID }
+        var affectedIDs = Set<String>()
+        var changed: [CharacterMemory] = []
+        if let partnerID = memory.supersededBy, !partnerID.isEmpty {
+            affectedIDs.insert(partnerID)
+        }
+        if let supersedes = memory.supersedes, !supersedes.isEmpty {
+            for id in supersedes.split(separator: ",") {
+                affectedIDs.insert(String(id).trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+        for target in all where target.id == memory.id || affectedIDs.contains(target.id) {
+            var updated = target
+            updated.supersededBy = nil
+            updated.supersededAt = nil
+            if let supersedes = updated.supersedes, !supersedes.isEmpty {
+                let remaining = supersedes
+                    .split(separator: ",")
+                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !affectedIDs.contains($0) && $0 != memory.id && !$0.isEmpty }
+                updated.supersedes = remaining.isEmpty ? nil : remaining.joined(separator: ",")
+            }
+            changed.append(updated)
+        }
+        guard !changed.isEmpty else { return }
+        for updated in changed {
+            try? await characterStore.upsertMemory(updated)
+        }
+        if store.isMemoryPageVisible {
+            await selectCharacter(store.selectedCharacterID)
+        }
+        log(.info, "Memory", "已取消取代标记（\(changed.count) 条）")
+    }
+
+    func deleteCharacterCard(conversationID: String) async {
+        guard conversationID != CharacterStore.globalConversationID else {
+            log(.warning, "Memory", "全局共享记忆卡不能删除")
+            return
+        }
+        do {
+            try await characterStore.deleteCharacter(conversationID: conversationID)
+            store.characterSummaries.removeAll { $0.conversationID == conversationID }
+            if store.selectedCharacterID == conversationID {
+                store.selectedCharacterID = nil
+                store.isAllCharactersSelected = false
+                store.characterMemories = []
+                store.characterInteractions = []
+            }
+            if store.isMemoryPageVisible {
+                await loadCharacterSummaries()
+                if store.isAllCharactersSelected {
+                    await selectCharacter(nil)
+                } else if let selected = store.selectedCharacterID {
+                    await selectCharacter(selected)
+                } else {
+                    clearCharacterSelection()
+                }
+            }
+            log(.info, "Memory", "已删除角色记忆卡（\(conversationID)）")
+        } catch {
+            log(.error, "Memory", "删除角色记忆卡失败：\(error.localizedDescription)")
+        }
+    }
+
+    func loadCharacterInteractions(conversationID: String, search: String? = nil) async {
+        do {
+            store.characterInteractions = try await characterStore.fetchInteractions(
+                conversationID: conversationID, limit: 1_000, search: search)
+        } catch {
+            store.characterInteractions = []
+            log(.warning, "Memory", "读取全量互动失败：\(error.localizedDescription)")
+        }
+    }
+
+    /// 记忆页「预览注入/召回测试」：不累加访问计数。
+    func previewCharacterRecall(conversationID: String, query: String) async -> String? {
+        let recall = await memoryEngine.recall(
+            conversationID: conversationID,
+            query: query,
+            settings: store.settings.bot.memorySettings,
+            recordAccess: false
+        )
+        return recall.prompt
+    }
+
+    /// 导出 Markdown / JSON；format: "markdown" 或 "json"。
+    func exportCharacter(conversationID: String, format: String) async -> String? {
+        do {
+            guard let snapshot = try await characterStore.snapshot(
+                conversationID: conversationID) else {
+                log(.warning, "Memory", "导出失败：没有角色记忆卡")
+                return nil
+            }
+            let conversation = store.conversations.first(where: { $0.id == conversationID })
+            let persona = store.settings.persona(
+                id: conversation?.personaID ?? store.settings.bot.defaultPersonaID)
+            if format == "json" {
+                return CharacterMemoryExporter.json(
+                    snapshot: snapshot,
+                    persona: persona,
+                    settings: store.settings.bot.memorySettings
+                )
+            }
+            return CharacterMemoryExporter.markdown(
+                snapshot: snapshot,
+                persona: persona,
+                settings: store.settings.bot.memorySettings
+            )
+        } catch {
+            log(.error, "Memory", "导出记忆卡失败：\(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// 把旧版长期记忆导入当前会话角色；返回导入/合并条数。
+    @discardableResult
+    func importLegacyMemories(conversationID: String) async -> Int {
+        let legacy = ((try? await memory.fetchMemories(limit: 1_000)) ?? [])
+            .filter { $0.conversationID == conversationID || $0.conversationID.isEmpty }
+        guard !legacy.isEmpty else { return 0 }
+        do {
+            let count = try await characterStore.importLegacyMemories(
+                conversationID: conversationID,
+                memories: legacy,
+                settings: store.settings.bot.memorySettings
+            )
+            if store.isMemoryPageVisible {
+                await selectCharacter(store.selectedCharacterID)
+                await loadCharacterSummaries()
+            }
+            log(.info, "Memory", "已导入旧记忆 \(count) 条到当前角色（旧表保留只读）")
+            return count
+        } catch {
+            log(.error, "Memory", "导入旧记忆失败：\(error.localizedDescription)")
+            return 0
+        }
+    }
+
+    func saveMemorySettings(_ settings: MemorySettings) {
+        store.settings.bot.memorySettings = settings
+        store.persist()
+        log(.info, "Memory", "记忆设置已更新（批量 \(settings.extractionBatchSize) 条，"
+            + "最近 \(settings.recentWindowHours)h，合并阈值 \(settings.mergeSimilarity)）")
+    }
+
+    /// 后台把新互动同步到记忆卡并批量提取；不阻塞回复。
     private func scheduleMemoryMaintenance(conversationID: String) {
-        guard !memoryMaintenanceInFlight.contains(conversationID) else { return }
+        guard store.settings.bot.memorySettings.enabled else { return }
         guard let conversation = store.conversations.first(where: { $0.id == conversationID }) else { return }
+        if memoryMaintenanceInFlight.contains(conversationID) {
+            memoryMaintenancePending.insert(conversationID)
+            return
+        }
         let settings = store.settings
-        let providerID = conversation.providerID
-            ?? settings.bot.defaultProviderID
-            ?? settings.ai.defaultProviderID
-        let provider = providerID.flatMap { settings.provider(id: $0) }
+        let provider = providerForMaintenance(conversation: conversation)
         memoryMaintenanceInFlight.insert(conversationID)
         let epoch = accountEpoch
         let task = Task { [weak self] in
@@ -3815,19 +4119,92 @@ final class RuntimeCoordinator {
             defer {
                 self.memoryMaintenanceInFlight.remove(conversationID)
                 self.memoryMaintenanceTasks.removeValue(forKey: conversationID)
+                if self.memoryMaintenancePending.remove(conversationID) != nil {
+                    self.scheduleMemoryMaintenance(conversationID: conversationID)
+                }
             }
             guard epoch == self.accountEpoch else { return }
-            let count = await self.chatEngine.summarizeOverflow(
+            guard await self.characterStore.hasCharacter(conversationID: conversationID) else {
+                return
+            }
+            await self.syncCharacterInteractions(conversation: conversation)
+            guard epoch == self.accountEpoch else { return }
+            let result = await self.memoryEngine.extractIfNeeded(
                 conversation: conversation,
                 provider: provider,
                 settings: settings
             )
             guard epoch == self.accountEpoch else { return }
-            if count > 0 {
-                await self.loadLongTermMemories()
+            if let result, result.didChange {
+                await self.refreshCharacterUIAfterMaintenance(conversationID: conversationID)
             }
         }
         memoryMaintenanceTasks[conversationID] = task
+    }
+
+    private func syncCharacterInteractions(conversation: Conversation) async {
+        let needsBackfill = (try? await characterStore.isInteractionsBackfilled(
+            conversationID: conversation.id)) == false
+        let lastSynced = try? await characterStore.lastInteractionSyncedAt(
+            conversationID: conversation.id)
+        // 首次同步把历史聊天（最多最近 5000 条）一次性写入全量记忆卡；之后按
+        // interactions_synced_at 增量取新消息，避免每条消息都重写最近 500 条。
+        // 提取游标早已越过回填的历史，不会把旧聊天重新交给 AI 提取。
+        let fullBackfill = needsBackfill || lastSynced == nil
+        let after = fullBackfill ? nil : lastSynced
+        let limit = fullBackfill ? 5_000 : 500
+        guard let messages = try? await memory.fetchMessagesForMemory(
+            conversationID: conversation.id,
+            after: after,
+            limit: limit
+        ), !messages.isEmpty else {
+            if fullBackfill {
+                try? await characterStore.markInteractionsBackfilled(
+                    conversationID: conversation.id)
+            }
+            return
+        }
+        let inputs = MemoryEngine.interactionInputs(for: messages)
+        _ = try? await characterStore.upsertInteractions(
+            conversationID: conversation.id, records: inputs)
+        if let latest = messages.map(\.timestamp).max() {
+            try? await characterStore.markInteractionsSynced(
+                conversationID: conversation.id, through: latest)
+        }
+        if fullBackfill {
+            try? await characterStore.markInteractionsBackfilled(
+                conversationID: conversation.id)
+        }
+    }
+
+    private func refreshCharacterUIAfterMaintenance(conversationID: String) async {
+        guard store.isMemoryPageVisible else { return }
+        await loadCharacterSummaries()
+        if store.selectedCharacterID == conversationID || store.selectedCharacterID == nil {
+            await selectCharacter(store.selectedCharacterID)
+        }
+    }
+
+    /// 维护任务使用的通道：会话覆盖 → 全局默认；模型覆盖会话/人格卡的 model 由 ChatEngine 处理。
+    private func providerForMaintenance(conversation: Conversation) -> AIProvider? {
+        let settings = store.settings
+        let providerID = conversation.providerID
+            ?? settings.bot.defaultProviderID
+            ?? settings.ai.defaultProviderID
+        guard var provider = providerID.flatMap({ settings.provider(id: $0) }) else {
+            return nil
+        }
+        if let model = conversation.model?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !model.isEmpty {
+            provider.model = model
+        }
+        if let persona = settings.persona(
+            id: conversation.personaID ?? settings.bot.defaultPersonaID),
+           let model = persona.model?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !model.isEmpty {
+            provider.model = model
+        }
+        return provider
     }
 
     // MARK: Logs / stats
@@ -4137,6 +4514,12 @@ extension AppStore {
         await coordinator.clearMessages(conversationID: conversationID)
     }
 
+    func messageCount(conversationID: String? = nil) async -> Int {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.bootstrapIfNeeded()
+        return await coordinator.messageCount(conversationID: conversationID)
+    }
+
     func deleteMessage(id: String) async {
         let coordinator = RuntimeRegistry.coordinator(for: self)
         await coordinator.bootstrapIfNeeded()
@@ -4182,30 +4565,98 @@ extension AppStore {
         return (try? await coordinator.memory.searchMessages(query: query, limit: limit)) ?? []
     }
 
-    // MARK: Long-term memory (UI API)
+    // MARK: Character memory v2 (UI API)
 
-    func loadLongTermMemories() async {
+    @discardableResult
+    func createMissingCharacterCards() async -> Int {
         let coordinator = RuntimeRegistry.coordinator(for: self)
         await coordinator.bootstrapIfNeeded()
-        await coordinator.loadLongTermMemories()
+        return await coordinator.createMissingCharacterCards()
     }
 
-    func saveLongTermMemory(_ memory: LongTermMemory) async {
+    func loadCharacterSummaries() async {
         let coordinator = RuntimeRegistry.coordinator(for: self)
         await coordinator.bootstrapIfNeeded()
-        await coordinator.saveLongTermMemory(memory)
+        await coordinator.loadCharacterSummaries()
     }
 
-    func deleteLongTermMemory(id: String) async {
-        let coordinator = RuntimeRegistry.coordinator(for: self)
-        await coordinator.bootstrapIfNeeded()
-        await coordinator.deleteLongTermMemory(id: id)
+    func clearCharacterSelection() {
+        selectedCharacterID = nil
+        isAllCharactersSelected = false
+        characterMemories = []
+        characterInteractions = []
+        isLoadingCharacter = false
     }
 
-    func setLongTermMemoryCore(_ memory: LongTermMemory, isCore: Bool) async {
+    func selectCharacter(_ conversationID: String?) async {
         let coordinator = RuntimeRegistry.coordinator(for: self)
         await coordinator.bootstrapIfNeeded()
-        await coordinator.setLongTermMemoryCore(memory, isCore: isCore)
+        await coordinator.selectCharacter(conversationID)
+    }
+
+    @discardableResult
+    func saveCharacterMemory(_ memory: CharacterMemory) async -> Bool {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.bootstrapIfNeeded()
+        return await coordinator.saveCharacterMemory(memory)
+    }
+
+    func deleteCharacterMemory(_ memory: CharacterMemory) async {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.bootstrapIfNeeded()
+        await coordinator.deleteCharacterMemory(memory)
+    }
+
+    func compressCharacterMemory(_ memory: CharacterMemory) async {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.bootstrapIfNeeded()
+        await coordinator.compressCharacterMemory(memory)
+    }
+
+    func cancelSupersede(_ memory: CharacterMemory) async {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.bootstrapIfNeeded()
+        await coordinator.cancelSupersede(memory)
+    }
+
+    func deleteCharacterCard(conversationID: String) async {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.bootstrapIfNeeded()
+        await coordinator.deleteCharacterCard(conversationID: conversationID)
+    }
+
+    func loadCharacterInteractions(conversationID: String, search: String? = nil) async {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.bootstrapIfNeeded()
+        await coordinator.loadCharacterInteractions(
+            conversationID: conversationID, search: search)
+    }
+
+    func previewCharacterRecall(conversationID: String, query: String) async -> String? {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.bootstrapIfNeeded()
+        return await coordinator.previewCharacterRecall(
+            conversationID: conversationID, query: query)
+    }
+
+    func exportCharacter(conversationID: String, format: String) async -> String? {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.bootstrapIfNeeded()
+        return await coordinator.exportCharacter(
+            conversationID: conversationID, format: format)
+    }
+
+    @discardableResult
+    func importLegacyMemories(conversationID: String) async -> Int {
+        let coordinator = RuntimeRegistry.coordinator(for: self)
+        await coordinator.bootstrapIfNeeded()
+        return await coordinator.importLegacyMemories(conversationID: conversationID)
+    }
+
+    func saveMemorySettings(_ settings: MemorySettings) {
+        self.settings.bot.memorySettings = settings
+        persist()
+        RuntimeRegistry.existing(for: self)?.log(.info, "Memory", "记忆设置已更新")
     }
 
     func currentSelfID() -> String {
