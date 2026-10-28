@@ -10,7 +10,6 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     case ai
     case personas
     case memory
-    case schedules
     case logs
     case settings
 
@@ -24,7 +23,6 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .ai: L("AI 模型")
         case .personas: L("人格设定")
         case .memory: L("记忆库")
-        case .schedules: L("定时任务")
         case .logs: L("运行日志")
         case .settings: L("设置")
         }
@@ -38,7 +36,6 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .ai: "sparkles"
         case .personas: "person.crop.circle.badge.quote"
         case .memory: "brain"
-        case .schedules: "calendar.badge.clock"
         case .logs: "text.alignleft"
         case .settings: "gearshape"
         }
@@ -49,7 +46,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     }
 
     static var automation: [SidebarItem] {
-        [.bot, .ai, .personas, .schedules]
+        [.bot, .ai, .personas]
     }
 
     static var system: [SidebarItem] {
@@ -938,6 +935,70 @@ extension WorkingHours {
     }
 }
 
+// MARK: - WorkingHours 展示与收敛（纯函数）
+//
+// RuleEngine 直接使用上面的 `contains`；这里提供的都是不会改变既有判定语义的
+// 辅助纯函数，供工作时间编辑器、徽标与全局卡片统一文案 / 兜底无效配置。
+extension WorkingHours {
+    /// 有效星期（过滤 1...7 之外的值并升序）。
+    var validWeekdays: [Int] {
+        weekdays.filter { (1...7).contains($0) }.sorted()
+    }
+
+    /// 一分钟精度的 `HH:mm`；越界分钟会先收敛到 0...1439。
+    static func minuteText(_ minute: Int) -> String {
+        let clamped = min(max(minute, 0), 1439)
+        return String(format: "%02d:%02d", clamped / 60, clamped % 60)
+    }
+
+    /// 只有时段的摘要，例如 `09:00–18:00`；跨夜时标注「次日」。
+    var timeRangeText: String {
+        let start = Self.minuteText(startMinute)
+        let end = Self.minuteText(endMinute)
+        return startMinute > endMinute ? Lf("%@–次日 %@", start, end) : "\(start)–\(end)"
+    }
+
+    /// 完整时段摘要，例如「工作日 09:00–18:00」「每天 22:00–次日 06:00」；
+    /// 未启用时统一为「不限时段」，启用但没有有效星期时直接说明不会生效。
+    var summaryText: String {
+        guard enabled else { return L("不限时段") }
+        guard !validWeekdays.isEmpty else { return L("未选择任何星期，不会生效") }
+        return "\(UIFormat.weekdaySummary(validWeekdays)) \(timeRangeText)"
+    }
+
+    /// 开始与结束相同：零长度窗口，`contains` 永远为 false。
+    var hasZeroLengthWindow: Bool { startMinute == endMinute }
+
+    /// 启用后在真实判定中永远不会命中的配置（没有有效星期，或零长度窗口）。
+    /// 只读判断，不改变 `contains` 的既有语义。
+    var isNeverEffective: Bool {
+        enabled && (validWeekdays.isEmpty || hasZeroLengthWindow)
+    }
+
+    /// 与 `sanitized` 不同即表示配置需要修复（供 UI 显示校验提示）。
+    var needsRepair: Bool { self != sanitized }
+
+    /// 收敛后的副本：
+    /// - 分钟限制到 0...1439，星期过滤为 1...7；
+    /// - 启用但没有有效星期时回退为每天，避免「看似开着却永不生效」；
+    /// - 启用且开始 == 结束时把结束顺延一小时（23:30 → 次日 00:30）。
+    var sanitized: WorkingHours {
+        var copy = self
+        copy.startMinute = min(max(startMinute, 0), 1439)
+        copy.endMinute = min(max(endMinute, 0), 1439)
+        copy.weekdays = Set(validWeekdays)
+        if copy.enabled {
+            if copy.weekdays.isEmpty {
+                copy.weekdays = Set(1...7)
+            }
+            if copy.startMinute == copy.endMinute {
+                copy.endMinute = (copy.startMinute + 60) % 1440
+            }
+        }
+        return copy
+    }
+}
+
 struct HumanizeSettings: Codable, Hashable {
     var enabled: Bool = true
     var minDelayMs: Int = 700
@@ -1295,6 +1356,16 @@ struct BotSettings: Codable, Hashable {
     /// 随账号 `profile.json` 保存；缺键不会影响旧配置解码。
     var memory: MemorySettings?
 
+    /// 主动聊天设置（2026-10-28 起）。nil 表示旧配置，使用默认值（默认关闭）。
+    /// 随账号 `profile.json` 保存；缺键不会影响旧配置解码。
+    var proactive: ProactiveChatSettings?
+
+    /// 主动聊天设置的读写入口：nil 时返回默认值并收敛范围。
+    var proactiveSettings: ProactiveChatSettings {
+        get { (proactive ?? ProactiveChatSettings()).sanitized }
+        set { proactive = newValue.sanitized }
+    }
+
     /// 记忆设置的读写入口：nil 时返回默认值并收敛范围。
     var memorySettings: MemorySettings {
         get { (memory ?? MemorySettings.default).sanitized }
@@ -1510,6 +1581,7 @@ extension BotSettings {
         case defaultProviderID, defaultPersonaID, pat, wakeWindow, voice, memory
         case imageFetchEnabled, selfMentionNames, whitelistEntries, blacklistEntries
         case whitelistConversations, blacklistConversations, whitelistUsers, blacklistUsers
+        case proactive
     }
 
     init(from decoder: Decoder) throws {
@@ -1546,6 +1618,7 @@ extension BotSettings {
         wakeWindow = try? container.decodeIfPresent(WakeWindowSettings.self, forKey: .wakeWindow)
         voice = try? container.decodeIfPresent(VoiceSettings.self, forKey: .voice)
         memory = try? container.decodeIfPresent(MemorySettings.self, forKey: .memory)
+        proactive = try? container.decodeIfPresent(ProactiveChatSettings.self, forKey: .proactive)
         imageFetchEnabled = try? container.decodeIfPresent(Bool.self, forKey: .imageFetchEnabled)
         selfMentionNames = try? container.decodeIfPresent(
             [String: String].self, forKey: .selfMentionNames)

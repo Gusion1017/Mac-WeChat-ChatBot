@@ -91,6 +91,14 @@ final class AppStore {
     /// 由 `RuntimeCoordinator` 在收到消息后写入，供会话页头、输入区状态条与会话列表实时展示。
     var replyProgress: [String: ReplyProgress] = [:]
 
+    /// 主动聊天统计（运行期，随账号状态加载；不写入 `config.json`）。
+    var proactiveSentToday: Int = 0
+    var proactiveLastSentAt: Date?
+    /// 最近一次主动聊天检查的时间与结论（例如「没有满足条件的会话」），
+    /// 用于设置页解释「为什么没有发」，不持久化。
+    var proactiveLastCheckAt: Date?
+    var proactiveLastCheckNote: String = ""
+
     /// 入站图片获取队列（设置开关 + 串行请求）。生命周期跟随 AppStore，
     /// 由 Runtime 注入请求/回调闭包；`@Observable` 不追踪（UI 无需刷新）。
     let imageFetcher = ImageFetcher()

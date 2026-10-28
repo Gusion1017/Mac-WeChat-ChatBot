@@ -1,13 +1,16 @@
 import SwiftUI
 
-/// 「机器人」页的子栏目。2026-10-26 起把原本的单页长列表拆成 6 个子栏目：
-/// 状态与基础开关、触发方式、唤醒与互动、名单、节奏（频率/时段/拟人化）与语音。
+/// 「机器人」页的子栏目。2026-10-26 起把原本的单页长列表拆成子栏目：
+/// 状态与基础开关、触发方式、唤醒与互动、名单、节奏（频率/时段/拟人化）、
+/// 主动聊天（2026-10-28）与语音。
 enum BotTab: String, CaseIterable, Identifiable, PageTabItem {
     case general
     case trigger
     case interaction
     case lists
     case rhythm
+    case schedules
+    case proactive
     case voice
 
     var id: String { rawValue }
@@ -19,6 +22,8 @@ enum BotTab: String, CaseIterable, Identifiable, PageTabItem {
         case .interaction: "互动"
         case .lists: "名单"
         case .rhythm: "节奏"
+        case .schedules: "定时"
+        case .proactive: "主动"
         case .voice: "语音"
         }
     }
@@ -30,6 +35,8 @@ enum BotTab: String, CaseIterable, Identifiable, PageTabItem {
         case .interaction: "hand.tap.fill"
         case .lists: "checklist"
         case .rhythm: "gauge.with.dots.needle.33percent"
+        case .schedules: "calendar.badge.clock"
+        case .proactive: "hand.wave.fill"
         case .voice: "waveform"
         }
     }
@@ -41,12 +48,14 @@ enum BotTab: String, CaseIterable, Identifiable, PageTabItem {
         case .interaction: "唤醒窗口与拍一拍回复"
         case .lists: "白名单与黑名单"
         case .rhythm: "频率、工作时间与拟人化"
+        case .schedules: "定时向指定会话发送固定内容"
+        case .proactive: "会话静默后由 AI 主动发起聊天"
         case .voice: "语音转写、TTS 与音色"
         }
     }
 }
 
-/// 机器人：状态、策略、名单、节奏与语音，按子栏目组织，减少单页滚动。
+/// 机器人：状态、策略、名单、节奏、主动聊天与语音，按子栏目组织，减少单页滚动。
 struct BotView: View {
     @Environment(AppStore.self) private var store
     @Environment(ToastCenter.self) private var toast
@@ -134,6 +143,10 @@ struct BotView: View {
             limitsCard
             workingHoursCard
             humanizeCard
+        case .schedules:
+            SchedulesPanel()
+        case .proactive:
+            ProactiveChatPanel()
         case .voice:
             VoiceSettingsPanel()
         }
@@ -547,54 +560,24 @@ struct BotView: View {
     private var workingHoursCard: some View {
         SectionCard(
             title: "工作时间",
-            subtitle: "非工作时段不自动回复",
+            subtitle: "全局默认；非工作时段不自动回复，单个会话可在「会话」页覆盖",
             symbol: "clock",
             tint: Theme.warning
         ) {
-            VStack(alignment: .leading, spacing: 12) {
-                Toggle(L("启用工作时间限制"), isOn: bind(\.bot.workingHours.enabled))
-                    .toggleStyle(.switch)
-                    .font(.callout)
-
-                Text(L("这是全局默认时段；可在「会话」页为单个会话设置独立时段或取消限制。"))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-
-                HStack(spacing: 5) {
-                    ForEach(UIFormat.weekdayOptions, id: \.value) { option in
-                        FilterChip(
-                            title: option.label,
-                            isSelected: store.settings.bot.workingHours.weekdays.contains(option.value),
-                            tint: Theme.warning
-                        ) {
-                            toggleWeekday(option.value)
-                        }
-                    }
-                    Spacer()
-                }
-                .disabled(!store.settings.bot.workingHours.enabled)
-                .opacity(store.settings.bot.workingHours.enabled ? 1 : 0.5)
-
-                HStack(spacing: 16) {
-                    DatePicker(
-                        "开始",
-                        selection: timeBinding(\.bot.workingHours.startMinute),
-                        displayedComponents: .hourAndMinute
-                    )
-                    DatePicker(
-                        "结束",
-                        selection: timeBinding(\.bot.workingHours.endMinute),
-                        displayedComponents: .hourAndMinute
-                    )
-                    Spacer()
-                    Text(L("跨夜时段会自动识别"))
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                .disabled(!store.settings.bot.workingHours.enabled)
-                .opacity(store.settings.bot.workingHours.enabled ? 1 : 0.5)
-            }
+            WorkingHoursEditor(mode: .global, hours: workingHoursBinding)
         }
+    }
+
+    /// 全局工作时间写入前统一收敛：越界分钟/星期、空星期与零长度窗口都兜底修正，
+    /// 避免出现「看起来开着却永远不会生效」的配置。
+    private var workingHoursBinding: Binding<WorkingHours> {
+        Binding(
+            get: { store.settings.bot.workingHours },
+            set: { hours in
+                store.settings.bot.workingHours = hours.sanitized
+                store.persist()
+            }
+        )
     }
 
     // MARK: Humanize
@@ -808,25 +791,6 @@ struct BotView: View {
         )
     }
 
-    private func timeBinding(_ keyPath: WritableKeyPath<AppSettings, Int>) -> Binding<Date> {
-        Binding(
-            get: {
-                let minutes = store.settings[keyPath: keyPath]
-                return Calendar.current.date(
-                    bySettingHour: minutes / 60,
-                    minute: minutes % 60,
-                    second: 0,
-                    of: Date()
-                ) ?? Date()
-            },
-            set: { date in
-                let components = Calendar.current.dateComponents([.hour, .minute], from: date)
-                store.settings[keyPath: keyPath] = (components.hour ?? 0) * 60 + (components.minute ?? 0)
-                store.persist()
-            }
-        )
-    }
-
     // MARK: Group triggers
 
     private var selectedGroupTriggers: Set<TriggerMode> {
@@ -865,17 +829,6 @@ struct BotView: View {
         let mode = L(store.settings.bot.dryRun ? "演练模式" : "真实发送")
         let gateway = L(store.gatewayConnected ? "OneBot 已连接" : "OneBot 未连接")
         return Lf("%@ · %@ · %@", state, mode, gateway)
-    }
-
-    private func toggleWeekday(_ weekday: Int) {
-        var days = store.settings.bot.workingHours.weekdays
-        if days.contains(weekday) {
-            days.remove(weekday)
-        } else {
-            days.insert(weekday)
-        }
-        store.settings.bot.workingHours.weekdays = days
-        store.persist()
     }
 
     private func addKeyword() {

@@ -738,7 +738,6 @@
 "再次点击收起当前对话" = "Click again to collapse this chat";
 "勾选「关键词」后生效" = "Takes effect once \"Keyword\" is selected";
 "密钥不会写入配置文件" = "Keys Are Not Stored in the Config File";
-"尚未配置 AI 通道" = "No AI channel configured yet";
 "已从备份还原官方微信" = "Official WeChat restored from backup";
 "已从官方备份恢复微信" = "WeChat restored from the official backup";
 "已启用「关键词」触发" = "Keyword trigger enabled";
@@ -1888,3 +1887,125 @@
 "为现有会话创建记忆卡？" = "Create memory cards for existing chats?";
 "创建记忆卡" = "Create memory cards";
 "将为还没有记忆卡的现有微信会话创建空记忆卡（人设卡 + 起点记忆），不会提取旧聊天；之后可在各角色中导入旧记忆。" = "Empty memory cards (persona card + origin memory) will be created for existing WeChat chats that have none. Old chats are not extracted; you can import old memories per character later.";
+
+/* Proactive chat (2026-10-28): Bot → Proactive panel and ProactiveChatSettings.idleLabel. */
+"启用主动聊天" = "Enable proactive chat";
+"今日已发 %d 条" = "%d sent today";
+"上次 %@" = "Last %@";
+"未选择任何会话" = "No conversations selected";
+"暂无可选会话；启动机器人并收到消息后会出现在这里。" = "No conversations available yet; start the bot and they will appear after messages arrive.";
+"从会话选择…" = "Choose from conversations…";
+"静默多久后主动" = "Start after quiet period";
+"对方未回复时不再主动" = "Stay quiet while unanswered";
+"快捷" = "Presets";
+"主动权提示词" = "Proactive prompt";
+"可选话题（最多 8 个，留空由 AI 决定）" = "Optional topics (up to 8; leave empty and the AI decides)";
+"例如：周末计划、最近的考试、天气" = "e.g. weekend plans, upcoming exams, weather";
+"发送" = "Send";
+"%d%%" = "%d%%";
+"%d 小时" = "%d hr";
+"%.1f 小时" = "%.1f hr";
+"%d 天" = "%d days";
+"%.1f 天" = "%.1f days";
+
+/* Proactive chat: panel section titles, pills, notices and test-send copy.
+   These reach L() through shared components (SectionCard/InlineNotice/PillLabel/FilterChip/
+   SettingsRow/Toast) or SwiftUI's LocalizedStringKey, so the keys are the source strings. */
+"主动聊天" = "Proactive Chat";
+"会话静默一段时间后，让 AI 主动找你聊天" = "After a chat goes quiet for a while, let the AI start a conversation with you";
+"主动对象" = "Active Targets";
+"节奏与上限" = "Pacing & Limits";
+"发送时段" = "Active Hours";
+"聊什么" = "What to Talk About";
+"当前在生效时段" = "Inside the active window";
+"当前不在生效时段" = "Outside the active window";
+"上一条主动消息发出后对方还没回，就跳过该会话，避免自说自话和催促感。" = "Skip this chat while the last proactive message is still unanswered, so it never talks to itself or nags.";
+"不限制时段" = "No Time Limit";
+"上次检查 %@：%@" = "Last check %@: %@";
+
+/* Working-hours UX (2026-10-28): shared editor, three-state chat menu, toasts and status badge. */
+"当前全局：%@" = "Global now: %@";
+"当前全局：" = "Global now: ";
+"保存后此会话：" = "After saving, this chat: ";
+"当前状态：" = "Current status: ";
+"关闭后为「不限时段」：任何时间都会自动回复；单个会话仍可在「会话」页单独覆盖。" = "When off, hours are unrestricted: automatic replies are allowed at any time. Individual chats can still override this on the Conversations page.";
+"跨夜时段会自动识别；结束分钟不计入时段（如 09:00–18:00 到 18:00 结束）。" = "Overnight ranges are detected automatically; the end minute is exclusive (09:00–18:00 ends at 18:00).";
+"修复设置" = "Fix settings";
+"仅影响此会话的自动回复；手动发送不受影响。" = "Affects only auto-replies in this chat; manual sending is unaffected.";
+"自定义时段" = "Custom Hours";
+"自定义时段（%@）" = "Custom Hours (%@)";
+"跟随全局（%@）" = "Follow Global (%@)";
+"此会话使用「机器人 → 节奏 → 工作时间」的全局设置，全局改动会同步生效。" = "This chat uses the global setting from Bot → Pacing → Working Hours; global changes apply here automatically.";
+"为这个会话单独设置时段；选择后不再受全局设置影响。" = "Set working hours just for this chat; it stops following the global setting once selected.";
+"此会话任何时间都允许自动回复，规则引擎不会因时间拦截（手动发送不受影响）。" = "Auto-replies are allowed at any time in this chat; the rule engine will not block them by time (manual sending is unaffected).";
+"使用「机器人 → 节奏 → 工作时间」的全局设置，全局改动会同步生效。" = "Uses the global setting from Bot → Pacing → Working Hours; global changes apply automatically.";
+"为这个会话单独设置时段，不再受全局设置影响。" = "Set working hours just for this chat; the global setting no longer applies.";
+"这个会话在任何时间都允许自动回复，规则引擎不会因时间拦截。" = "Auto-replies are allowed at any time in this chat; the rule engine will not block them by time.";
+"此会话自定义" = "Custom for this chat";
+"跟随全局默认" = "Following global default";
+"此会话已设为「不限时段」：任何时间都允许自动回复，规则引擎不会因时间拦截。" = "This chat is set to “No Limit”: auto-replies are allowed at any time and the rule engine will not block them by time.";
+"全局未启用工作时间限制（不限时段）：任何时间都允许自动回复，规则引擎不会因时间拦截。" = "Working-hours limits are off globally (No Limit): auto-replies are allowed at any time and the rule engine will not block them by time.";
+"未选择任何星期，不会生效" = "No weekdays selected, so this never takes effect";
+"\n注意：开始与结束相同，时段永远不会生效。" = "\nNote: start equals end, so this range never takes effect.";
+"工作时间：不限时段（%@）" = "Working hours: no limit (%@)";
+"工作时间：工作时段（%@ · %@）" = "Working hours: active (%@ · %@)";
+"工作时间：非工作时段（%@ · %@）" = "Working hours: outside (%@ · %@)";
+"已保存此会话的自定义时段：%@" = "Saved custom hours for this chat: %@";
+"此会话已跟随全局工作时间：%@" = "This chat now follows global working hours: %@";
+"清理聊天记录…" = "Clean Up Chat History…";
+"已清理当前会话聊天记录" = "Chat history cleared for this chat";
+"%@ · %@ · %@" = "%@ · %@ · %@";
+"自定义会开启时间限制" = "Custom Hours Turns the Time Limit On";
+"全局默认 vs 会话覆盖" = "Global Default vs. Per-Chat Override";
+"会话设置优先于全局：选「跟随全局」时同步全局；选「自定义时段」或「不限时段」后，此会话不再随全局变化。" = "Per-chat settings take precedence over the global one: “Follow Global” keeps syncing with the global setting, while “Custom Hours” and “No Limit” stop this chat from following global changes.";
+"全局默认" = "Global Default";
+"这里是全局默认时段，只影响没有单独设置的会话；单个会话可在「会话」页覆盖或设为「不限时段」。" = "These are the global default hours and apply only to chats without their own override. Individual chats can override them or choose “No Limit” on the Conversations page.";
+"每天 9–23" = "Daily 9–23";
+"工作日 9–18" = "Weekdays 9–18";
+"已自动顺延结束时间" = "End Time Shifted Automatically";
+"至少保留一天" = "Keep at Least One Day";
+"如需在任何时间都自动回复，请关闭「启用工作时间限制」。" = "To allow auto-replies at any time, turn off “Enable Working Hours”.";
+"如需在任何时间都自动回复，请选择「不限时段」。" = "To allow auto-replies at any time, choose “No Limit”.";
+"时段配置无效" = "Invalid Working-Hours Configuration";
+"当前时段包含非法分钟/星期，或启用后永远不会命中；可一键修复为有效设置。" = "This range has invalid minutes/weekdays, or would never match while enabled. Fix it to valid settings with one click.";
+"此会话已设为不限时段" = "This chat is now set to No Limit";
+"全局默认；非工作时段不自动回复，单个会话可在「会话」页覆盖" = "Global default; no auto-replies outside working hours. Individual chats can override it on the Conversations page.";
+
+/* Proactive chat time-window priority (2026-10-28 follow-up). */
+"优先级：会话独立时段 → 节奏的工作时间 → 本页时段（兜底）" = "Priority: per-chat hours → Pacing working hours → fallback window on this page";
+"时段如何生效" = "How the active window resolves";
+"会话在「会话」页单独设置过工作时间时，以会话时段为准；否则使用「节奏 → 工作时间」的全局时段；两者都没有启用时，才使用这里的本页时段。" = "If the chat has its own working hours on the Chats page, those apply; otherwise the global Pacing → Working hours apply; only when neither is enabled does the fallback window on this page apply.";
+"启用主动页时段（兜底）" = "Enable the fallback window on this page";
+"…另有 %d 个主动对象" = "…and %d more targets";
+"会话未加载" = "Chat not loaded";
+"会话独立时段" = "Per-chat hours";
+"节奏的工作时间" = "Pacing working hours";
+"主动页时段" = "Proactive page window";
+"至少保留一天；如需完全不限制请关闭「启用主动页时段（兜底）」" = "Keep at least one day; to allow any time, turn off “Enable the fallback window on this page”.";
+
+/* Proactive chat pacing redesign (2026-10-28 follow-up). */
+"静默多久才主动，以及每个会话每天最多发几条" = "How quiet a chat must be before reaching out, and the per-chat daily cap";
+"每个会话每日上限" = "Per-chat daily cap";
+"这个会话每天最多主动 %d 条" = "Up to %d proactive messages per chat per day";
+"生成或发送失败后会固定等待 %@ 再重试，避免反复调用 AI。" = "After a failed generation or send, retry waits a fixed %@ so the AI is not called over and over.";
+
+/* Bot sub-tabs and proactive copy cleanup (2026-10-28 follow-up). */
+"定时" = "Schedules";
+"主动" = "Proactive";
+"定时向指定会话发送固定内容" = "Send fixed content to a chat on a schedule";
+"静默够久后，由 AI 结合人格、最近聊天与记忆现场生成一条消息；不是定时任务。" = "After a chat has been quiet long enough, the AI writes one message from the persona, recent chat and memories; this is not a scheduled task.";
+"私聊、群聊均可选择；未选择时不会发送" = "Direct chats and groups are both supported; nothing is sent until you pick one";
+"未选择主动对象" = "No active targets";
+"没有选中任何会话，不会发送消息。" = "No chats are selected, so nothing will be sent.";
+"未配置 AI 通道" = "No AI channel configured";
+"请先在「AI 模型」配置默认通道。" = "Configure a default channel under AI Models first.";
+"启动机器人后才会开始检查。" = "Checks start after the bot is running.";
+"最后一条消息距今超过该时长才考虑；主动发送后会重新计时。" = "Only considered once the last message is older than this; the timer restarts after a proactive send.";
+"微调" = "Fine-tune";
+"每次调整 %@" = "Adjust by %@";
+"每个会话单独计算，不同会话不共享额度。" = "Counted per chat; quotas are not shared across chats.";
+"仅当前两级时段都未启用时生效；不影响正常自动回复。" = "Only applies when both higher-priority windows are disabled; normal auto-replies are unaffected.";
+"跨夜自动识别；结束等于开始时顺延 1 小时" = "Overnight ranges are detected automatically; if end equals start, it shifts one hour later";
+"各对象实际时段" = "Effective window per target";
+"主动权提示词与可选话题；最终消息由 AI 生成" = "Proactive prompt and optional topics; the AI writes the final message";
+"会和人格、最近聊天与记忆一起交给模型；写「怎么开口」，不要写死具体内容。" = "Sent to the model together with the persona, recent chat and memories. Describe how to open; do not hardcode the content.";

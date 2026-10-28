@@ -1,14 +1,19 @@
 import SwiftUI
 
-/// 会话级工作时间编辑器：跟随全局，或为该会话单独设置不限制 / 指定时段。
+/// 会话级工作时间编辑器：跟随全局 / 自定义时段 / 不限时段三态互斥。
+///
+/// 保存映射：
+/// - 跟随全局 → `nil`（`Conversation.workingHours = nil`）
+/// - 不限时段 → `WorkingHours(enabled: false)`
+/// - 自定义时段 → 收敛后的 `WorkingHours`（`enabled == true`）
 struct ConversationWorkingHoursSheet: View {
     let conversationTitle: String
     let global: WorkingHours
     let onSave: (WorkingHours?) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @State private var followsGlobal: Bool
-    @State private var hours: WorkingHours
+    @State private var choice: WorkingHoursChoice
+    @State private var draft: WorkingHours
 
     init(
         conversationTitle: String,
@@ -19,160 +24,82 @@ struct ConversationWorkingHoursSheet: View {
         self.conversationTitle = conversationTitle
         self.global = global
         self.onSave = onSave
-        _followsGlobal = State(initialValue: current == nil)
-        _hours = State(initialValue: current ?? WorkingHours(
-            enabled: true,
-            startMinute: global.startMinute,
-            endMinute: global.endMinute,
-            weekdays: global.weekdays
-        ))
+        _choice = State(initialValue: WorkingHoursChoice(current))
+
+        // 自定义缓冲始终按「启用」准备：全局未启用时切到自定义，编辑器会明确提示
+        // 「保存后将开启时间限制」，不会让用户以为只是编辑时段。
+        // 会话当前是「不限时段」时没有有意义的时段，自定义从全局默认开始。
+        var buffer = current.flatMap { $0.enabled ? $0 : nil } ?? global
+        buffer.enabled = true
+        if buffer.weekdays.isEmpty { buffer.weekdays = Set(1...7) }
+        if buffer.startMinute == buffer.endMinute {
+            buffer.endMinute = (buffer.startMinute + 60) % 1440
+        }
+        _draft = State(initialValue: buffer.sanitized)
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                IconTile(symbol: "clock.badge.checkmark", tint: Theme.warning, size: 30)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(L("会话工作时间")).font(.headline)
-                    Text(conversationTitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 13)
-
+            header
             Divider()
-
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Picker(L("时段来源"), selection: $followsGlobal) {
-                        Text(L("跟随全局")).tag(true)
-                        Text(L("自定义")).tag(false)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-
-                    if followsGlobal {
-                        VStack(alignment: .leading, spacing: 7) {
-                            Text(L("当前全局工作时间"))
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            Text(L(globalSummary))
-                                .font(.callout)
-                            Text(L("之后在「机器人 → 工作时间」修改全局设置时，此会话会同步生效。"))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(13)
-                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    } else {
-                        Toggle(L("启用时间限制"), isOn: $hours.enabled)
-                            .toggleStyle(.switch)
-                            .font(.callout)
-
-                        if hours.enabled {
-                            HStack(spacing: 5) {
-                                ForEach(UIFormat.weekdayOptions, id: \.value) { option in
-                                    FilterChip(
-                                        title: option.label,
-                                        isSelected: hours.weekdays.contains(option.value),
-                                        tint: Theme.warning
-                                    ) {
-                                        toggleWeekday(option.value)
-                                    }
-                                }
-                                Spacer()
-                            }
-
-                            HStack(spacing: 16) {
-                                DatePicker(
-                                    L("开始"),
-                                    selection: minuteBinding(\.startMinute),
-                                    displayedComponents: .hourAndMinute
-                                )
-                                DatePicker(
-                                    L("结束"),
-                                    selection: minuteBinding(\.endMinute),
-                                    displayedComponents: .hourAndMinute
-                                )
-                                Spacer()
-                                Text(L("跨夜时段会自动识别"))
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                            }
-                        } else {
-                            Text(L("关闭限制后，此会话在任何时间都会自动回复。"))
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                }
+                WorkingHoursEditor(
+                    mode: .conversation(global: global),
+                    hours: $draft,
+                    choice: $choice
+                )
                 .padding(20)
             }
-
             Divider()
-
-            HStack(spacing: 9) {
-                Spacer()
-                Button(L("取消")) { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button(L("保存")) {
-                    onSave(followsGlobal ? nil : hours)
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
-                .keyboardShortcut(.defaultAction)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
+            footer
         }
-        .frame(width: 540, height: 470)
+        .frame(width: 580, height: 620)
         .background(.regularMaterial)
     }
 
-    // MARK: Helpers
+    // MARK: 头部
 
-    private var globalSummary: String {
-        summary(global)
-    }
-
-    private func summary(_ hours: WorkingHours) -> String {
-        guard hours.enabled else { return "不限制时间" }
-        return "\(UIFormat.weekdaySummary(Array(hours.weekdays))) · \(minuteLabel(hours.startMinute))–\(minuteLabel(hours.endMinute))"
-    }
-
-    private func minuteLabel(_ minute: Int) -> String {
-        String(format: "%02d:%02d", minute / 60, minute % 60)
-    }
-
-    private func toggleWeekday(_ weekday: Int) {
-        if hours.weekdays.contains(weekday) {
-            hours.weekdays.remove(weekday)
-        } else {
-            hours.weekdays.insert(weekday)
-        }
-    }
-
-    private func minuteBinding(_ keyPath: WritableKeyPath<WorkingHours, Int>) -> Binding<Date> {
-        Binding(
-            get: {
-                let minutes = hours[keyPath: keyPath]
-                return Calendar.current.date(
-                    bySettingHour: minutes / 60,
-                    minute: minutes % 60,
-                    second: 0,
-                    of: Date()
-                ) ?? Date()
-            },
-            set: { date in
-                let components = Calendar.current.dateComponents([.hour, .minute], from: date)
-                hours[keyPath: keyPath] = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+    private var header: some View {
+        HStack(spacing: 10) {
+            IconTile(symbol: "clock.badge.checkmark", tint: Theme.warning, size: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L("会话工作时间")).font(.headline)
+                Text(conversationTitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-        )
+            Spacer(minLength: 8)
+            PillLabel(
+                text: choice.title,
+                color: choice == .unrestricted ? .secondary : Theme.warning,
+                symbol: choice.symbol
+            )
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 13)
+    }
+
+    // MARK: 底部
+
+    private var footer: some View {
+        HStack(spacing: 9) {
+            Text(L("仅影响此会话的自动回复；手动发送不受影响。"))
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Button(L("取消")) { dismiss() }
+                .keyboardShortcut(.cancelAction)
+            Button(L("保存")) {
+                onSave(choice.savedValue(custom: draft))
+                dismiss()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.accent)
+            .keyboardShortcut(.defaultAction)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
     }
 }

@@ -14,6 +14,7 @@
 | [`memory.md`](memory.md) | **记忆系统 v2**：每会话角色目录只放 `memory.sqlite` 记忆卡（人格统一来自人格设定，旧 `persona.md` 进废纸篓）+ 固定 `c-__global__` 全局共享卡（手动维护、注入所有会话）、四类记忆、72h/重要度加权召回、0.92 折叠与 supersede、批量提取、全量互动、App 记忆面板与导出；旧 `memories` 表只读兼容 | 现行契约 |
 | [`ui-design.md`](ui-design.md) | SwiftUI 信息架构、设计 token、组件拆分与交互约定 | 现行契约 |
 | [`voice.md`](voice.md) | **语音能力**：入站转写、出站 TTS/克隆、103 音色选择与试听、按引擎模型下载、系统语音资源、失败降级与 4.2 Hook 限制 | 现行契约 |
+| [`proactive-chat.md`](proactive-chat.md) | **主动聊天**：机器人 → 主动、会话静默后由 AI 现场生成、主动对象/时段/静默/单会话每日上限/失败退避/未回复保护、60s 轮询与最久静默优先、时段优先级（会话 > 全局 > 主动页兜底）、dry-run、状态持久化与安全边界 | 现行契约 |
 | [`cosyvoice.md`](cosyvoice.md) | **CosyVoice3 本地旁路**：可选高保真 TTS、安装/下载、本机音色管理、HTTP 契约、性能与回退 | 现行契约 |
 | [`releases/1.6.0.md`](releases/1.6.0.md) | v1.6.0 发布说明（下载/校验值/本版重点/已知限制），入库保存，避免只存在于 `dist/` | 发布记录 |
 
@@ -32,6 +33,7 @@
 - 想改 App 页面或交互：[`ui-design.md`](ui-design.md) + [`core-services.md`](core-services.md)。
 - 想懂账号切换/换微信后数据去哪了：[`accounts.md`](accounts.md)。
 - 想懂记忆/召回：[`memory.md`](memory.md)。
+- 想懂主动聊天（为什么没发 / 怎么控频 / 与定时任务的区别）：[`proactive-chat.md`](proactive-chat.md)。
 - 只想本地联调（无微信）：[`../devtools/README.md`](../devtools/README.md)。
 - 提交前自检：`bash scripts/check.sh`；文档链接：`python3 scripts/check_docs.py`。
 

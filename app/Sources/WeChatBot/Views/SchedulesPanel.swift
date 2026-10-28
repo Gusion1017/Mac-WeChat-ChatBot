@@ -1,7 +1,10 @@
 import SwiftUI
 
-/// 定时任务：列表 + 新建/编辑 + 下次执行时间。
-struct SchedulesView: View {
+/// 定时任务（嵌入「机器人 → 定时」子栏目）：列表 + 新建/编辑 + 下次执行时间。
+///
+/// 侧边栏不再单列「定时任务」页，改为机器人设置内的子栏目，与主动聊天、语音等
+/// 自动化能力放在一起；调度器与 `ScheduledTask` 持久化逻辑完全不变。
+struct SchedulesPanel: View {
     @Environment(AppStore.self) private var store
     @Environment(ToastCenter.self) private var toast
 
@@ -26,71 +29,82 @@ struct SchedulesView: View {
     }
 
     var body: some View {
-        ScrollingPage(title: "定时任务", subtitle: subtitle) {
-            Button {
-                addTask()
-            } label: {
-                Label(L("新建任务"), systemImage: "plus")
-            }
-            .buttonStyle(.glassProminent)
-            .tint(Theme.accent)
-        } content: {
-            if store.schedules.isEmpty {
-                GlassCard {
-                    EmptyState(
-                        symbol: "calendar.badge.clock",
-                        title: "还没有定时任务",
-                        message: "可以定时向某个会话发送消息，例如每日问候、整点提醒。",
-                        actionTitle: "新建定时任务"
-                    ) {
+        VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
+            SectionCard(
+                title: "定时任务",
+                subtitle: subtitle,
+                symbol: "calendar.badge.clock",
+                tint: Theme.info,
+                trailing: {
+                    Button {
                         addTask()
+                    } label: {
+                        Label(L("新建任务"), systemImage: "plus")
                     }
+                    .buttonStyle(.glassProminent)
+                    .controlSize(.small)
+                    .tint(Theme.accent)
                 }
-            } else {
-                HStack(spacing: 8) {
-                    ForEach(ScheduleFilter.allCases) { option in
-                        FilterChip(
-                            title: option.label,
-                            count: count(for: option),
-                            isSelected: filter == option,
-                            tint: Theme.info
-                        ) {
-                            filter = option
+            ) {
+                VStack(alignment: .leading, spacing: 12) {
+                    if !store.schedules.isEmpty {
+                        HStack(spacing: 8) {
+                            ForEach(ScheduleFilter.allCases) { option in
+                                FilterChip(
+                                    title: option.label,
+                                    count: count(for: option),
+                                    isSelected: filter == option,
+                                    tint: Theme.info
+                                ) {
+                                    filter = option
+                                }
+                            }
+                            Spacer(minLength: 0)
                         }
                     }
-                    Spacer()
-                }
 
-                if filteredTasks.isEmpty {
-                    EmptyState(
-                        symbol: "calendar.badge.clock",
-                        title: "没有匹配的任务",
-                        message: "切换筛选条件查看其他任务。"
-                    )
-                } else {
-                    VStack(spacing: 9) {
-                        ForEach(filteredTasks) { task in
-                            ScheduleRow(
-                                task: task,
-                                nextFire: task.nextFireAt ?? ScheduleMath.nextFire(for: task),
-                                conversationLabel: conversationLabel(for: task),
-                                onToggle: { enabled in setEnabled(task, enabled) },
-                                onEdit: {
-                                    isEditingNew = false
-                                    editingTask = task
-                                },
-                                onDelete: { pendingDelete = task }
-                            )
+                    if store.schedules.isEmpty {
+                        EmptyState(
+                            symbol: "calendar.badge.clock",
+                            title: "还没有定时任务",
+                            message: "可以定时向某个会话发送消息，例如每日问候、整点提醒。",
+                            actionTitle: "新建定时任务"
+                        ) {
+                            addTask()
                         }
+                    } else if filteredTasks.isEmpty {
+                        EmptyState(
+                            symbol: "calendar.badge.clock",
+                            title: "没有匹配的任务",
+                            message: "切换筛选条件查看其他任务。"
+                        )
                     }
+
+                    InlineNotice(
+                        kind: .info,
+                        title: "执行条件",
+                        message: "定时任务由 App 内调度器执行，仅当机器人运行且 OneBot 已连接时才会真正发送。时间以系统时区为准。"
+                    )
                 }
             }
 
-            InlineNotice(
-                kind: .info,
-                title: "执行条件",
-                message: "定时任务由 App 内调度器执行，仅当机器人运行且 OneBot 已连接时才会真正发送。时间以系统时区为准。"
-            )
+            if !store.schedules.isEmpty, !filteredTasks.isEmpty {
+                VStack(spacing: 9) {
+                    ForEach(filteredTasks) { task in
+                        ScheduleRow(
+                            task: task,
+                            nextFire: task.nextFireAt ?? ScheduleMath.nextFire(for: task),
+                            conversationLabel: conversationLabel(for: task),
+                            onToggle: { enabled in setEnabled(task, enabled) },
+                            onEdit: {
+                                isEditingNew = false
+                                editingTask = task
+                            },
+                            onDelete: { pendingDelete = task }
+                        )
+                    }
+                }
+            }
         }
         .sheet(item: $editingTask) { task in
             ScheduleEditorSheet(task: task, isNew: isEditingNew) { updated in
@@ -116,7 +130,7 @@ struct SchedulesView: View {
 
     private var subtitle: String {
         let enabled = store.schedules.filter(\.enabled).count
-        return "\(store.schedules.count) 个任务 · \(enabled) 个启用"
+        return Lf("%d 个任务 · %d 个启用", store.schedules.count, enabled)
     }
 
     private var filteredTasks: [ScheduledTask] {

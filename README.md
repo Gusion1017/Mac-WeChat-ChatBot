@@ -44,6 +44,13 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
   升级旧版时旧单库/旧媒体只复制保留、不删除；运行中换号会停止机器人，需手动重新启动。
   详见 [`docs/accounts.md`](docs/accounts.md)
 - **拟人化延迟**、回复进度倒计时、防睡眠、定时主动消息、实时会话看板、会话重命名/置顶/删除聊天（仅本机）、运行日志
+- **主动聊天（2026-10-28，默认关闭）**：机器人 →「主动」子栏目。会话静默够久后，由 AI 结合人格、
+  最近聊天与记忆现场生成一条消息先开口；主动对象支持私聊与群聊，可设置静默时长、单会话每日上限、
+  未回复保护、发送时段、提示词与话题。运行中每 60 秒检查一次、最久静默优先、每轮最多一条；
+  发送节奏由静默时长自然控制（无最小间隔/概率设置），失败固定退避 30 分钟；
+  支持演练模式，发送时段按「会话独立时段 > 全局工作时间 > 主动页兜底时段」生效，并持久化每日计数与「等待回复」状态。
+  与定时任务（到点发固定内容）区分，
+  详见 [`docs/proactive-chat.md`](docs/proactive-chat.md)
 - **设备与账户**：总览「设备与账户」卡与菜单栏弹层显示本机电池电量 / 充电状态 / 剩余时间
   （IOKit，30 秒刷新）和 DeepSeek 账户余额（总额、赠送/充值、可用状态；启动查询 + 每 5 分钟刷新，
   可手动刷新；Key 读取自 Keychain 中的 DeepSeek 通道，未配置时给出去 AI 模型页的入口）
@@ -62,7 +69,7 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
   > 首次启用/微信重启后需手动发一条文字 + 一条语音捕获句柄，bridge 重启自动恢复；
   > 首次开启语音回复或 bridge 启动检测到句柄缺失时会自动弹出捕获引导。详见 [`docs/voice.md`](docs/voice.md)。
 - **4.1.15.55 / 4.2.0.5 / 4.2.0.9 R3 原生文本发送**（设置内开关，无句柄时自动排队）；**通讯录真实昵称 / 群名**（本机只读）
-- **机器人页 6 个子栏目**：常规 / 触发 / 互动 / 名单 / 节奏 / 语音，工具栏下方 sticky 分栏条，
+- **机器人页 8 个子栏目**：常规 / 触发 / 互动 / 名单 / 节奏 / 定时 / 主动 / 语音（定时任务从侧边栏移入），工具栏下方 sticky 分栏条，
   切换回填顶部、按窗口记忆上次子栏目
 - **首启向导环境检查**：显示 Xcode Command Line Tools 状态，可一键「安装 Command Line Tools」
   （`xcode-select --install`）并「重新检测」；CLT 未就绪时禁用 Hook 安装
@@ -72,7 +79,7 @@ human-like replies with DeepSeek / any OpenAI-compatible model.
 
 | 模块 | 状态 |
 | --- | --- |
-| SwiftUI App / Swift 核心 | ✅ 504 项测试（8 项按环境跳过：模型未下载/联网/真实 E2E）；4.1.15.55 / 4.2.0.5 文本真机 E2E |
+| SwiftUI App / Swift 核心 | ✅ 559 项测试（8 项按环境跳过：模型未下载/联网/真实 E2E）；4.1.15.55 / 4.2.0.5 文本真机 E2E |
 | OneBot bridge（Go） | ✅ 构建 / 鉴权 / 真机附加 / 64 顶层 · 76 子测试通过 |
 | 首启向导 / 安装 | ✅ CLT 检测与安装引导、微信版本 / Hook 预检、备份约 665MB（磁盘需 ≥2.5GB） |
 | 微信 4.1.12.53 | ✅ legacy 收发 + 主动发送 |
@@ -96,8 +103,8 @@ WeChatAI.app (SwiftUI)          bridge/onebot (Go)              WeChat.app
 
 ### 快速开始
 
-- **普通用户**：下载 [`WeChat-AI-1.7.0.zip`](https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/download/v1.7.0/WeChat-AI-1.7.0.zip)
-  （约 72 MB，[SHA256](https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/download/v1.7.0/WeChat-AI-1.7.0.zip.sha256)），
+- **普通用户**：下载 [`WeChat-AI-1.8.0.zip`](https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/download/v1.8.0/WeChat-AI-1.8.0.zip)
+  （约 72 MB，[SHA256](https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/download/v1.8.0/WeChat-AI-1.8.0.zip.sha256)），
   按下面步骤安装；历史版本见 [Tags](https://github.com/Gusion1017/WeChat-ChatBot-Mac/tags)。
 
   1. 解压得到 `WeChat AI.app`，拖到 `~/Applications`（当前用户，无需管理员）或 `/Applications`（所有用户）。
@@ -155,7 +162,7 @@ App 内可在 设置 → Hook → 还原官方微信 一键还原（还原前先
 ### 目录结构
 
 ```
-app/        SwiftUI App（SwiftPM）+ 504 项测试；app/Vendor/（sherpa-onnx 静态库）不入库
+app/        SwiftUI App（SwiftPM）+ 559 项测试；app/Vendor/（sherpa-onnx 静态库）不入库
 bridge/     Go OneBot 桥接（GPL-3.0 衍生，改动见 NOTICE）；silkenc/ SILK 编码，testdata/ 测试样本
 hook/       script.js（唯一事实来源）与版本地址表
 tools/      Hook 安装、备份、还原
@@ -179,9 +186,9 @@ bash scripts/package_release.sh     # Releases 用 zip + sha256
 make release                        # 同上：构建 → 打包 → 签名校验 → sha256
 ```
 
-发布产物为 `dist/WeChat-AI-1.7.0.zip`（约 72MB）与 `.sha256`。打包脚本会自动
+发布产物为 `dist/WeChat-AI-1.8.0.zip`（约 72MB）与 `.sha256`。打包脚本会自动
 `codesign --verify --strict`；`spctl -a -vv` 对 ad-hoc 未公证包预期返回 `rejected`（属正常），
-分发前在 `dist/` 内用 `shasum -a 256 -c WeChat-AI-1.7.0.zip.sha256` 校验。
+分发前在 `dist/` 内用 `shasum -a 256 -c WeChat-AI-1.8.0.zip.sha256` 校验。
 
 改了 `hook/script.js` 记得跑 `bash scripts/sync_hook_script.sh`。接口 / 行为变更先改 `docs/` 再改代码。
 GitHub Actions 只跑 Linux 可完成的检查（文档链接、脚本语法、副本一致、无构建产物）。
@@ -255,6 +262,16 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
   switch and must be restarted manually. See [`docs/accounts.md`](docs/accounts.md)
 - **Human-like delay**, reply progress countdown, sleep prevention, scheduled messages, live
   conversation board and runtime logs
+- **Proactive chat (2026-10-28, off by default)**: the bot → "Proactive" sub-tab. Once a conversation
+  has been quiet long enough, the AI opens a new one by generating a message from the persona,
+  recent chat and memories; targets can be direct chats or groups, with idle threshold, per-chat
+  daily cap, unanswered protection, active hours, prompt and topics. While running it checks every 60 seconds,
+  prefers the longest-silent target and sends at most one message per tick; pacing comes from the
+  idle threshold itself (no minimum-interval/probability knobs) and failures back off for 30 minutes.
+  Dry-run is supported; the active window resolves as conversation-specific hours >
+  global working hours > the fallback window on the Proactive page. Daily counters and the
+  awaiting-reply flag are persisted. Different from scheduled tasks (fixed time, fixed text) — see
+  [`docs/proactive-chat.md`](docs/proactive-chat.md)
 - **Device & Account**: the Overview card and menu-bar popover show the Mac's battery percentage,
   charging state and remaining time (IOKit, 30 s refresh), plus the DeepSeek account balance (total,
   granted/topped-up amounts, availability; queried at launch, refreshed every 5 minutes and on demand,
@@ -277,8 +294,9 @@ GPL-3.0，见 [`LICENSE`](LICENSE)。基于
   > with WeChat-compatible 24k encoding. Handle capture is documented in [`docs/voice.md`](docs/voice.md).
 - **4.1.15.55 / 4.2.0.5 / 4.2.0.9 R3 native text sending** (toggle in Settings, auto-queues without a send handle);
   **real contact nicknames / group names** (local, read-only)
-- **Six bot sub-tabs**: General / Triggers / Interaction / Lists / Pacing / Voice, with a sticky tab bar,
-  scroll-to-top on switch and per-window tab memory
+- **Eight bot sub-tabs**: General / Triggers / Interaction / Lists / Pacing / Schedules / Proactive /
+  Voice (scheduled tasks moved here from the sidebar), with a sticky tab bar, scroll-to-top on switch
+  and per-window tab memory
 - **First-run environment check**: shows Xcode Command Line Tools status, offers an
   "Install Command Line Tools" button (`xcode-select --install`) and "Check Again"; hook installation is
   disabled until CLT is ready
@@ -315,8 +333,8 @@ Contracts in [`docs/architecture.md`](docs/architecture.md); document index in
 ### Quick Start
 
 - **Regular users**: download
-  [`WeChat-AI-1.7.0.zip`](https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/download/v1.7.0/WeChat-AI-1.7.0.zip)
-  (~72 MB, [SHA256](https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/download/v1.7.0/WeChat-AI-1.7.0.zip.sha256))
+  [`WeChat-AI-1.8.0.zip`](https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/download/v1.8.0/WeChat-AI-1.8.0.zip)
+  (~72 MB, [SHA256](https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/download/v1.8.0/WeChat-AI-1.8.0.zip.sha256))
   and follow these steps; older versions are on [Tags](https://github.com/Gusion1017/WeChat-ChatBot-Mac/tags).
 
   1. Unzip `WeChat AI.app` and drag it to `~/Applications` (current user, no admin) or
@@ -404,10 +422,10 @@ bash scripts/package_release.sh     # release zip + sha256
 make release                        # same: build → package → signature check → sha256
 ```
 
-The release artifacts are `dist/WeChat-AI-1.7.0.zip` (~72MB) and `.sha256`. Packaging runs
+The release artifacts are `dist/WeChat-AI-1.8.0.zip` (~72MB) and `.sha256`. Packaging runs
 `codesign --verify --strict`; `spctl -a -vv` reports `rejected` for an ad-hoc, non-notarized bundle
 (that is expected). Verify before publishing with
-`cd dist && shasum -a 256 -c WeChat-AI-1.7.0.zip.sha256`.
+`cd dist && shasum -a 256 -c WeChat-AI-1.8.0.zip.sha256`.
 
 After editing `hook/script.js`, run `bash scripts/sync_hook_script.sh`. Change `docs/` before code
 for interface or behaviour changes. GitHub Actions only runs Linux-friendly checks (docs links,

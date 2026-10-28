@@ -278,24 +278,39 @@ struct ConversationsView: View {
                     }
                 }
                 Section(L("工作时间")) {
+                    let globalHours = store.settings.bot.workingHours
+                    let choice = WorkingHoursChoice(conversation.workingHours)
+                    let customHours = conversation.workingHours.flatMap { $0.enabled ? $0 : nil }
+
                     Button {
                         setWorkingHours(nil, for: conversation)
                     } label: {
-                        Label(L("跟随全局"), systemImage: conversation.workingHours == nil ? "checkmark" : "clock")
+                        Label(
+                            Lf("跟随全局（%@）", globalHours.summaryText),
+                            systemImage: choice == .followGlobal ? "checkmark" : "globe"
+                        )
                     }
+                    .help(L("此会话使用「机器人 → 节奏 → 工作时间」的全局设置，全局改动会同步生效。"))
+
                     Button {
                         workingHoursTarget = conversation
                     } label: {
                         Label(
-                            L(conversation.workingHours == nil ? "自定义时段…" : "编辑自定义时段…"),
-                            systemImage: "clock.badge.checkmark"
+                            customHours.map { Lf("自定义时段（%@）", $0.summaryText) } ?? L("自定义时段…"),
+                            systemImage: choice == .custom ? "checkmark" : "clock.badge.checkmark"
                         )
                     }
+                    .help(L("为这个会话单独设置时段；选择后不再受全局设置影响。"))
+
                     Button {
                         setWorkingHours(WorkingHours(enabled: false), for: conversation)
                     } label: {
-                        Label(L("此会话不限制"), systemImage: "infinity")
+                        Label(
+                            L("不限时段"),
+                            systemImage: choice == .unrestricted ? "checkmark" : "infinity"
+                        )
                     }
+                    .help(L("此会话任何时间都允许自动回复，规则引擎不会因时间拦截（手动发送不受影响）。"))
                 }
                 Section(L("名称")) {
                     Button {
@@ -604,13 +619,25 @@ struct ConversationsView: View {
         updated.workingHours = hours
         store.saveConversation(updated)
         if let hours {
-            toast.show(
-                hours.enabled ? "已保存此会话的工作时段" : "此会话已取消工作时间限制",
-                tone: .success,
-                symbol: "clock.badge.checkmark"
-            )
+            if hours.enabled {
+                toast.show(
+                    Lf("已保存此会话的自定义时段：%@", hours.summaryText),
+                    tone: .success,
+                    symbol: "clock.badge.checkmark"
+                )
+            } else {
+                toast.show(
+                    "此会话已设为不限时段",
+                    tone: .success,
+                    symbol: "infinity"
+                )
+            }
         } else {
-            toast.show("此会话已跟随全局工作时间", tone: .success, symbol: "clock")
+            toast.show(
+                Lf("此会话已跟随全局工作时间：%@", store.settings.bot.workingHours.summaryText),
+                tone: .success,
+                symbol: "globe"
+            )
         }
     }
 

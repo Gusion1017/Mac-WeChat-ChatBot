@@ -21,79 +21,52 @@ struct WorkingHoursBadge: View {
         let status = workingHours.status(at: date)
         return PillLabel(text: status.label, color: status.tint, symbol: status.symbol)
             .help(L(helpText(for: status)))
-            .accessibilityLabel(L(accessibilityText(for: status)))
+            .accessibilityLabel(accessibilityText(for: status))
     }
 
-    // MARK: Copy
+    // MARK: 文案
 
-    private var sourceLabel: String {
-        isOverride ? "会话时段" : "全局时段"
+    /// 统一措辞：工作时段 / 非工作时段 / 不限时段（见 `WorkingHoursEditor.swift`）。
+    private var sourceText: String {
+        isOverride ? "此会话自定义" : "跟随全局默认"
     }
 
     private func helpText(for status: WorkingHours.Status) -> String {
         switch status {
         case .unrestricted:
-            let reason = isOverride ? "此会话已取消工作时间限制" : "全局未启用工作时间限制"
-            return "\(reason)，规则引擎不会因时间拦截自动回复。"
+            return isOverride
+                ? "此会话已设为「不限时段」：任何时间都允许自动回复，规则引擎不会因时间拦截。"
+                : "全局未启用工作时间限制（不限时段）：任何时间都允许自动回复，规则引擎不会因时间拦截。"
         case .active:
-            return "当前处于工作时段，规则引擎不会因时间拦截自动回复。\n"
-                + "\(sourceLabel)：\(scheduleSummary)"
+            return "当前处于「工作时段」，规则引擎不会因时间拦截自动回复（手动发送不受影响）。\n"
+                + "来源：\(L(sourceText)) · \(workingHours.summaryText)"
+                + neverEffectiveNote
         case .paused:
-            return "当前不在工作时段，规则引擎会拦截自动回复（手动发送不受影响）。\n"
-                + "\(sourceLabel)：\(scheduleSummary)"
+            return "当前处于「非工作时段」，规则引擎会拦截此会话的自动回复（手动发送不受影响）。\n"
+                + "来源：\(L(sourceText)) · \(workingHours.summaryText)"
+                + neverEffectiveNote
         }
+    }
+
+    /// 零长度窗口在摘要里只显示为「09:00–09:00」，需要额外说明；空星期已由
+    /// `summaryText` 直接说明，不再重复。
+    private var neverEffectiveNote: String {
+        guard workingHours.enabled else { return "" }
+        if workingHours.hasZeroLengthWindow {
+            return L("\n注意：开始与结束相同，时段永远不会生效。")
+        }
+        return ""
     }
 
     private func accessibilityText(for status: WorkingHours.Status) -> String {
+        let source = L(sourceText)
         switch status {
         case .unrestricted:
-            return "工作时间：不限时段"
+            return Lf("工作时间：不限时段（%@）", source)
         case .active:
-            return "工作时间：当前处于工作时段，\(sourceLabel) \(scheduleSummary)"
+            return Lf("工作时间：工作时段（%@ · %@）", source, workingHours.summaryText)
         case .paused:
-            return "工作时间：当前不在工作时段，\(sourceLabel) \(scheduleSummary)"
-        }
-    }
-
-    /// 例如「工作日 09:00–18:00」；跨夜时标注「次日」，未选任何星期时直接说明。
-    private var scheduleSummary: String {
-        guard !workingHours.weekdays.isEmpty else { return "未选择任何星期" }
-        let days = UIFormat.weekdaySummary(Array(workingHours.weekdays))
-        let start = Self.minuteLabel(workingHours.startMinute)
-        let end = Self.minuteLabel(workingHours.endMinute)
-        let range = workingHours.startMinute > workingHours.endMinute
-            ? "\(start)–次日 \(end)"
-            : "\(start)–\(end)"
-        return "\(days) \(range)"
-    }
-
-    private static func minuteLabel(_ minute: Int) -> String {
-        String(format: "%02d:%02d", minute / 60, minute % 60)
-    }
-}
-
-private extension WorkingHours.Status {
-    var label: String {
-        switch self {
-        case .unrestricted: "不限时段"
-        case .active: "工作时段"
-        case .paused: "非工作时段"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .unrestricted: "infinity"
-        case .active: "clock.fill"
-        case .paused: "clock.badge.xmark"
-        }
-    }
-
-    var tint: Color {
-        switch self {
-        case .unrestricted: .secondary
-        case .active: Theme.success
-        case .paused: Theme.warning
+            return Lf("工作时间：非工作时段（%@ · %@）", source, workingHours.summaryText)
         }
     }
 }

@@ -66,7 +66,6 @@ struct PageRouter: View {
         case .ai: AIModelsView()
         case .personas: PersonasView()
         case .memory: MemoryView()
-        case .schedules: SchedulesView()
         case .logs: LogsView()
         case .settings: SettingsView()
         }

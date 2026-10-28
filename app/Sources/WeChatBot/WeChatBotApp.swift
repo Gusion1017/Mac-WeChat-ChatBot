@@ -160,8 +160,7 @@ struct AppCommands: Commands {
         case .ai: "4"
         case .personas: "5"
         case .memory: "6"
-        case .schedules: "7"
-        case .logs: "8"
+        case .logs: "7"
         case .settings: "0"
         }
     }

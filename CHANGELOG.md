@@ -6,6 +6,41 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-10-29
+
+### 新增
+
+- **主动聊天（2026-10-28，默认关闭）**：机器人页新增「主动」子栏目与 `ProactiveChatPanel`。
+  会话静默超过阈值后，由 AI 结合人格设定、最近聊天与记忆现场生成一条消息主动开口，
+  与定时任务（固定时间发固定内容）明确区分。设置项：总开关、主动对象（会话名单，支持私聊与群聊，空名单不发）、
+  静默时长（15 分钟–7 天，默认 3 小时）、单会话每日上限（默认 2 条）、
+  未回复保护、兜底发送时段（默认 09:00–23:00 每天，支持跨夜/按星期；优先级：会话独立时段 > 全局工作时间 > 本页兜底）、
+  主动权提示词与可选话题（最多 8 个、单条 40 字）。节奏设计：不再提供「最小间隔」「每分钟发送概率」
+  「所有会话合计上限」等难以解释的旋钮——成功发送后的间隔由静默时长自然决定（机器人自己的消息会重新计时），
+  生成/发送失败后固定退避 30 分钟，每会话每日上限单独生效、不同会话不共享额度。
+  运行机制：机器人运行且 OneBot 已连接时每 60 秒轮询一次，按硬门槛→时段→单会话上限→等待回复→静默→失败退避依次判定，
+  在多会话间按最久静默优先，每轮最多发送一条；发送成功后计数并置「等待回复」，
+  状态（`proactive.state`）随账号数据库持久化、跨日清零但保留时间戳。
+  支持 dry-run；主动发送时段按「会话独立时段 > 节奏（全局工作时间）> 主动页兜底时段」解析。
+  安全边界：默认关闭、空名单不发送、黑名单优先、公众号跳过、静默周期 + 单会话每日上限 +
+  失败退避 + 未回复保护，并随账号隔离。新增 `ProactiveChatTests` 单测覆盖设置收敛、Codable 兼容、
+  运行期状态、决策矩阵与主动聊天提示词；文档新增
+  [`docs/proactive-chat.md`](docs/proactive-chat.md)，并同步
+  [`docs/README.md`](docs/README.md)、根 `README.md` 与 `en.lproj` 英文文案。
+
+### 变更
+
+- **定时任务移入机器人页**：侧边栏不再单列「定时任务」，改为「机器人 → 定时」子栏目
+  （`SchedulesPanel`），与节奏、主动、语音等自动化设置集中在一起；调度器、持久化与编辑弹窗不变。
+  侧边栏快捷键顺延（运行日志改为 ⌘7）。
+- **主动对象支持群聊**：移除「只对私聊主动聊天」开关与判定；主动对象现在可同时选私聊和群聊，
+  群聊主动仍受静默、单会话每日上限、未回复保护与时段约束。
+- **主动聊天节奏与上限重构**：移除语义冗余的「同一会话最小间隔」「每分钟发送概率」与
+  「所有会话每天合计上限」；成功发送后的间隔由静默时长自然决定（机器人自己的消息重新计时），
+  生成/发送失败固定退避 30 分钟，仅保留单会话每日上限（1–5 条，默认 2）。
+  静默时长改为「快捷预设（30 分钟–7 天）+ 微调 Stepper」，不再使用 15 分钟–7 天的粗粒度滑杆；
+  主动页文案同步精简，去掉重复的状态与说明。
+
 ## [1.7.0] — 2026-10-28
 
 ### 变更
@@ -714,7 +749,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/compare/v1.8.0...HEAD
 [1.3.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.3.0
 [1.4.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.4.0
 [1.5.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.5.0
@@ -724,6 +759,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 [1.6.1]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.6.1
 [1.6.2]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.6.2
 [1.7.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.7.0
+[1.8.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.8.0
 [1.0.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.2.0

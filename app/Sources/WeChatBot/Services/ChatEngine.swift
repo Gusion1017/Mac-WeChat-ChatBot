@@ -155,6 +155,243 @@ final class ChatEngine: @unchecked Sendable {
         return plan
     }
 
+    // MARK: - Proactive chat
+
+    /// 生成一条「主动聊天」消息：会话静默一段时间后由机器人先开口。
+    ///
+    /// 与普通回复共用同一套人格、记忆召回与模型配置；区别只在提示词：
+    /// 末尾追加「现在轮到你先开口」的任务说明，并要求模型只输出一条消息正文。
+    /// 仍然支持失败重试、空回复清洗与拟人化分段（分段延迟由运行时决定是否使用）。
+    func generateProactiveReply(
+        conversation: Conversation,
+        settings: AppSettings,
+        persona: Persona?,
+        provider: AIProvider,
+        history: [ChatMessage],
+        dryRun: Bool
+    ) async throws -> ChatReplyPlan {
+        let maxRetries = max(0, settings.ai.retryCount)
+        var lastError: Error = AIError.emptyResponse
+
+        for attempt in 0...maxRetries {
+            do {
+                return try await attemptProactiveReply(
+                    conversation: conversation,
+                    settings: settings,
+                    persona: persona,
+                    provider: provider,
+                    history: history,
+                    dryRun: dryRun
+                )
+            } catch is CancellationError {
+                throw AIError.cancelled
+            } catch {
+                lastError = error
+                let retryable = (error as? AIError)?.isRetryable ?? false
+                if !retryable || attempt == maxRetries { throw error }
+                let delay = 400 * (attempt + 1)
+                onLog?(.warning, "主动聊天 AI 请求失败，\(delay)ms 后重试（\(attempt + 1)/\(maxRetries)）：\(error.localizedDescription)")
+                try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
+            }
+        }
+        throw lastError
+    }
+
+    private func attemptProactiveReply(
+        conversation: Conversation,
+        settings: AppSettings,
+        persona: Persona?,
+        provider: AIProvider,
+        history: [ChatMessage],
+        dryRun: Bool
+    ) async throws -> ChatReplyPlan {
+        let context = await buildProactivePromptContext(
+            conversation: conversation,
+            settings: settings,
+            persona: persona,
+            provider: provider,
+            history: history
+        )
+        let promptMessages = buildProactiveMessages(
+            conversation: conversation,
+            settings: settings,
+            personaPrompt: context.personaPrompt,
+            history: history,
+            memoryPrompt: context.memoryPrompt,
+            speakerIdentity: context.speakerIdentity
+        )
+        let temperature = settings.ai.temperature(
+            forModel: AIClient.effectiveModel(for: context.provider))
+        let result = try await aiClient.complete(
+            messages: promptMessages,
+            provider: context.provider,
+            temperature: temperature,
+            forceStream: Self.forceStream(for: settings)
+        )
+        let plan = makePlan(result: result, provider: context.provider, persona: persona,
+                            settings: Self.proactivePlanSettings(from: settings),
+                            dryRun: dryRun, contextCount: promptMessages.count)
+        guard !plan.segments.isEmpty else {
+            onLog?(.warning, "主动聊天生成的消息为空（清洗系统语音标注后没有剩余内容）")
+            throw AIError.emptyResponse
+        }
+        onLog?(.debug, "主动聊天消息生成完成：\(result.text.count) 字，\(Int(result.latencyMs))ms，"
+            + "tokens=\(result.usage.totalTokens)（上下文 \(promptMessages.count) 条）")
+        return plan
+    }
+
+    /// 组装主动聊天提示词（不发起 AI 请求，便于单测验证）。
+    ///
+    /// 结构：公共 system 段（人格 / 时间 / 记忆 / 群聊说明）+ 主动任务说明 +
+    /// 最近聊天历史 + 一条「这是系统操作提示」的 user 消息。
+    /// 最后一条 user 消息刻意写明「不是对方发来的」，避免模型把它当成对方的新发言。
+    func buildProactiveMessages(
+        conversation: Conversation,
+        settings: AppSettings,
+        personaPrompt: String?,
+        history: [ChatMessage],
+        memoryPrompt: String?,
+        speakerIdentity: String? = nil
+    ) -> [AIMessage] {
+        let proactive = settings.bot.proactiveSettings
+        var systemLines = baseSystemLines(
+            conversation: conversation,
+            settings: settings,
+            personaPrompt: personaPrompt,
+            memoryPrompt: memoryPrompt,
+            speakerIdentity: speakerIdentity
+        )
+        systemLines.append("现在是主动聊天场景：对方最近没有发新消息，由你主动开口。")
+        systemLines.append("主动聊天的要求：\(proactive.promptText)")
+        let topics = proactive.normalizedTopics
+        if !topics.isEmpty {
+            systemLines.append("可以自然聊到这些话题（不要生硬罗列）："
+                + topics.joined(separator: "、"))
+        }
+        systemLines.append("只输出要发送的一条微信消息正文：不要加引号、前缀、括号说明，"
+            + "不要解释你为什么发消息，也不要提到「主动」「系统」「提醒」等字眼。")
+
+        var messages: [AIMessage] = [.system(systemLines.joined(separator: "\n"))]
+
+        let configured = max(2, settings.bot.maxContextMessages)
+        let maxContext = min(configured, Self.shortTermMemoryLimit)
+        let recent = Array(history.suffix(maxContext))
+        let isGroupChat = conversation.kind == .group
+        let conversationMessages: [AIMessage] = recent.compactMap { message in
+            guard message.direction != .system else { return nil }
+            let content = Self.promptText(for: message)
+            guard !content.isEmpty else { return nil }
+            if message.direction == .outgoing {
+                return .assistant(content)
+            }
+            return .user(Self.attributedUserText(content, message: message, isGroupChat: isGroupChat))
+        }
+        messages.append(contentsOf: Self.mergeAdjacentRoles(conversationMessages))
+        messages.append(.user("（这是系统的操作提示，不是对方发来的消息）请直接输出你要主动发送的消息。"))
+        return messages
+    }
+
+    /// 主动聊天的上下文：记忆 v2 召回（或旧长期记忆兜底）。
+    ///
+    /// 主动聊天没有「本轮对方发言」，召回 query 用最近几条聊天 + 自定义话题拼成，
+    /// 让记忆召回仍然围绕当前关心的话题，而不是空白查询。
+    private func buildProactivePromptContext(
+        conversation: Conversation,
+        settings: AppSettings,
+        persona: Persona?,
+        provider: AIProvider,
+        history: [ChatMessage]
+    ) async -> ChatPromptContext {
+        let proactive = settings.bot.proactiveSettings
+        let recentTexts = history.suffix(4).compactMap { message -> String? in
+            let text = Self.promptText(for: message).trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        }
+        let query = (recentTexts + proactive.normalizedTopics + [proactive.promptText])
+            .joined(separator: "\n")
+        let lastIncoming = history.last(where: { $0.direction == .incoming })
+
+        if let characters, let memoryEngine {
+            let memorySettings = settings.bot.memorySettings
+            guard memorySettings.enabled else {
+                return ChatPromptContext(
+                    personaPrompt: persona?.systemPrompt,
+                    memoryPrompt: nil,
+                    speakerIdentity: nil,
+                    provider: provider,
+                    characterID: nil
+                )
+            }
+            do {
+                try await characters.ensureCharacter(
+                    conversation: conversation,
+                    persona: persona,
+                    activationTimestamp: Date()
+                )
+            } catch {
+                onLog?(.warning, "主动聊天：记忆卡不可用，仍使用人格设定：\(error.localizedDescription)")
+                return ChatPromptContext(
+                    personaPrompt: persona?.systemPrompt,
+                    memoryPrompt: nil,
+                    speakerIdentity: nil,
+                    provider: provider,
+                    characterID: nil
+                )
+            }
+            let recall = await memoryEngine.recall(
+                conversationID: conversation.id,
+                query: query,
+                settings: memorySettings
+            )
+            let identityMemories: [CharacterMemory]
+            if let local = try? await characters.fetchMemories(conversationID: conversation.id) {
+                let global = (try? await characters.fetchMemories(
+                    conversationID: CharacterStore.globalConversationID)) ?? []
+                identityMemories = local + global
+            } else {
+                identityMemories = recall.memories
+            }
+            let identity = lastIncoming.flatMap {
+                Self.speakerIdentityNote(
+                    conversation: conversation,
+                    incoming: $0,
+                    memories: identityMemories
+                )
+            }
+            onLog?(.debug, "主动聊天记忆召回 \(recall.memories.count) 条"
+                + "（角色 \(conversation.id)，省略 \(recall.omittedCount) 条）")
+            return ChatPromptContext(
+                personaPrompt: persona?.systemPrompt,
+                memoryPrompt: recall.prompt,
+                speakerIdentity: identity,
+                provider: provider,
+                characterID: conversation.id
+            )
+        }
+
+        // 旧路径（未注入记忆 v2 的单测/旧装配）：长期记忆兜底，不做早期片段召回。
+        let memories = (try? await memory.fetchMemoriesForPrompt(
+            conversationID: conversation.id,
+            limit: Self.longTermMemoryLimit
+        )) ?? []
+        let notes = await recallLongTermMemory(conversation: conversation, memories: memories)
+        let memoryPrompt = notes.map { "相关历史记忆（仅供参考，不要逐字复述）：\n\($0)" }
+        let identity = lastIncoming.flatMap {
+            Self.speakerIdentityNote(
+                conversation: conversation,
+                incoming: $0,
+                memories: memories
+            )
+        }
+        return ChatPromptContext(
+            personaPrompt: persona?.systemPrompt,
+            memoryPrompt: memoryPrompt,
+            speakerIdentity: identity,
+            provider: provider,
+            characterID: nil
+        )
+    }
+
     /// 组装一轮回复的提示词来源（不发起 AI 请求，便于单测记忆分支）。
     ///
     /// - 注入 `characters` + `memoryEngine` 且记忆设置开启：v2 路径，人格设定正文 +
@@ -319,6 +556,17 @@ final class ChatEngine: @unchecked Sendable {
         settings.ai.streamReplies ? nil : false
     }
 
+    /// 主动聊天用的生成设置：固定只发一条消息。
+    ///
+    /// 主动聊天是「先开口」，不是回复，分段发送会变成连续几条自言自语；
+    /// 因此关闭拟人化分段/延迟，由运行时直接发送单条正文。
+    static func proactivePlanSettings(from settings: AppSettings) -> AppSettings {
+        var copy = settings
+        copy.bot.humanize.enabled = false
+        copy.bot.humanize.splitMessages = false
+        return copy
+    }
+
     /// 旧签名（旧单测/旧装配）：人格模板正文 + 旧「相关历史记忆」标题包装。
     ///
     /// 行为与记忆 v2 之前完全一致；内部转调 `personaPrompt:` 重载。
@@ -362,6 +610,49 @@ final class ChatEngine: @unchecked Sendable {
         memoryPrompt: String?,
         speakerIdentity: String? = nil
     ) -> [AIMessage] {
+        var systemLines = baseSystemLines(
+            conversation: conversation,
+            settings: settings,
+            personaPrompt: personaPrompt,
+            memoryPrompt: memoryPrompt,
+            speakerIdentity: speakerIdentity
+        )
+
+        var messages: [AIMessage] = [.system(systemLines.joined(separator: "\n"))]
+
+        let configured = max(2, settings.bot.maxContextMessages)
+        let maxContext = min(configured, Self.shortTermMemoryLimit)
+        let recent = Array(history.suffix(maxContext))
+        let isGroupChat = conversation.kind == .group
+        var conversationMessages: [AIMessage] = recent.compactMap { message in
+            guard message.direction != .system else { return nil }
+            let content = Self.promptText(for: message)
+            guard !content.isEmpty else { return nil }
+            if message.direction == .outgoing {
+                return .assistant(content)
+            }
+            return .user(Self.attributedUserText(content, message: message, isGroupChat: isGroupChat))
+        }
+        let incomingText = Self.promptText(for: incoming)
+        if recent.last?.id != incoming.id, !incomingText.isEmpty {
+            conversationMessages.append(.user(
+                Self.attributedUserText(incomingText, message: incoming, isGroupChat: isGroupChat)
+            ))
+        }
+        messages.append(contentsOf: Self.mergeAdjacentRoles(conversationMessages))
+        return messages
+    }
+
+    /// 系统提示词的公共部分：人格、时间、会话信息、引用/语音/图片格式说明、
+    /// 记忆召回段与发言人身份约束。普通回复与主动聊天共用，保证两种场景下
+    /// 人设、记忆与格式约束完全一致，只在末尾追加各自的任务说明。
+    private func baseSystemLines(
+        conversation: Conversation,
+        settings: AppSettings,
+        personaPrompt: String?,
+        memoryPrompt: String?,
+        speakerIdentity: String?
+    ) -> [String] {
         var systemLines: [String] = []
         let basePrompt = (personaPrompt ?? Persona.defaultSystemPrompt)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -408,30 +699,7 @@ final class ChatEngine: @unchecked Sendable {
         if let speakerIdentity, !speakerIdentity.isEmpty {
             systemLines.append(speakerIdentity)
         }
-
-        var messages: [AIMessage] = [.system(systemLines.joined(separator: "\n"))]
-
-        let configured = max(2, settings.bot.maxContextMessages)
-        let maxContext = min(configured, Self.shortTermMemoryLimit)
-        let recent = Array(history.suffix(maxContext))
-        let isGroupChat = conversation.kind == .group
-        var conversationMessages: [AIMessage] = recent.compactMap { message in
-            guard message.direction != .system else { return nil }
-            let content = Self.promptText(for: message)
-            guard !content.isEmpty else { return nil }
-            if message.direction == .outgoing {
-                return .assistant(content)
-            }
-            return .user(Self.attributedUserText(content, message: message, isGroupChat: isGroupChat))
-        }
-        let incomingText = Self.promptText(for: incoming)
-        if recent.last?.id != incoming.id, !incomingText.isEmpty {
-            conversationMessages.append(.user(
-                Self.attributedUserText(incomingText, message: incoming, isGroupChat: isGroupChat)
-            ))
-        }
-        messages.append(contentsOf: Self.mergeAdjacentRoles(conversationMessages))
-        return messages
+        return systemLines
     }
 
     /// 群聊里给 incoming 内容加上发言人前缀，避免多人群聊丢失说话人；
