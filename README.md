@@ -96,9 +96,9 @@ WeChatAI.app (SwiftUI)          bridge/onebot (Go)              WeChat.app
 
 ### 快速开始
 
-- **普通用户**：下载 [`WeChat-AI-1.7.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.7.0/WeChat-AI-1.7.0.zip)
-  （约 72 MB，[SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.7.0/WeChat-AI-1.7.0.zip.sha256)），
-  按下面步骤安装；历史版本见 [Tags](https://github.com/Gusion1017/Mac-WeChat-ChatBot/tags)。
+- **普通用户**：下载 [`WeChat-AI-1.7.0.zip`](https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/download/v1.7.0/WeChat-AI-1.7.0.zip)
+  （约 72 MB，[SHA256](https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/download/v1.7.0/WeChat-AI-1.7.0.zip.sha256)），
+  按下面步骤安装；历史版本见 [Tags](https://github.com/Gusion1017/WeChat-ChatBot-Mac/tags)。
 
   1. 解压得到 `WeChat AI.app`，拖到 `~/Applications`（当前用户，无需管理员）或 `/Applications`（所有用户）。
   2. 双击启动会被 Gatekeeper 拦截（App 为 ad-hoc 签名、未公证）。**macOS 15 起（含 26）已取消
@@ -126,7 +126,7 @@ WeChatAI.app (SwiftUI)          bridge/onebot (Go)              WeChat.app
 - **从源码构建**（需 Xcode 27）：
 
 ```bash
-git clone https://github.com/Gusion1017/Mac-WeChat-ChatBot.git && cd Mac-WeChat-ChatBot
+git clone https://github.com/Gusion1017/WeChat-ChatBot-Mac.git && cd WeChat-ChatBot-Mac
 bash scripts/fetch_gadget.sh     # Frida Gadget 17.8.0（校验 SHA256）
 bash scripts/build_bridge.sh     # Go 1.25 构建 + Go 测试
 bash scripts/build_app.sh        # 生成 dist/WeChat AI.app（缺 TTS 静态库时自动 fetch_sherpa）
@@ -212,7 +212,7 @@ GitHub Actions 只跑 Linux 可完成的检查（文档链接、脚本语法、�
 - 贡献流程：[`CONTRIBUTING.md`](CONTRIBUTING.md)
 - 行为准则：[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
 - 私密报告安全问题：[`SECURITY.md`](SECURITY.md)
-- 获取帮助：[`SUPPORT.md`](SUPPORT.md) · [Issues](https://github.com/Gusion1017/Mac-WeChat-ChatBot/issues)
+- 获取帮助：[`SUPPORT.md`](SUPPORT.md) · [Issues](https://github.com/Gusion1017/WeChat-ChatBot-Mac/issues)
 
 ### 许可
 
@@ -315,9 +315,9 @@ Contracts in [`docs/architecture.md`](docs/architecture.md); document index in
 ### Quick Start
 
 - **Regular users**: download
-  [`WeChat-AI-1.7.0.zip`](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.7.0/WeChat-AI-1.7.0.zip)
-  (~72 MB, [SHA256](https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/download/v1.7.0/WeChat-AI-1.7.0.zip.sha256))
-  and follow these steps; older versions are on [Tags](https://github.com/Gusion1017/Mac-WeChat-ChatBot/tags).
+  [`WeChat-AI-1.7.0.zip`](https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/download/v1.7.0/WeChat-AI-1.7.0.zip)
+  (~72 MB, [SHA256](https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/download/v1.7.0/WeChat-AI-1.7.0.zip.sha256))
+  and follow these steps; older versions are on [Tags](https://github.com/Gusion1017/WeChat-ChatBot-Mac/tags).
 
   1. Unzip `WeChat AI.app` and drag it to `~/Applications` (current user, no admin) or
      `/Applications` (all users).
@@ -349,7 +349,7 @@ Contracts in [`docs/architecture.md`](docs/architecture.md); document index in
 - **Build from source** (Xcode 27 required):
 
 ```bash
-git clone https://github.com/Gusion1017/Mac-WeChat-ChatBot.git && cd Mac-WeChat-ChatBot
+git clone https://github.com/Gusion1017/WeChat-ChatBot-Mac.git && cd WeChat-ChatBot-Mac
 bash scripts/fetch_gadget.sh     # Frida Gadget 17.8.0 (SHA256 verified)
 bash scripts/build_bridge.sh     # Go 1.25 build + Go tests
 bash scripts/build_app.sh        # builds dist/WeChat AI.app (fetches sherpa libs if missing)
@@ -443,7 +443,7 @@ script syntax, copy equality, no build artifacts).
 - Workflow: [`CONTRIBUTING.md`](CONTRIBUTING.md)
 - Code of Conduct: [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
 - Report security issues privately: [`SECURITY.md`](SECURITY.md)
-- Get help: [`SUPPORT.md`](SUPPORT.md) · [Issues](https://github.com/Gusion1017/Mac-WeChat-ChatBot/issues)
+- Get help: [`SUPPORT.md`](SUPPORT.md) · [Issues](https://github.com/Gusion1017/WeChat-ChatBot-Mac/issues)
 
 ### License
 

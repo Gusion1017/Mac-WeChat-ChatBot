@@ -107,11 +107,11 @@
 
 Xcode 自带 Command Line Tools，满足 Hook 的 `python3` / `otool` 依赖。
 
-1. 在 GitHub 页面 **Code → Download ZIP**，解压（目录名通常是 `Mac-WeChat-ChatBot-main`）。
+1. 在 GitHub 页面 **Code → Download ZIP**，解压（目录名通常是 `WeChat-ChatBot-Mac-main`）。
 2. 打开「终端」，进入解压后的目录：
 
    ```bash
-   cd ~/Downloads/Mac-WeChat-ChatBot-main   # 以实际解压目录为准
+   cd ~/Downloads/WeChat-ChatBot-Mac-main   # 以实际解压目录为准
    ```
 
 3. 依次执行（首次会下载 Go 1.25、Frida devkit、sherpa-onnx 静态库与 Gadget，

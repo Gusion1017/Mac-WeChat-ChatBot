@@ -714,20 +714,20 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/compare/v1.7.0...HEAD
-[1.3.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.3.0
-[1.4.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.4.0
-[1.5.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.5.0
-[1.5.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.5.1
-[1.5.2]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.5.2
-[1.6.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.6.0
-[1.6.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.6.1
-[1.6.2]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.6.2
-[1.7.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.7.0
-[1.0.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.0.0
-[1.1.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.1.0
-[1.2.0]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.0
-[1.2.1]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.1
-[1.2.2]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.2
-[1.2.3]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/tree/v1.2.3
-[1.2.4]: https://github.com/Gusion1017/Mac-WeChat-ChatBot/releases/tag/v1.2.4
+[Unreleased]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/compare/v1.7.0...HEAD
+[1.3.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.3.0
+[1.4.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.4.0
+[1.5.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.5.0
+[1.5.1]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.5.1
+[1.5.2]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.5.2
+[1.6.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.6.0
+[1.6.1]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.6.1
+[1.6.2]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.6.2
+[1.7.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.7.0
+[1.0.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.0.0
+[1.1.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.1.0
+[1.2.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.2.0
+[1.2.1]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.2.1
+[1.2.2]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.2.2
+[1.2.3]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.2.3
+[1.2.4]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.2.4
