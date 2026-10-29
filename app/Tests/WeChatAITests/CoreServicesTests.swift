@@ -1555,21 +1555,22 @@ final class CoreServicesTests: XCTestCase {
     // MARK: Activation policy
 
     @MainActor
-    func testDockIconPreferenceMapsToActivationPolicy() {
+    func testMainWindowVisibilityMapsToActivationPolicy() {
+        // 窗口打开时临时注册 Dock 图标（并让台前调度接管窗口）。
         XCTAssertEqual(
-            ActivationPolicyController.policy(showDockIcon: true).rawValue,
+            ActivationPolicyController.policy(forVisibleWindow: true).rawValue,
             NSApplication.ActivationPolicy.regular.rawValue
         )
+        // 关闭窗口后退回仅菜单栏模式。
         XCTAssertEqual(
-            ActivationPolicyController.policy(showDockIcon: false).rawValue,
+            ActivationPolicyController.policy(forVisibleWindow: false).rawValue,
             NSApplication.ActivationPolicy.accessory.rawValue
         )
     }
 
-    // Regression: the Dock icon preference used to be overridden to `.regular`
-    // whenever Stage Manager was enabled, so turning the setting off had no visible
-    // effect. Stage Manager is now only used for the informational notice; the
-    // controller must never consult it when resolving the activation policy.
+    // The activation policy is derived from window visibility only. The old
+    // `showDockIcon` preference (and its Stage Manager override) has been removed;
+    // Stage Manager must not be able to force a hidden Dock icon back on.
 
     // MARK: Per-conversation working hours
 

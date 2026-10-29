@@ -207,20 +207,8 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
             SettingsSection(
                 title: "启动与窗口",
-                footer: "登录项需要 App 以 .app 形式安装后生效；Dock 图标切换会立即生效。关闭 Dock 图标后会保留菜单栏入口（左键打开状态面板）。"
+                footer: "登录项需要 App 以 .app 形式安装后生效。启动时显示主窗口；关闭窗口后 App 继续在菜单栏运行，Dock 图标只在主窗口打开期间出现，菜单栏图标始终保留。"
             ) {
-                SettingsRow(
-                    title: "显示菜单栏图标",
-                    subtitle: "左键打开状态面板",
-                    symbol: "menubar.rectangle",
-                    tint: Theme.accent
-                ) {
-                    Toggle(L("显示菜单栏图标"), isOn: showInMenuBarBinding)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                }
-                SettingsDivider()
                 SettingsRow(
                     title: "登录时启动",
                     subtitle: "开机后自动启动 WeChat AI",
@@ -228,18 +216,6 @@ struct SettingsView: View {
                     tint: .secondary
                 ) {
                     Toggle(L("登录时启动"), isOn: bind(\.general.launchAtLogin))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                }
-                SettingsDivider()
-                SettingsRow(
-                    title: "显示 Dock 图标",
-                    subtitle: "关闭后仅保留菜单栏入口",
-                    symbol: "dock.rectangle",
-                    tint: .secondary
-                ) {
-                    Toggle(L("显示 Dock 图标"), isOn: showDockIconBinding)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -256,14 +232,6 @@ struct SettingsView: View {
                         .toggleStyle(.switch)
                         .controlSize(.small)
                 }
-            }
-
-            if StageManagerSupport.isEnabled && !store.settings.general.showDockIcon {
-                InlineNotice(
-                    kind: .info,
-                    title: "台前调度已开启",
-                    message: "Dock 图标已按设置隐藏，App 不会出现在台前调度应用条；窗口隐藏后可从菜单栏图标重新打开。"
-                )
             }
 
             SettingsSection(
@@ -1247,36 +1215,6 @@ struct SettingsView: View {
             get: { store.settings[keyPath: keyPath] },
             set: { newValue in
                 store.settings[keyPath: keyPath] = newValue
-                store.persist()
-            }
-        )
-    }
-
-    /// Keeps at least one entry point visible. Closing the Dock icon while the menu
-    /// bar icon is hidden would leave no way to reopen the app after its window closes.
-    private var showDockIconBinding: Binding<Bool> {
-        Binding(
-            get: { store.settings.general.showDockIcon },
-            set: { newValue in
-                store.settings.general.showDockIcon = newValue
-                if !newValue, !store.settings.general.showInMenuBar {
-                    store.settings.general.showInMenuBar = true
-                    toast.show("已同时开启菜单栏图标，避免关闭 Dock 后无法打开应用", tone: .warning)
-                }
-                store.persist()
-            }
-        )
-    }
-
-    private var showInMenuBarBinding: Binding<Bool> {
-        Binding(
-            get: { store.settings.general.showInMenuBar },
-            set: { newValue in
-                store.settings.general.showInMenuBar = newValue
-                if !newValue, !store.settings.general.showDockIcon {
-                    store.settings.general.showDockIcon = true
-                    toast.show("已同时开启 Dock 图标，避免关闭菜单栏后无法打开应用", tone: .warning)
-                }
                 store.persist()
             }
         )

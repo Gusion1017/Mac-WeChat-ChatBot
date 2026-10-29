@@ -65,14 +65,14 @@ enum MenuBarIconState: Equatable {
 /// - 面板使用 `.transient`：点面板外（含其它 App / 桌面）由系统自动收起；
 ///   本 App 内的点击由 local 监视器立即收起，另监听 Esc、应用失活/隐藏与系统菜单开始跟踪。
 ///   不使用 `clickCount`、双击或时间窗等启发式；
-/// - 面板首次弹出后缓存复用；语言变化或隐藏菜单栏图标时释放；
-/// - `settings.general.showInMenuBar` 变化时实时增删状态栏条目。
+/// - 面板首次弹出后缓存复用；语言变化时释放；
+/// - 菜单栏图标是 App 唯一常驻入口，始终存在（`showInMenuBar` 设置已移除）。
 @MainActor
 final class MenuBarController: NSObject, NSPopoverDelegate {
     static let shared = MenuBarController()
 
     private var statusItem: NSStatusItem?
-    /// 首次点开时创建，关闭后保留复用；语言变化/隐藏菜单栏图标时丢弃。
+    /// 首次点开时创建，关闭后保留复用；语言变化时丢弃。
     private var panel: NSPopover?
     /// 逻辑上的「面板正在显示」。比 `panel.isShown` 早一个动画帧更新，
     /// 用于点击开合与图标高亮，不受关闭动画影响。
@@ -97,10 +97,9 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         super.init()
     }
 
-    /// 由 `WeChatAIApp.init` 注入 store 并开始观察显示开关；此时还不创建状态栏条目。
+    /// 由 `WeChatAIApp.init` 注入 store 并开始观察图标状态；此时还不创建状态栏条目。
     func configure(store: AppStore) {
         self.store = store
-        observeMenuBarVisibility()
         observeIconState()
     }
 
@@ -108,7 +107,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
-        syncVisibility()
+        installStatusItemIfNeeded()
     }
 
     /// 从 AppKit 的其它入口（例如 Dock 重开）收起面板。
@@ -116,20 +115,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         closePanel()
     }
 
-    // MARK: - Visibility
-
-    private func observeMenuBarVisibility() {
-        guard let store else { return }
-        withObservationTracking {
-            _ = store.settings.general.showInMenuBar
-        } onChange: { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.syncVisibility()
-                self.observeMenuBarVisibility()
-            }
-        }
-    }
+    // MARK: - Icon state
 
     /// 观察图标状态与语言：只在机器人启停/语言切换时刷新状态栏，不引入定时器。
     private func observeIconState() {
@@ -143,15 +129,6 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
                 self.refreshStatusItem()
                 self.observeIconState()
             }
-        }
-    }
-
-    private func syncVisibility() {
-        guard hasStarted, let store else { return }
-        if store.settings.general.showInMenuBar {
-            installStatusItemIfNeeded()
-        } else {
-            removeStatusItem()
         }
     }
 
@@ -173,19 +150,6 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
         installStatusItemMouseMonitor()
         // 首屏点开前预构建一次缓存面板，避免第一次弹出时在系统动画中同步构建 SwiftUI 树。
         schedulePanelPrewarm()
-    }
-
-    private func removeStatusItem() {
-        removeStatusItemMouseMonitor()
-        prewarmTask?.cancel()
-        prewarmTask = nil
-        pendingShow = false
-        discardPanel()
-        currentIconState = nil
-        chromeLanguage = nil
-        guard let statusItem else { return }
-        NSStatusBar.system.removeStatusItem(statusItem)
-        self.statusItem = nil
     }
 
     // MARK: - Status item chrome
@@ -484,8 +448,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
     private func schedulePanelPrewarm() {
         guard panel == nil,
               statusItem != nil,
-              let store,
-              store.settings.general.showInMenuBar
+              let store
         else { return }
 
         prewarmTask?.cancel()
@@ -495,8 +458,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate {
                   let self,
                   self.panel == nil,
                   self.statusItem != nil,
-                  let store = self.store,
-                  store.settings.general.showInMenuBar
+                  let store = self.store
             else { return }
             self.panel = self.makePanel(store: store)
             self.prewarmTask = nil

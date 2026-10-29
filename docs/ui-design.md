@@ -384,7 +384,7 @@ Window("WeChat AI", id: "main")
 
 | 分类 | 内容 |
 | --- | --- |
-| 通用 | 菜单栏图标、登录启动、Dock 图标、退出确认、**防睡眠（永不/接入电源时/始终 + 当前状态）**、语言、重新打开向导 |
+| 通用 | 登录启动、退出确认、**防睡眠（永不/接入电源时/始终 + 当前状态）**、语言、重新打开向导；窗口/Dock 行为只做说明（Dock 图标随主窗口显隐，无开关） |
 | 外观 | 系统/浅色/深色分段选择 + 三个外观缩略预览；减少动态效果与动态字体状态；设计说明 |
 | 通知 | 通知开关、声音开关、系统权限说明 |
 | Hook | 微信版本/进程/Gadget/Bridge/网关/版本匹配、**CLT 状态/安装/重新检测**、**R3 发送句柄状态**、安装/还原/刷新、进度、风险提示、路径/端口/自动启动/**R3 原生发送开关（4.1.15.55 / 4.2.0.5 / 4.2.0.9，默认开；首次需本机手动发一条消息）** |
@@ -493,7 +493,7 @@ Window("WeChat AI", id: "main")
   **不再使用 `clickCount`、双击时间窗或同次点击抑制启发式**；
   点击意图由纯映射 `MenuBarClickIntent` 决定：左键 → 开合，右键 / Control-左键 → 忽略，
   其它修饰键不改变左键语义，未知/合成事件按左键兜底（VoiceOver 场景）。
-- 主窗口的其它打开路径（Dock 重开、⌘1…⌘0、面板内入口）走 `MainWindowRegistry.show()`，
+- 主窗口的其它打开路径（Finder/LaunchServices 重开、⌘1…⌘0、面板内入口）走 `MainWindowRegistry.show()`，
   会先调用 `MenuBarController.shared.dismissPanel()` 收起面板，避免主窗口与弹层同时出现。
 - 面板内容：头部品牌与运行状态胶囊；带描边的状态卡（微信、Hook、AI、电量、DeepSeek 余额、
   今日收到/回复/延迟）；快捷操作按「启动/停止 → 打开主窗口 → 会话 / 机器人 / 设置」分层；
@@ -505,14 +505,16 @@ Window("WeChat AI", id: "main")
 - 性能：`NSPopover` + `NSHostingController` 首次构建后缓存复用；状态栏图标出现后延迟（约 1s）
   预热，预热阶段用 `sizeThatFits(in:)` 量出面板高度并固定 `contentSize`
   （`sizingOptions = []`；离屏 `fittingSize` 恒为 0，不用它），
-  余额/统计/电量等数据刷新不再触发 popover 自动重排；语言切换或关闭「显示菜单栏图标」时
+  余额/统计/电量等数据刷新不再触发 popover 自动重排；语言切换时
   释放缓存。内容层不叠加 `regularMaterial`（popover 自带材质），悬停只对 `opacity` 做
   ≤0.15s 过渡，「减少动态效果」开启时不做动画。
-- 显示/隐藏由 `store.settings.general.showInMenuBar` 驱动：`MenuBarController` 用
-  Observation 监听该项，实时增删状态栏条目并关闭可能残留的面板。不再使用
+- 菜单栏图标是 App 唯一常驻入口，**始终存在**（`showInMenuBar` 设置已移除）：不再使用
   `MenuBarExtra` 场景，因此也没有 `isInserted` 写回循环。
-- 主窗口关闭按钮与 ⌘W 改为隐藏窗口（`orderOut`），可从菜单栏左键（面板内「打开主窗口」）或
-  Dock（若启用）重新显示；退出不再绑定 ⌘Q，仅保留 ⌥⌘Q 与菜单/面板的退出入口。
+- 主窗口关闭按钮与 ⌘W 改为隐藏窗口（`orderOut`），随后 `ActivationPolicyController`
+  把进程退回 `.accessory`：Dock 图标消失、仅保留菜单栏图标，App 隐藏并把焦点交还前台 App。
+  可从菜单栏左键（面板内「打开主窗口」）、Finder/LaunchServices 重开或 `applicationShouldHandleReopen`
+  重新显示；显示前先切到 `.regular`，窗口才能被台前调度识别。退出不再绑定 ⌘Q，仅保留 ⌥⌘Q
+  与菜单/面板的退出入口。
 - 辅助功能：状态栏条目保留 `WeChat AI` 无障碍标签/值与 VoiceOver 帮助（不显示鼠标悬停
   tooltip）；面板内状态行合并 label/value，按钮带 accessibility 标签与 help。
 
@@ -646,7 +648,7 @@ UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网�
 
 已验证：
 
-- `cd app && SWIFT_DISABLE_SANDBOX=1 swift test` **566 项执行（564 通过 / 2 项按环境跳过：真实 CosyVoice3 服务 E2E）
+- `cd app && SWIFT_DISABLE_SANDBOX=1 swift test` **567 项执行（565 通过 / 2 项按环境跳过：真实 CosyVoice3 服务 E2E）
   （含批量记忆、压缩器、权重强化、旧库迁移、防睡眠配置兼容与三档决策、回复进度倒计时、
   自消息路由修复、通讯录标题补全、拍一拍回复、唤醒后免唤醒词窗口、appmsg 引用/链接/文件等分类与历史文本修复、
   入站帧单次解析与历史修复 trusted 语义、微信 4.2.0.5 R3 版本门禁/运行期配置合并、识图设置/多模态请求/图片编码与描述落库/引用图片说明）。
@@ -655,7 +657,7 @@ UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网�
   通过；群聊 @ / 拍一拍沿用既有逻辑，本轮未单独复测；图片获取链路已实现（CDN 触发下载待复测）。
 - 8 个侧边栏页面、首次向导、设置场景、菜单栏均可导航；浅色/深色截图核对通过。
 - 菜单栏点击语义：左键开合状态面板，右键 / Control-左键不执行操作（不弹右键菜单）；
-  面板内导航/打开主窗口后收起，关闭「显示菜单栏图标」时条目与面板一起移除。
+  面板内导航/打开主窗口后收起，菜单栏条目始终常驻（不再提供显示开关）。
   2026-10-27 在 macOS 26.7.1 本机安装版（`~/Applications/WeChat AI.app`）走查：左键开合、
   右键确认不再弹菜单、Esc、点本 App 其它窗口、点其它 App 均能收起；面板内「设置」快捷条
   可导航并收起；272pt 面板的位置/尺寸/浅色外观正常。`MenuBarClickTests` 覆盖左键、右键/
@@ -667,9 +669,14 @@ UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网�
   （AI 生成 / 拟人化等待 / 发送中 / 完成 / 失败）渲染状态条、头部徽标与会话行计时，构建通过。
 - 会话收起：再次点击当前选中行或侧边栏「会话」入口会取消选中并显示空状态；
   列表保持可见，选中其它行可重新打开。
-- Dock 图标开关：bundle 声明 `LSUIElement`，`showDockIcon=false` 启动时进程类型为
-  `UIElement`（Dock 无图标），`true` 时启动后切换为 `Foreground`（`lsappinfo` 实测）。
-  `LSUIElement` 还避免 AppKit 在菜单栏激活时把隐藏模式重置回 regular。
+- 窗口与 Dock 图标：bundle 声明 `LSUIElement=true`，以菜单栏 agent 启动。启动时显示主窗口，
+  `applicationWillFinishLaunching` 先把进程提升为 `.regular`，因此启动窗口也有 Dock 图标并
+  可被台前调度识别；关闭主窗口（关闭按钮 / ⌘W / 面板外路径）后 `orderOut` 并把进程退回
+  `.accessory`，Dock 图标消失、App 隐藏，仅保留菜单栏图标；从菜单栏面板重新打开时再切回
+  `.regular`。旧配置里的 `showDockIcon` 键会被忽略，新配置不再写入。设置页只保留行为说明。
+- 台前调度：只在主窗口打开期间（`.regular`）把 App 纳入台前调度应用条；关闭窗口后退回
+  `.accessory`，App 从应用条移除，符合“仅菜单栏常驻”的取舍。`CFPreferences` 对
+  `com.apple.WindowManager.GloballyEnabled` 的探测与设置页提示文案已随 Dock 开关一起移除。
 - 群聊 @ 误触发回归：appmsg/群收款卡片中对别人的 at 段曾触发「群聊·@」并回复；
   现仅 `at` 目标等于机器人 wxid 才触发。
 - 引用消息可见性回归（2026-10-22）：hook 只认拍一拍，引用回复曾显示为 `[链接/文件]`，
@@ -678,9 +685,6 @@ UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网�
   真机历史数据中受影响的 appmsg 消息可全部还原，重复修复幂等（二次修复无变更），群聊关键词可命中引用正文，
   被引用原文不参与 @ / 关键词触发（避免引用旧消息重复唤醒），拍一拍与结构化 `at` 段不受影响
   （`WeChatAppmsgTests` / `AppmsgRoutingTests` 覆盖）。
-- 台前调度：逻辑不再参与激活策略计算。开启台前调度且 `showDockIcon=false` 时进程类型仍为
-  `UIElement`，Dock 图标保持隐藏；App 不出现在台前调度应用条，窗口隐藏后从菜单栏图标恢复。
-  设置页仅在「台前调度已开启 + 已关闭 Dock 图标」时显示说明。
 - 白/黑名单合并：旧四列表迁移为两个统一列表（会话 ID / 用户 wxid）。
 - 人格设置移除「回复风格」；温度改为「AI 模型 → 模型温度」按模型配置，
   未配置的模型请求中不发送 `temperature`。
@@ -704,13 +708,16 @@ UI 只读 `AppStore` 状态并调用既有方法，不直接访问数据库/网�
 
 - 系统通知服务尚未接入：设置页开关持久化，但不会弹系统通知。
 - 登录项尚未接入 `SMAppService`：设置页开关持久化，但不会注册系统登录项。
-- Dock 图标切换通过 `NSApplication.ActivationPolicy` 接入（`.regular` / `.accessory`），
-  用户设置是唯一决定因素，切换后立即生效；关闭 Dock 图标时会保证菜单栏图标作为备用入口。
-  `app/Packaging/Info.plist` 声明 `LSUIElement=true`：App 默认以菜单栏 agent 启动，
-  设置开启时才在 `applicationWillFinishLaunching` 提升为 `.regular`，避免激活时被重置回 regular。
-- 台前调度不再强制 `.regular`：开启台前调度时 accessory App 不会出现在台前调度应用条，
-  这是隐藏 Dock 图标的已知取舍；窗口仍可通过菜单栏图标恢复。`CFPreferences` 对
-  `com.apple.WindowManager.GloballyEnabled` 的探测只用于设置页提示文案。
+- 窗口/Dock 行为通过 `NSApplication.ActivationPolicy` 实现（`.regular` ⇄ `.accessory`），
+  窗口可见性是唯一决定因素：主窗口打开（含启动窗口）时 `.regular`，关闭后退回 `.accessory`
+  并隐藏 App；菜单栏图标始终存在，不再有用户开关。
+  `app/Packaging/Info.plist` 声明 `LSUIElement=true`，避免 AppKit 在菜单栏激活时把隐藏模式
+  永久重置回 regular；`applicationDidBecomeActive` / 空间切换后按窗口状态重新确认策略。
+- 台前调度只在窗口打开期间可用：accessory 状态的 App 不会出现在台前调度应用条，这是
+  “关闭窗口后仅保留菜单栏”的已知取舍；窗口可从菜单栏图标恢复。2026-10-29 已用隔离副本
+  （独立 bundle id + 临时 `CFFIXED_USER_HOME`）配合 `lsappinfo` 走查启动 / 关闭 / 从
+  Finder 重开时的 `.regular ⇄ .accessory` 切换、窗口显隐与台前调度缩略图；安装版
+  （`~/Applications`）上的最终交付走查（Dock 图标视觉、关闭后焦点归还）待补。
 - 「拍一拍」：4.1.15.55 真机实测为 **appmsg（type=49，`<appmsg><type>62</type><title>…拍了拍…</title>`）**。
   Hook 会把 `<title>` 提取为消息文本（聊天列表直接显示「… 拍了拍 …」），原始 XML 保留在
   `raw_message`；规则层按「拍了拍」文本、`<type>62</type>`、`sysmsg type="pat"` 多路径匹配。

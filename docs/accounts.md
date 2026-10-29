@@ -695,7 +695,7 @@ python3 scripts/check_docs.py
 bash scripts/check.sh --docs
 ```
 
-当前基线：`swift test` 566 项执行（564 通过 / 2 项按环境跳过：真实 CosyVoice3 服务 E2E）。
+当前基线：`swift test` 567 项执行（565 通过 / 2 项按环境跳过：真实 CosyVoice3 服务 E2E）。
 
 ## 12. 排障
 

@@ -140,12 +140,10 @@ enum SleepPreventionMode: String, Codable, CaseIterable, Hashable, Identifiable 
 
 struct GeneralSettings: Codable, Hashable {
     var appearance: AppearanceMode = .system
-    var showInMenuBar: Bool = true
     var launchAtLogin: Bool = false
     var notificationsEnabled: Bool = true
     var soundEnabled: Bool = false
     var confirmBeforeQuit: Bool = true
-    var showDockIcon: Bool = true
     var language: String = "system"
     var sleepPrevention: SleepPreventionMode = .never
 }
@@ -153,15 +151,18 @@ struct GeneralSettings: Codable, Hashable {
 // Custom Codable so config files written by older versions (which lack newer keys
 // such as `sleepPrevention`) keep loading instead of failing the whole settings file.
 // The implementation lives in an extension to preserve the synthesized memberwise init.
+//
+// `showInMenuBar` / `showDockIcon` were removed when the app became a pure menu-bar
+// agent whose Dock icon follows the main window. Older config files still contain
+// those keys; unknown keys are ignored by `decodeIfPresent`, and `encode` no longer
+// writes them.
 extension GeneralSettings {
     private enum CodingKeys: String, CodingKey {
         case appearance
-        case showInMenuBar
         case launchAtLogin
         case notificationsEnabled
         case soundEnabled
         case confirmBeforeQuit
-        case showDockIcon
         case language
         case sleepPrevention
     }
@@ -174,14 +175,12 @@ extension GeneralSettings {
         // the default instead of throwing and discarding the user's whole config.
         let appearanceRaw = try container.decodeIfPresent(String.self, forKey: .appearance)
         appearance = appearanceRaw.flatMap { AppearanceMode(rawValue: $0) } ?? defaults.appearance
-        showInMenuBar = try container.decodeIfPresent(Bool.self, forKey: .showInMenuBar) ?? defaults.showInMenuBar
         launchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? defaults.launchAtLogin
         notificationsEnabled = try container.decodeIfPresent(Bool.self, forKey: .notificationsEnabled)
             ?? defaults.notificationsEnabled
         soundEnabled = try container.decodeIfPresent(Bool.self, forKey: .soundEnabled) ?? defaults.soundEnabled
         confirmBeforeQuit = try container.decodeIfPresent(Bool.self, forKey: .confirmBeforeQuit)
             ?? defaults.confirmBeforeQuit
-        showDockIcon = try container.decodeIfPresent(Bool.self, forKey: .showDockIcon) ?? defaults.showDockIcon
         language = try container.decodeIfPresent(String.self, forKey: .language) ?? defaults.language
 
         let sleepRaw = try container.decodeIfPresent(String.self, forKey: .sleepPrevention)
@@ -191,12 +190,10 @@ extension GeneralSettings {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(appearance.rawValue, forKey: .appearance)
-        try container.encode(showInMenuBar, forKey: .showInMenuBar)
         try container.encode(launchAtLogin, forKey: .launchAtLogin)
         try container.encode(notificationsEnabled, forKey: .notificationsEnabled)
         try container.encode(soundEnabled, forKey: .soundEnabled)
         try container.encode(confirmBeforeQuit, forKey: .confirmBeforeQuit)
-        try container.encode(showDockIcon, forKey: .showDockIcon)
         try container.encode(language, forKey: .language)
         try container.encode(sleepPrevention.rawValue, forKey: .sleepPrevention)
     }

@@ -20,7 +20,7 @@
 | `Services/SleepPreventionService.swift` | 通用防睡眠：IOKit 空闲睡眠断言 + 电源适配器监听（事件驱动，不轮询） |
 | `Services/BatteryStatus.swift` | 本机电池快照：IOKit 电源字典解析（电量/充电/适配器/剩余时间） |
 | `Services/DeepSeekBalance.swift` | DeepSeek 账户余额：`/user/balance` 地址推导、容错解析、通道选择 |
-| `Services/ActivationPolicyController.swift` | Dock 图标与 `NSApplication.ActivationPolicy` 同步（用户设置优先，台前调度不覆盖；bundle 以 `LSUIElement` 启动，仅在设置页用于提示文案） |
+| `Services/ActivationPolicyController.swift` | 激活策略跟随主窗口显隐：打开窗口时提升为 `.regular`（临时 Dock 图标，台前调度可识别），关闭后退回 `.accessory` 仅保留菜单栏；bundle 以 `LSUIElement` 启动，无用户开关 |
 | `Services/OneBotClient.swift` | WS 收事件、HTTP 发送/图片获取、媒体落地、事件解析、去重、重连 |
 | `Services/ImageFetcher.swift` | 入站图片获取串行队列 + `ImageFetchPolicy`（设置开关 / 去重 / 取消） |
 | `Services/VoiceTranscriptionService.swift` / `VoiceFetcher.swift` | 入站语音转写（SpeechAnalyzer）与 `/fetch_voice` 串行队列 |
@@ -758,12 +758,12 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 `WakeWindowTests.swift`（6）、`ImageFetchTests.swift`（16）、`OneBotEventParserTests.swift`（5）、
 `DataRepairTrustTests.swift`（2）、`VisionTests.swift`（12）、`SystemVitalsTests.swift`（16），
 以及 `VoiceReadTests` / `VoiceSynthesisTests` / `VoiceRuntimeStatusTests` / `CosyVoiceTests` 等语音测试；
-2026-10-27 账号隔离 + 2026-10-28 记忆 v2（含人格单一来源 + 全局共享）+ 2026-10-29 历史补总结修复后为 566 项（2 项按环境跳过：真实 CosyVoice3 服务 E2E）：
+2026-10-27 账号隔离 + 2026-10-28 记忆 v2（含人格单一来源 + 全局共享）+ 2026-10-29 历史补总结修复后为 567 项（2 项按环境跳过：真实 CosyVoice3 服务 E2E）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 566 tests, with 2 skipped, 0 failures
+# Executed 567 tests, with 2 skipped, 0 failures
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
@@ -797,7 +797,7 @@ profile seed、旧文件保留）、`claimUnassigned` 只复制不删除/不覆�
 config + profile 双文件加载/损坏备份/去重双写、`MemoryStore` 切换 A/B 库后会话/记忆/日志/KV
 互不可见。2026-10-28 审查修复另加回归：`_unassigned` 启动认领、`legacyMigrationDone` 门禁、
 空壳目标库替换、WAL 主库无 `-wal/-shm` 时的迁移、`MemoryStore.suspend()` 禁止隐式 open。
-当前 `swift test` 566 项通过
+当前 `swift test` 567 项通过
 （2 项按环境跳过：真实 CosyVoice3 服务 E2E）。
 
 记忆 v2（2026-10-28）新增、2026-10-29 扩展到 36 项的 `CharacterMemoryTests.swift`（临时目录，不碰真实网络/数据）：

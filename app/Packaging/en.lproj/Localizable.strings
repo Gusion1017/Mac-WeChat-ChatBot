@@ -588,7 +588,6 @@
 "发送自定义文字" = "Send Custom Text";
 "只显示核心记忆" = "Show only core memories";
 "召回 %d 次" = "Recalled %d×";
-"台前调度已开启" = "Stage Manager is on";
 "合并 %d 条" = "Merged %d";
 "启动请求已提交" = "Start request submitted";
 "复制数据库路径" = "Copy Database Path";
@@ -611,7 +610,6 @@
 "拆分为多条消息" = "Split Into Multiple Messages";
 "搜索会话或消息" = "Search conversations or messages";
 "数据库尚未打开" = "Database isn't open yet";
-"显示菜单栏图标" = "Show menu bar icon";
 "显示输入中状态" = "Show Typing Indicator";
 "最多 %d 段" = "Up to %d segments";
 "最新的运行日志" = "Latest runtime logs";
@@ -743,7 +741,6 @@
 "已启用「关键词」触发" = "Keyword trigger enabled";
 "当前仅显示核心记忆。" = " Only core memories are shown.";
 "微信已从官方备份恢复" = "WeChat restored from the official backup";
-"显示 Dock 图标" = "Show Dock icon";
 "本地优先，数据不上云" = "Local-first, nothing goes to the cloud";
 "正在从备份还原微信…" = "Restoring WeChat from backup…";
 "此文件夹暂无长期记忆" = "No Long-term Memories in This Folder";
@@ -1006,8 +1003,6 @@
 "Liquid Glass 卡片、半透明侧边栏与系统材质。" = "Liquid Glass cards, a translucent sidebar, and system materials.";
 "你负责维护聊天机器人的长期记忆。只输出更新后的记忆正文，" = "You maintain the chatbot's long-term memory. Output only the updated memory body,";
 "例如：对方叫小林，喜欢猫；我们约好周五晚上讨论旅行计划。" = "e.g. Their name is Lin and they like cats; we agreed to talk about the trip on Friday night.";
-"已同时开启 Dock 图标，避免关闭菜单栏后无法打开应用" = "Turned on the Dock icon too, so the app is still reachable after hiding the menu bar icon";
-"已同时开启菜单栏图标，避免关闭 Dock 后无法打开应用" = "Turned on the menu bar icon too, so the app is still reachable after hiding the Dock icon";
 "收到和发送的消息会写入本地 SQLite，可在这里浏览。" = "Sent and received messages are stored in local SQLite and can be browsed here.";
 "无法注册电源状态监听，插拔电源后不会自动刷新防睡眠状态。" = "Couldn't register a power source listener; sleep prevention won't refresh automatically when power is connected or disconnected.";
 "添加一个 OpenAI 兼容通道后，机器人才会生成回复。" = "Add an OpenAI-compatible channel and the bot can generate replies.";
@@ -1101,7 +1096,6 @@
 "当前版本优先保证聊天窗口内的实时反馈；系统通知会在 Core 接入通知服务后按上述开关发送。" = "This version prioritizes live feedback in the chat window; system notifications follow the switches above once the notification service is wired into Core.";
 "未找到 bridge/onebot 可执行文件（请先构建 bridge 或检查 App 资源）" = "bridge/onebot executable not found (build the bridge or check the app resources)";
 "首次使用或微信重启后需手动发一条消息；句柄按微信进程缓存，App/bridge 重启自动恢复。" = "Send a message manually on first use or after WeChat restarts; the handle is cached per WeChat process and restored when the app or bridge restarts.";
-"Dock 图标已按设置隐藏，App 不会出现在台前调度应用条；窗口隐藏后可从菜单栏图标重新打开。" = "The Dock icon is hidden per your settings, so the app won't appear in the Stage Manager app strip. Reopen it from the menu bar icon after closing the window.";
 "bridge 进程：附加 Gadget、接收事件、HTTP/WS 发送接口与鉴权、媒体上传/下载" = "Bridge process: attaches to the Gadget, receives events, serves authenticated HTTP/WS send APIs, and uploads/downloads media";
 "修改官方微信可能导致无法启动、无法更新或触发安全检查。请仅在了解风险的本机环境使用，并保留备份。" = "Modifying the official WeChat may prevent it from launching or updating, or trigger security checks. Use it only on your own Mac with the risks understood, and keep the backup.";
 "已忽略与 image_path 账号目录不一致的 self_id，bridge 将按目录重新推导" = "Ignored a self_id that doesn't match the image_path account directory; the bridge will re-derive it from the directory";
@@ -1120,7 +1114,7 @@
 "启动机器人后会连接本地 OneBot 桥接。若仍无法连接，请在设置 → Hook 中检查微信与 Hook 状态。" = "Starting the bot connects to the local OneBot bridge. If it still can't connect, check WeChat and Hook status in Settings → Hook.";
 "需要已安装官方微信 4.1.15.55 / 4.2.0.5 / 4.2.0.9（arm64）。安装 Hook 会修改微信应用包，请先退出微信并确认了解风险。" = "Requires official WeChat 4.1.15.55 / 4.2.0.5 (arm64). Installing the Hook modifies the WeChat app bundle, so quit WeChat first and make sure you understand the risks.";
 "仅阻止系统因空闲进入睡眠，不会阻止合盖睡眠、手动睡眠，也不会让显示器保持点亮。使用电池且选择「接入电源时」时不会阻止。" = "Only blocks idle system sleep. It doesn't block lid-close or manual sleep and doesn't keep the display awake. When on battery with \"On power adapter\" selected, it stays inactive.";
-"登录项需要 App 以 .app 形式安装后生效；Dock 图标切换会立即生效。关闭 Dock 图标后会保留菜单栏入口（左键打开状态面板）。" = "The login item works only when the app is installed as a .app; Dock icon changes apply immediately. Turning off the Dock icon keeps the menu bar entry (left-click opens the status panel).";
+"登录项需要 App 以 .app 形式安装后生效。启动时显示主窗口；关闭窗口后 App 继续在菜单栏运行，Dock 图标只在主窗口打开期间出现，菜单栏图标始终保留。" = "The login item works only when the app is installed as a .app. The main window opens at launch; after you close it, the app keeps running in the menu bar. The Dock icon appears only while the main window is open, and the menu bar icon is always available.";
 "会先完整备份 /Applications/WeChat.app，再注入 Frida Gadget 并 ad-hoc 重签。" = "The app first makes a full backup of /Applications/WeChat.app, then injects Frida Gadget and re-signs it ad hoc.";
 "密钥保存在 Keychain（service com.gusionw.wechatai），不会写入 config.json。" = "Keys are stored in the Keychain (service com.gusionw.wechatai) and never written to config.json.";
 "未找到应用资源目录（bridge/hook/tools）；请通过 App bundle 或 WECHATAI_ROOT 运行" = "App resource directory not found (bridge/hook/tools). Run from the app bundle or set WECHATAI_ROOT.";

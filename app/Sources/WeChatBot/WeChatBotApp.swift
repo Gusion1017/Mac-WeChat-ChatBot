@@ -76,7 +76,6 @@ struct WeChatAIApp: App {
     var body: some Scene {
         Window("WeChat AI", id: MainWindowRegistry.mainWindowID) {
             RootView()
-                .syncActivationPolicy()
                 .captureMainWindowOpenAction()
                 .environment(store)
                 .environment(toastCenter)
@@ -87,6 +86,8 @@ struct WeChatAIApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 1280, height: 820)
+        // 启动时展示主窗口（Dock 图标随窗口临时出现）；关闭窗口后
+        // ActivationPolicyController 会把进程退回 .accessory，仅保留菜单栏。
         .defaultLaunchBehavior(.presented)
         .restorationBehavior(.disabled)
         .commands {
@@ -95,15 +96,14 @@ struct WeChatAIApp: App {
 
         Settings {
             SettingsView()
-                .syncActivationPolicy()
                 .environment(\.locale, appLocale)
                 .frame(minWidth: 880, minHeight: 640)
                 .toastOverlay()
                 .preferredColorScheme(colorScheme(for: store.settings.general.appearance))
                 // Environment modifiers must stay OUTERMOST on the Settings scene:
-                // `toastOverlay()` and `syncActivationPolicy()` are views too, and when
-                // `.environment(...)` was applied inside them the settings-window toast
-                // overlay had no `ToastCenter`. Opening Settings then aborted with
+                // `toastOverlay()` is a view too, and when `.environment(...)` was
+                // applied inside it the settings-window toast overlay had no
+                // `ToastCenter`. Opening Settings then aborted with
                 // "Fatal error: No Observable object of type ToastCenter found"
                 // (reproduced on the previous release as well; covered by the smoke test).
                 .environment(store)

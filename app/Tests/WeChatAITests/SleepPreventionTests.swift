@@ -10,6 +10,8 @@ final class SleepPreventionTests: XCTestCase {
     // MARK: - Backwards-compatible settings decoding
 
     func testLegacyGeneralSettingsWithoutSleepPreventionFallsBackToNever() throws {
+        // 旧配置仍带有已删除的 showInMenuBar / showDockIcon 键：未知键必须被忽略，
+        // 且不能影响其余字段的加载。
         let json = """
         {
           "appearance": "dark",
@@ -27,13 +29,25 @@ final class SleepPreventionTests: XCTestCase {
 
         XCTAssertEqual(settings.sleepPrevention, .never)
         XCTAssertEqual(settings.appearance, .dark)
-        XCTAssertFalse(settings.showInMenuBar)
         XCTAssertTrue(settings.launchAtLogin)
         XCTAssertFalse(settings.notificationsEnabled)
         XCTAssertTrue(settings.soundEnabled)
         XCTAssertFalse(settings.confirmBeforeQuit)
-        XCTAssertFalse(settings.showDockIcon)
         XCTAssertEqual(settings.language, "en")
+    }
+
+    func testRemovedWindowPreferenceKeysAreIgnored() throws {
+        // Dock/菜单栏入口现在跟随窗口状态，不再有用户开关。
+        let json = """
+        {
+          "showInMenuBar": false,
+          "showDockIcon": true
+        }
+        """
+
+        let settings = try JSONDecoder().decode(GeneralSettings.self, from: Data(json.utf8))
+
+        XCTAssertEqual(settings, GeneralSettings())
     }
 
     func testLegacyConfigFileWithoutSleepPreventionStillLoads() throws {
@@ -69,12 +83,15 @@ final class SleepPreventionTests: XCTestCase {
     func testSleepPreventionEncodingRoundtrip() throws {
         var settings = GeneralSettings()
         settings.appearance = .light
-        settings.showInMenuBar = false
+        settings.launchAtLogin = true
         settings.sleepPrevention = .externalPowerOnly
 
         let data = try JSONEncoder().encode(settings)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(object["sleepPrevention"] as? String, SleepPreventionMode.externalPowerOnly.rawValue)
+        // 已删除的窗口偏好不应再写回配置文件。
+        XCTAssertNil(object["showInMenuBar"])
+        XCTAssertNil(object["showDockIcon"])
 
         let decoded = try JSONDecoder().decode(GeneralSettings.self, from: data)
         XCTAssertEqual(decoded, settings)

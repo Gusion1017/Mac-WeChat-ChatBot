@@ -6,6 +6,22 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-10-29
+
+### 变更
+
+- **窗口 / Dock / 菜单栏激活策略重构（2026-10-29）**：App 固定以菜单栏 agent（`LSUIElement=true`）
+  运行，菜单栏图标始终常驻。启动时显示主窗口，并先由 `applicationWillFinishLaunching` 把进程
+  提升为 `.regular`，因此启动窗口也注册 Dock 图标并可被台前调度识别；关闭主窗口
+  （红色关闭按钮 / ⌘W）后 `orderOut` 并退回 `.accessory`，Dock 图标消失、App 隐藏并把焦点交还
+  前台 App，仅保留菜单栏入口；从菜单栏面板重新打开时再切回 `.regular`。主窗口从
+  Finder/LaunchServices 重开、⌘1…⌘0 打开与空间/应用激活后的策略确认都走
+  `ActivationPolicyController`；设置窗口等其它内容窗口仍可见时不会提前退回仅菜单栏模式。
+  设置页移除「显示 Dock 图标」「显示菜单栏图标」开关与台前调度提示，
+  `GeneralSettings.showDockIcon` / `showInMenuBar` 从配置中删除（旧配置键自动忽略，不再写回）。
+  详见 [`docs/ui-design.md`](docs/ui-design.md) §5.11、§11 与
+  [`docs/core-services.md`](docs/core-services.md)。
+
 ## [2.0.0] — 2026-10-29
 
 ### 修复
@@ -823,7 +839,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/compare/v2.0.1...HEAD
 [1.3.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.3.0
 [1.4.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.4.0
 [1.5.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.5.0
@@ -835,6 +851,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 [1.7.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.7.0
 [1.8.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.8.0
 [2.0.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v2.0.0
+[2.0.1]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v2.0.1
 [1.0.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.2.0

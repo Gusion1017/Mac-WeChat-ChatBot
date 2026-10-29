@@ -24,18 +24,21 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.0.0</string>
+    <string>2.0.1</string>
     <key>CFBundleVersion</key>
-    <string>21</string>
+    <string>22</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.social-networking</string>
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
     <!--
-      The bundle launches as a menu-bar agent. ActivationPolicyController switches to
-      .regular at launch only when the persisted "显示 Dock 图标" setting is on.
-      Keeping LSUIElement here prevents AppKit/LaunchServices from resetting a
-      menu-bar-only app back to .regular when it is activated via the menu bar.
+      The bundle launches as a menu-bar agent (no Dock icon, no app menu bar).
+      ActivationPolicyController promotes the process to .regular while the main
+      window is open (the launch window, or a window reopened from the status item),
+      which registers the Dock icon and lets Stage Manager manage the window; closing
+      the window demotes it back to .accessory. Keeping LSUIElement here is what
+      prevents AppKit/LaunchServices from permanently resetting the agent to .regular
+      when it is activated from the menu bar.
     -->
     <key>LSUIElement</key>
     <true/>

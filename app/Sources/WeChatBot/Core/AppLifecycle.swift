@@ -26,10 +26,12 @@ enum MainWindowRegistry {
         // （也覆盖 Dock 重开与 ⌘1…⌘0 页面快捷键）。
         MenuBarController.shared.dismissPanel()
         guard let window else { return false }
+        // 先切到 .regular 再显示窗口：Dock 图标/台前调度只认 regular App，
+        // 顺序反了窗口会被当成 accessory 窗口，台前调度不接管。
+        ActivationPolicyController.presentMainWindow()
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        ActivationPolicyController.reapplyCurrent()
         return true
     }
 
@@ -37,13 +39,17 @@ enum MainWindowRegistry {
     static func showOrOpen() {
         if show() { return }
         guard let openWindowAction else { return }
+        // 窗口对象还不存在时也要先提升激活策略，SwiftUI 创建窗口后才能被台前调度识别。
+        ActivationPolicyController.presentMainWindow()
         openWindowAction(id: mainWindowID)
         NSApp.activate(ignoringOtherApps: true)
-        ActivationPolicyController.reapplyCurrent()
     }
 
     static func hide() {
-        window?.orderOut(nil)
+        guard let window else { return }
+        window.orderOut(nil)
+        // 窗口关闭后立即退回仅菜单栏模式；若设置窗口等其它窗口仍可见则保持 .regular。
+        ActivationPolicyController.mainWindowDidHide()
     }
 }
 
@@ -163,6 +169,7 @@ private final class WindowAttachView: NSView {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var closeShortcutMonitor: Any?
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var windowObservers: [NSObjectProtocol] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 启动完成：AppKit 自己的顶层异常处理器可能在此前覆盖了 App.init 安装的那次，
@@ -175,8 +182,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let settings = SettingsStore.load()
         SleepPreventionCenter.shared.apply(mode: settings.general.sleepPrevention)
-        // Re-assert the persisted Dock preference once the run loop is up; AppKit can
-        // briefly re-register a menu-bar agent as `.regular` during launch.
+        // 启动时 SwiftUI 会展示主窗口，重新确认一次 `.regular`（AppKit 在启动早期
+        // 可能把 agent 短暂重置回该策略）。
         ActivationPolicyController.reapplyCurrent()
         // 菜单栏条目依赖 AppKit 完成启动后再创建（依赖已由 `WeChatAIApp.init` 注入）。
         MenuBarController.shared.start()
@@ -184,13 +191,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Self.handleCloseShortcut(event)
         }
         // LaunchServices/AppKit can reset an accessory app to `.regular` when app or
-        // space activation changes; re-assert the persisted preference each time.
+        // space activation changes; re-assert the desired policy each time.
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didActivateApplicationNotification,
                      NSWorkspace.activeSpaceDidChangeNotification] {
             workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { _ in
                 Task { @MainActor in
                     ActivationPolicyController.reapplyCurrent()
+                }
+            })
+        }
+        // 主窗口/设置窗口的显示与关闭是 Dock 图标与台前调度状态的唯一来源：
+        // 任意内容窗口成为 key 时重新核对（例如设置场景从别处被打开），
+        // 关闭后等 AppKit 完成收尾再判断是否退回仅菜单栏模式。
+        // 注意 NSWindow 只有 `willCloseNotification`；Task 让核对发生在 close 收尾之后。
+        let defaultCenter = NotificationCenter.default
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.willCloseNotification] {
+            windowObservers.append(defaultCenter.addObserver(forName: name, object: nil, queue: .main) { notification in
+                guard let window = notification.object as? NSWindow,
+                      ActivationPolicyController.isApplicationWindow(window)
+                else { return }
+                Task { @MainActor in
+                    ActivationPolicyController.windowsDidChange()
                 }
             })
         }
@@ -219,12 +241,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CrashReporter.install()
         CrashReporter.markPhase(.willFinishLaunch)
 
-        // The bundle declares LSUIElement, so it starts as a menu-bar agent; applying
-        // the preference here shows a regular Dock icon before the first window appears
-        // when the setting is on. It also re-asserts a hidden Dock icon at launch.
-        ActivationPolicyController.applyNow(
-            showDockIcon: SettingsStore.load().general.showDockIcon
-        )
+        // The bundle declares LSUIElement, so the process starts as a menu-bar agent.
+        // The main window is presented at launch, so switch to `.regular` here, before
+        // the first window appears: the Dock icon is registered and Stage Manager sees
+        // a regular app window from the start.
+        ActivationPolicyController.presentMainWindowAtLaunch()
     }
 
     /// Closing the last window hides the page; the app keeps running in the menu bar.
@@ -239,7 +260,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// AppKit/LaunchServices can reset an accessory app to `.regular` when it becomes
-    /// active (e.g. reopening from Finder); re-assert the persisted Dock preference.
+    /// active (e.g. activating from the menu bar); re-assert the window-derived policy.
     func applicationDidBecomeActive(_ notification: Notification) {
         ActivationPolicyController.reapplyCurrent()
     }
@@ -259,6 +280,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
         workspaceObservers.removeAll()
+        for observer in windowObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        windowObservers.removeAll()
     }
 
     /// ⌘W hides the main window; secondary windows (Settings, sheets) keep the
