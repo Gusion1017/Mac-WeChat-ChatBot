@@ -810,7 +810,7 @@ final class OneBotClient: NSObject, URLSessionWebSocketDelegate, @unchecked Send
     /// 把 16k WAV 交给 bridge 编码成 Tencent SILK 并发送语音消息。
     ///
     /// - Parameters:
-    ///   - wavURL: `VoiceSynthesisService` 产出的 16k 单声道 WAV（bridge 兼容 WAV base64）。
+    ///   - wavURL: `VoiceSynthesisService` 产出的单声道 WAV（16k/24k；bridge 兼容 WAV base64）。
     ///   - durationHintMs: 时长提示；实际发送时长以 bridge 返回为准。
     /// - Throws: `OneBotError.sendFailed("voice_send_unsupported")` 表示 Hook 未支持，
     ///   调用方应降级为文字（不重试语音，避免重复发送）。

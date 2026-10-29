@@ -1,3 +1,4 @@
+import SQLite3
 import XCTest
 @testable import WeChatAI
 
@@ -645,6 +646,321 @@ final class CharacterMemoryTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
+    // MARK: Extraction cursor (same-second batches) / history backfill
+
+    /// 忙群常见：一批互动的 timestamp 完全相同。旧游标只存时间戳时，
+    /// `LIMIT 40` 截断后同秒的第 41 条会被永久跳过；复合游标必须能续上。
+    func testSameTimestampInteractionsAreNotDroppedAcrossBatches() async throws {
+        let root = makeRoot()
+        let store = CharacterStore(rootDirectory: root)
+        let conversation = makeConversation(kind: .group)
+        let now = Date()
+        let sameSecond = now.addingTimeInterval(-10)
+        try await store.ensureCharacter(
+            conversation: conversation,
+            persona: makePersona(),
+            activationTimestamp: now.addingTimeInterval(-100)
+        )
+        let inputs = (0..<41).map { index in
+            interaction("batch-\(index)", "同一秒第 \(index) 条", at: sameSecond)
+        }
+        _ = try await store.upsertInteractions(
+            conversationID: conversation.id, records: inputs)
+        var settings = AppSettings.default
+        settings.bot.memorySettings.extractionBatchSize = 4
+        settings.bot.memorySettings.autoArchive = false
+        let engine = MemoryEngine(
+            characters: store,
+            aiClient: AIClient(),
+            completion: completion(text: #"{"memories":[]}"#)
+        )
+        let firstValue = await engine.extractIfNeeded(
+            conversation: conversation,
+            provider: fakeProvider(),
+            settings: settings,
+            now: now
+        )
+        let first = try XCTUnwrap(firstValue)
+        XCTAssertEqual(first.processedInteractions, 40, "单批上限 40；同秒第 41 条应留到下一批")
+
+        _ = try await store.upsertInteractions(
+            conversationID: conversation.id,
+            records: [
+                interaction("new-1", "新消息 1", at: now.addingTimeInterval(1)),
+                interaction("new-2", "新消息 2", at: now.addingTimeInterval(2)),
+                interaction("new-3", "新消息 3", at: now.addingTimeInterval(3))
+            ])
+        let secondValue = await engine.extractIfNeeded(
+            conversation: conversation,
+            provider: fakeProvider(),
+            settings: settings,
+            now: now
+        )
+        let second = try XCTUnwrap(secondValue)
+        XCTAssertEqual(second.processedInteractions, 4, "第 41 条同秒消息 + 3 条新消息")
+        let pending = try await store.pendingInteractions(
+            conversationID: conversation.id, minCount: 1, maxMessages: 40)
+        XCTAssertNil(pending, "复合游标推进后不能再有漏网互动")
+        await store.suspend()
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// 建卡前的群聊历史只回填 `interactions`、默认永不提取；首次维护要补总结一次。
+    func testHistoryBackfillSummarizesPreCursorInteractionsOnce() async throws {
+        let root = makeRoot()
+        let store = CharacterStore(rootDirectory: root)
+        let conversation = makeConversation(kind: .group, title: "测试群")
+        let now = Date()
+        try await store.ensureCharacter(
+            conversation: conversation,
+            persona: makePersona(),
+            activationTimestamp: now.addingTimeInterval(-100)
+        )
+        let old = (0..<5).map { index in
+            interaction(
+                "old-\(index)",
+                "建卡前历史 \(index)",
+                at: now.addingTimeInterval(-400 + Double(index))
+            )
+        }
+        _ = try await store.upsertInteractions(conversationID: conversation.id, records: old)
+        try await store.markInteractionsBackfilled(conversationID: conversation.id)
+        var settings = AppSettings.default
+        settings.bot.memorySettings.extractionBatchSize = 2
+        settings.bot.memorySettings.autoArchive = false
+        let json = """
+        {"memories":[{"category":"fact","content":"建卡前的群聊历史被补总结","importance":4,
+        "keywords":["历史"],"supersedes":[]}]}
+        """
+        let engine = MemoryEngine(
+            characters: store, aiClient: AIClient(), completion: completion(text: json))
+
+        let before = try await store.pendingInteractions(
+            conversationID: conversation.id, minCount: 1, maxMessages: 40)
+        XCTAssertNil(before, "建卡前历史默认在提取游标之前")
+
+        let historyValue = await engine.extractHistoryIfNeeded(
+            conversation: conversation,
+            provider: fakeProvider(),
+            settings: settings,
+            now: now,
+            messageLimit: 10
+        )
+        let result = try XCTUnwrap(historyValue)
+        XCTAssertEqual(result.processedInteractions, 5)
+        let memories = try await store.fetchMemories(conversationID: conversation.id)
+        XCTAssertEqual(
+            memories.filter { $0.content == "建卡前的群聊历史被补总结" }.count, 1,
+            "多批重复内容应折叠成一条，而不是每批堆一条")
+        let after = try await store.pendingInteractions(
+            conversationID: conversation.id, minCount: 1, maxMessages: 40)
+        XCTAssertNil(after)
+
+        let secondCall = await engine.extractHistoryIfNeeded(
+            conversation: conversation,
+            provider: fakeProvider(),
+            settings: settings,
+            now: now,
+            messageLimit: 10
+        )
+        XCTAssertNil(secondCall, "历史补总结只允许做一次")
+        await store.suspend()
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// 历史补总结有上限：只回退最近 `messageLimit` 条，避免一次建卡扫完整 5000 条。
+    func testHistoryBackfillOnlyCoversMostRecentLimit() async throws {
+        let root = makeRoot()
+        let store = CharacterStore(rootDirectory: root)
+        let conversation = makeConversation(kind: .group)
+        let now = Date()
+        try await store.ensureCharacter(
+            conversation: conversation,
+            persona: makePersona(),
+            activationTimestamp: now.addingTimeInterval(-100)
+        )
+        let old = (0..<6).map { index in
+            interaction(
+                "limit-\(index)",
+                "历史 \(index)",
+                at: now.addingTimeInterval(-400 + Double(index))
+            )
+        }
+        _ = try await store.upsertInteractions(conversationID: conversation.id, records: old)
+        try await store.markInteractionsBackfilled(conversationID: conversation.id)
+        var settings = AppSettings.default
+        settings.bot.memorySettings.extractionBatchSize = 2
+        settings.bot.memorySettings.autoArchive = false
+        let engine = MemoryEngine(
+            characters: store,
+            aiClient: AIClient(),
+            completion: completion(text: #"{"memories":[]}"#)
+        )
+        let historyValue = await engine.extractHistoryIfNeeded(
+            conversation: conversation,
+            provider: fakeProvider(),
+            settings: settings,
+            now: now,
+            messageLimit: 2
+        )
+        let result = try XCTUnwrap(historyValue)
+        XCTAssertEqual(result.processedInteractions, 2, "只补最近 2 条历史")
+        let pending = try await store.pendingInteractions(
+            conversationID: conversation.id, minCount: 1, maxMessages: 40)
+        XCTAssertNil(pending, "更早的历史保持「只存档不提取」")
+        await store.suspend()
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// 历史补总结按批处理且**不碰普通提取游标**：已经排队的新消息仍在普通队列里。
+    func testHistoryBackfillProcessesMultipleBatchesWithoutMovingNormalCursor() async throws {
+        let root = makeRoot()
+        let store = CharacterStore(rootDirectory: root)
+        let conversation = makeConversation(kind: .group)
+        let now = Date()
+        try await store.ensureCharacter(
+            conversation: conversation,
+            persona: makePersona(),
+            activationTimestamp: now.addingTimeInterval(-100)
+        )
+        let history = (0..<90).map { index in
+            interaction(
+                "history-\(index)",
+                "历史消息 \(index)",
+                at: now.addingTimeInterval(-400 + Double(index))
+            )
+        }
+        _ = try await store.upsertInteractions(conversationID: conversation.id, records: history)
+        _ = try await store.upsertInteractions(
+            conversationID: conversation.id,
+            records: (0..<3).map { index in
+                interaction(
+                    "pending-\(index)",
+                    "新消息 \(index)",
+                    at: now.addingTimeInterval(Double(index) - 10)
+                )
+            })
+        try await store.markInteractionsBackfilled(conversationID: conversation.id)
+        var settings = AppSettings.default
+        settings.bot.memorySettings.extractionBatchSize = 4
+        settings.bot.memorySettings.autoArchive = false
+
+        let counter = CompletionCounter()
+        let engine = MemoryEngine(
+            characters: store,
+            aiClient: AIClient(),
+            completion: { _, _, _ in
+                await counter.increment()
+                return AICompletionResult(
+                    text: #"{"memories":[]}"#,
+                    model: "fake-model",
+                    usage: AIUsage(promptTokens: 1, completionTokens: 1, totalTokens: 2),
+                    latencyMs: 1,
+                    finishReason: "stop",
+                    streamed: false
+                )
+            }
+        )
+        let resultValue = await engine.extractHistoryIfNeeded(
+            conversation: conversation,
+            provider: fakeProvider(),
+            settings: settings,
+            now: now,
+            messageLimit: 90
+        )
+        let result = try XCTUnwrap(resultValue)
+        XCTAssertEqual(result.processedInteractions, 90, "90 条历史要跨 3 批补完")
+        let callCount = await counter.value
+        XCTAssertGreaterThanOrEqual(callCount, 3)
+
+        // 普通队列里的 3 条新消息没有被历史补总结消费，也没被游标跳过。
+        let pending = try await store.pendingInteractions(
+            conversationID: conversation.id, minCount: 1, maxMessages: 40)
+        XCTAssertEqual(pending?.count, 3)
+        await store.suspend()
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// 空闲兜底允许低于 `extractionBatchSize` 的待提取互动单独提取。
+    func testExtractIfNeededCanFlushBelowBatchSize() async throws {
+        let root = makeRoot()
+        let store = CharacterStore(rootDirectory: root)
+        let conversation = makeConversation()
+        let now = Date()
+        try await store.ensureCharacter(
+            conversation: conversation,
+            persona: makePersona(),
+            activationTimestamp: now.addingTimeInterval(-100)
+        )
+        _ = try await store.upsertInteractions(
+            conversationID: conversation.id,
+            records: (0..<3).map { index in
+                interaction(
+                    "partial-\(index)",
+                    "零散消息 \(index)",
+                    at: now.addingTimeInterval(Double(index) - 10)
+                )
+            })
+        var settings = AppSettings.default
+        settings.bot.memorySettings.extractionBatchSize = 8
+        settings.bot.memorySettings.autoArchive = false
+        let engine = MemoryEngine(
+            characters: store,
+            aiClient: AIClient(),
+            completion: completion(text: #"{"memories":[]}"#)
+        )
+        let normal = await engine.extractIfNeeded(
+            conversation: conversation,
+            provider: fakeProvider(),
+            settings: settings,
+            now: now
+        )
+        XCTAssertNil(normal, "不足一批时普通维护不提取")
+        let flushedValue = await engine.extractIfNeeded(
+            conversation: conversation,
+            provider: fakeProvider(),
+            settings: settings,
+            now: now,
+            minCount: 3
+        )
+        let flushed = try XCTUnwrap(flushedValue)
+        XCTAssertEqual(flushed.processedInteractions, 3)
+        await store.suspend()
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    // MARK: Capture policy
+
+    func testMemoryCapturePolicySkipsSystemOfficialAndAIDisabledConversations() {
+        var settings = AppSettings.default
+        settings.bot.memorySettings.enabled = true
+        XCTAssertTrue(MemoryCapturePolicy.shouldCapture(
+            conversation: makeConversation(id: "wxid_friend"), settings: settings))
+        XCTAssertTrue(MemoryCapturePolicy.shouldCapture(
+            conversation: makeConversation(id: "123456@chatroom", kind: .group),
+            settings: settings))
+
+        for systemID in ["filehelper", "notifymessage", "newsapp", "officialaccounts"] {
+            XCTAssertFalse(MemoryCapturePolicy.shouldCapture(
+                conversation: makeConversation(id: systemID), settings: settings),
+                "系统会话不自动建卡：\(systemID)")
+        }
+        XCTAssertFalse(MemoryCapturePolicy.shouldCapture(
+            conversation: makeConversation(id: "gh_abc123", kind: .official),
+            settings: settings))
+        XCTAssertFalse(MemoryCapturePolicy.shouldCapture(
+            conversation: makeConversation(id: "__global__"), settings: settings))
+
+        var aiDisabled = makeConversation(id: "wxid_ai_disabled")
+        aiDisabled.aiEnabled = false
+        XCTAssertFalse(MemoryCapturePolicy.shouldCapture(
+            conversation: aiDisabled, settings: settings))
+
+        settings.bot.memorySettings.enabled = false
+        XCTAssertFalse(MemoryCapturePolicy.shouldCapture(
+            conversation: makeConversation(id: "wxid_friend"), settings: settings))
+    }
+
     // MARK: Legacy import
 
     func testLegacyImportSplitsBulletsAndPreservesCoreAsPinned() async throws {
@@ -974,5 +1290,345 @@ final class CharacterMemoryTests: XCTestCase {
 
         await store.suspend()
         try? FileManager.default.removeItem(at: root)
+    }
+
+    // MARK: Historical timestamps / expired plans
+
+    private func lineTimestamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter.string(from: date)
+    }
+
+    func testExtractionPromptCarriesMessageTimesAndHistoricalRange() {
+        let now = Date(timeIntervalSince1970: 1_793_000_000)
+        let start = now.addingTimeInterval(-6 * 86_400)
+        let end = start.addingTimeInterval(3_600)
+        let interactions = [
+            CharacterInteraction(
+                id: 1, messageID: "p1", direction: .incoming,
+                senderID: "wxid_甲", senderName: "甲", content: "今晚一起吃饭吗",
+                timestamp: start, createdAt: start),
+            CharacterInteraction(
+                id: 2, messageID: "p2", direction: .outgoing,
+                senderID: "self", senderName: "我", content: "好",
+                timestamp: end, createdAt: end)
+        ]
+        let prompt = MemoryEngine.extractionPrompt(
+            conversation: makeConversation(kind: .group),
+            persona: nil,
+            existingMemories: [],
+            interactions: interactions,
+            memoryLimit: 8,
+            now: now,
+            historyBackfill: true
+        )
+        XCTAssertEqual(prompt.includedCount, 2)
+        XCTAssertTrue(prompt.system.contains("发送时间"), "系统提示必须说明行首时间是消息发送时间")
+        XCTAssertTrue(prompt.system.contains("相对时间"))
+        XCTAssertTrue(prompt.user.contains("历史聊天"))
+        XCTAssertTrue(prompt.user.contains("消息时间范围"))
+        XCTAssertTrue(prompt.user.contains(
+            "[\(lineTimestamp(start))] 甲：今晚一起吃饭吗"), "每条消息行首必须带发送时间")
+        XCTAssertTrue(prompt.user.contains(
+            "[\(lineTimestamp(end))] 我：好"))
+    }
+
+    /// 历史补总结的记忆时间必须是来源消息时间，不能是「现在」。
+    func testHistoryBackfillStoresSourceMessageTimesInsteadOfNow() async throws {
+        let root = makeRoot()
+        let store = CharacterStore(rootDirectory: root)
+        let conversation = makeConversation(kind: .group)
+        let now = Date()
+        try await store.ensureCharacter(
+            conversation: conversation,
+            persona: makePersona(),
+            activationTimestamp: now.addingTimeInterval(-100)
+        )
+        let historyStart = now.addingTimeInterval(-6 * 86_400)
+        let old = (0..<4).map { index in
+            interaction(
+                "time-\(index)", "历史消息 \(index)",
+                at: historyStart.addingTimeInterval(Double(index) * 60))
+        }
+        _ = try await store.upsertInteractions(conversationID: conversation.id, records: old)
+        try await store.markInteractionsBackfilled(conversationID: conversation.id)
+        var settings = AppSettings.default
+        settings.bot.memorySettings.autoArchive = false
+        let json = """
+        {"memories":[{"category":"fact","content":"这段历史发生在六天前","importance":4,
+        "keywords":["历史"],"supersedes":[]}]}
+        """
+        let engine = MemoryEngine(
+            characters: store, aiClient: AIClient(), completion: completion(text: json))
+        let value = await engine.extractHistoryIfNeeded(
+            conversation: conversation, provider: fakeProvider(), settings: settings, now: now)
+        let result = try XCTUnwrap(value)
+        XCTAssertEqual(result.processedInteractions, 4)
+        let memories = try await store.fetchMemories(conversationID: conversation.id)
+        let memory = try XCTUnwrap(memories.first { $0.content == "这段历史发生在六天前" })
+        let newestSource = historyStart.addingTimeInterval(3 * 60)
+        XCTAssertEqual(
+            memory.updatedAt.timeIntervalSince1970,
+            newestSource.timeIntervalSince1970, accuracy: 0.01,
+            "历史记忆的 updated_at 必须是最后一条来源消息时间")
+        XCTAssertLessThan(memory.createdAt, now.addingTimeInterval(-5 * 86_400),
+                          "历史记忆不能被标成「刚刚创建」")
+    }
+
+    /// 没有可用 AI 时历史补总结不能落本地兜底并写成「已完成」，AI 恢复后要能续补。
+    func testHistoryBackfillRequiresAIAndResumesWhenAvailable() async throws {
+        let root = makeRoot()
+        let store = CharacterStore(rootDirectory: root)
+        let conversation = makeConversation(kind: .group)
+        let now = Date()
+        try await store.ensureCharacter(
+            conversation: conversation,
+            persona: makePersona(),
+            activationTimestamp: now.addingTimeInterval(-100)
+        )
+        _ = try await store.upsertInteractions(
+            conversationID: conversation.id,
+            records: (0..<5).map { index in
+                interaction("ai-\(index)", "历史 \(index)",
+                            at: now.addingTimeInterval(-500 + Double(index)))
+            })
+        try await store.markInteractionsBackfilled(conversationID: conversation.id)
+        var settings = AppSettings.default
+        settings.bot.memorySettings.autoArchive = false
+
+        let noAI = MemoryEngine(characters: store, aiClient: AIClient())
+        let skipped = await noAI.extractHistoryIfNeeded(
+            conversation: conversation, provider: nil, settings: settings, now: now)
+        XCTAssertNil(skipped)
+        let afterSkip = try await store.fetchMemories(conversationID: conversation.id)
+        XCTAssertTrue(afterSkip.isEmpty, "没有 AI 时不能写本地兜底历史记忆")
+
+        let json = """
+        {"memories":[{"category":"fact","content":"AI 恢复后补上的历史","importance":3,
+        "keywords":["历史"],"supersedes":[]}]}
+        """
+        let withAI = MemoryEngine(
+            characters: store, aiClient: AIClient(), completion: completion(text: json))
+        let resumedValue = await withAI.extractHistoryIfNeeded(
+            conversation: conversation, provider: fakeProvider(), settings: settings, now: now)
+        let resumed = try XCTUnwrap(resumedValue)
+        XCTAssertEqual(resumed.processedInteractions, 5)
+        let second = await withAI.extractHistoryIfNeeded(
+            conversation: conversation, provider: fakeProvider(), settings: settings, now: now)
+        XCTAssertNil(second, "补完一次后不再重复")
+    }
+
+    /// 「最近最多 500 条」必须是硬上限：同秒边界消息也不能多补。
+    func testHistoryBackfillHonorsLimitWithSameTimestampBoundary() async throws {
+        let root = makeRoot()
+        let store = CharacterStore(rootDirectory: root)
+        let conversation = makeConversation(kind: .group)
+        let now = Date()
+        let sameSecond = now.addingTimeInterval(-1_000)
+        try await store.ensureCharacter(
+            conversation: conversation,
+            persona: makePersona(),
+            activationTimestamp: now.addingTimeInterval(-500)
+        )
+        _ = try await store.upsertInteractions(
+            conversationID: conversation.id,
+            records: (0..<60).map { index in
+                interaction("tie-\(index)", "同秒历史 \(index)", at: sameSecond)
+            })
+        try await store.markInteractionsBackfilled(conversationID: conversation.id)
+        var settings = AppSettings.default
+        settings.bot.memorySettings.autoArchive = false
+        let engine = MemoryEngine(
+            characters: store,
+            aiClient: AIClient(),
+            completion: completion(text: #"{"memories":[]}"#)
+        )
+        let value = await engine.extractHistoryIfNeeded(
+            conversation: conversation,
+            provider: fakeProvider(),
+            settings: settings,
+            now: now,
+            messageLimit: 40
+        )
+        let result = try XCTUnwrap(value)
+        XCTAssertEqual(result.processedInteractions, 40, "同秒边界也必须严格补 40 条")
+        let second = await engine.extractHistoryIfNeeded(
+            conversation: conversation,
+            provider: fakeProvider(),
+            settings: settings,
+            now: now,
+            messageLimit: 40
+        )
+        XCTAssertNil(second, "窗口外的更早同秒消息不能继续补")
+    }
+
+    /// 历史补总结里的近期 todo（「今晚/这周末」）降级为 fact；普通提取不受影响。
+    func testHistoryBackfillDowngradesExpiredNearTermTodo() async throws {
+        let json = """
+        {"memories":[{"category":"todo","content":"今晚一起吃饭","importance":6,
+        "keywords":["吃饭"],"supersedes":[]}]}
+        """
+        let root = makeRoot()
+        let store = CharacterStore(rootDirectory: root)
+        let conversation = makeConversation(kind: .group)
+        let now = Date()
+        try await store.ensureCharacter(
+            conversation: conversation,
+            persona: makePersona(),
+            activationTimestamp: now.addingTimeInterval(-100)
+        )
+        _ = try await store.upsertInteractions(
+            conversationID: conversation.id,
+            records: (0..<3).map { index in
+                interaction("plan-\(index)", "今晚吃饭 \(index)",
+                            at: now.addingTimeInterval(-3 * 86_400 + Double(index)))
+            })
+        try await store.markInteractionsBackfilled(conversationID: conversation.id)
+        var settings = AppSettings.default
+        settings.bot.memorySettings.autoArchive = false
+        let engine = MemoryEngine(
+            characters: store, aiClient: AIClient(), completion: completion(text: json))
+        _ = await engine.extractHistoryIfNeeded(
+            conversation: conversation, provider: fakeProvider(), settings: settings, now: now)
+        let historyMemories = try await store.fetchMemories(conversationID: conversation.id)
+        XCTAssertEqual(historyMemories.first?.category, .fact,
+                       "历史中的「今晚」计划不能再当待办")
+
+        // 普通实时提取：同样内容保留 todo。
+        let liveRoot = makeRoot()
+        let liveStore = CharacterStore(rootDirectory: liveRoot)
+        let liveConversation = makeConversation()
+        try await liveStore.ensureCharacter(
+            conversation: liveConversation,
+            persona: makePersona(),
+            activationTimestamp: now.addingTimeInterval(-100)
+        )
+        _ = try await liveStore.upsertInteractions(
+            conversationID: liveConversation.id,
+            records: (0..<4).map { index in
+                interaction("live-\(index)", "今晚吃饭 \(index)",
+                            at: now.addingTimeInterval(-10 + Double(index)))
+            })
+        var liveSettings = AppSettings.default
+        // MemorySettings 的合法范围是 4...20；这里用 4 条互动 + 批量 4 触发一次实时提取。
+        liveSettings.bot.memorySettings.extractionBatchSize = 4
+        liveSettings.bot.memorySettings.autoArchive = false
+        let liveEngine = MemoryEngine(
+            characters: liveStore, aiClient: AIClient(), completion: completion(text: json))
+        _ = await liveEngine.extractIfNeeded(
+            conversation: liveConversation, provider: fakeProvider(),
+            settings: liveSettings, now: now)
+        let liveMemories = try await liveStore.fetchMemories(
+            conversationID: liveConversation.id)
+        XCTAssertEqual(liveMemories.first?.category, .todo)
+
+        await store.suspend()
+        await liveStore.suspend()
+        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.removeItem(at: liveRoot)
+    }
+
+    /// 旧逻辑补出来的历史记忆：未编辑的归档待重补；编辑过的修时间并把过期 todo 降级。
+    func testHistoricalMemoryRepairArchivesOldUntouchedAndFixesEditedTodo() async throws {
+        let root = makeRoot()
+        let store = CharacterStore(rootDirectory: root)
+        let conversation = makeConversation(kind: .group)
+        let now = Date()
+        let oldTime = now.addingTimeInterval(-3 * 86_400)
+        try await store.ensureCharacter(
+            conversation: conversation,
+            persona: makePersona(),
+            activationTimestamp: now.addingTimeInterval(-100)
+        )
+        let old = (0..<4).map { index in
+            interaction("repair-\(index)", "旧消息 \(index)",
+                        at: oldTime.addingTimeInterval(Double(index)))
+        }
+        _ = try await store.upsertInteractions(conversationID: conversation.id, records: old)
+        try await store.markInteractionsBackfilled(conversationID: conversation.id)
+
+        let untouched = CharacterMemory(
+            characterID: conversation.id,
+            category: .fact,
+            content: "旧逻辑补出的历史事实",
+            importance: 4,
+            source: .extraction,
+            sourceMessageIDs: [old[0].messageID, old[1].messageID],
+            createdAt: now,
+            updatedAt: now
+        )
+        try await store.upsertMemory(untouched, preserveUpdatedAt: true)
+        let edited = CharacterMemory(
+            characterID: conversation.id,
+            category: .todo,
+            content: "今晚一起吃饭",
+            importance: 6,
+            source: .extraction,
+            sourceMessageIDs: [old[3].messageID],
+            createdAt: now.addingTimeInterval(-10),
+            updatedAt: now
+        )
+        try await store.upsertMemory(edited, preserveUpdatedAt: true)
+        await store.suspend()
+
+        // 模拟旧逻辑：已有完成标记、没有 version=2、没有 repair 标记。
+        let databaseURL = root
+            .appendingPathComponent(CharacterDirectory.key(for: conversation.id), isDirectory: true)
+            .appendingPathComponent("memory.sqlite")
+        try rawSQLite(databaseURL, """
+        INSERT OR REPLACE INTO meta(key, value) VALUES
+            ('history_backfilled_at', '\(now.timeIntervalSince1970)');
+        DELETE FROM meta WHERE key IN (
+            'history_backfill_version', 'history_memory_repair_v1');
+        """)
+
+        let reopened = CharacterStore(rootDirectory: root)
+        let repaired = try await reopened.fetchMemories(conversationID: conversation.id)
+        let untouchedAfter = try XCTUnwrap(repaired.first { $0.id == untouched.id })
+        XCTAssertTrue(untouchedAfter.archived, "未编辑的旧逻辑历史记忆应归档待重补")
+        let editedAfter = try XCTUnwrap(repaired.first { $0.id == edited.id })
+        XCTAssertEqual(editedAfter.category, .fact, "过期历史 todo 应降级")
+        XCTAssertEqual(
+            editedAfter.updatedAt.timeIntervalSince1970,
+            oldTime.addingTimeInterval(3).timeIntervalSince1970,
+            accuracy: 0.01,
+            "编辑过的历史记忆时间也要修正为来源消息时间")
+
+        // 完成标记被清掉：新逻辑会重新补总结。
+        let engine = MemoryEngine(
+            characters: reopened,
+            aiClient: AIClient(),
+            completion: completion(text: #"{"memories":[]}"#)
+        )
+        let resumed = await engine.extractHistoryIfNeeded(
+            conversation: conversation, provider: fakeProvider(), settings: .default, now: now)
+        XCTAssertNotNil(resumed, "旧逻辑归档后应能按新逻辑重补一次")
+        await reopened.suspend()
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func rawSQLite(_ url: URL, _ sql: String) throws {
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &handle), SQLITE_OK)
+        guard let handle else { return }
+        defer { sqlite3_close(handle) }
+        var error: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(handle, sql, nil, nil, &error) == SQLITE_OK else {
+            let message = error.map { String(cString: $0) } ?? "sqlite error"
+            sqlite3_free(error)
+            throw NSError(domain: "CharacterMemoryTests", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: message])
+        }
+    }
+}
+
+/// 统计假 completion 被调用次数（历史补总结应跨多批调用 AI）。
+private actor CompletionCounter {
+    private(set) var value = 0
+
+    func increment() {
+        value += 1
     }
 }

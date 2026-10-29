@@ -24,12 +24,12 @@
 | `Services/OneBotClient.swift` | WS 收事件、HTTP 发送/图片获取、媒体落地、事件解析、去重、重连 |
 | `Services/ImageFetcher.swift` | 入站图片获取串行队列 + `ImageFetchPolicy`（设置开关 / 去重 / 取消） |
 | `Services/VoiceTranscriptionService.swift` / `VoiceFetcher.swift` | 入站语音转写（SpeechAnalyzer）与 `/fetch_voice` 串行队列 |
-| `Services/VoiceSynthesisService.swift` / `VoiceModelStore.swift` / `VoiceCloneStore.swift` | 本地 TTS（sherpa-onnx Kokoro/ZipVoice）、按引擎聚合模型下载、克隆音色 |
-| `Services/VoicePreviewController.swift` / `Models/KokoroVoiceCatalog.swift` | 音色试听（共享 AVAudioPlayer，复用合成服务）与 Kokoro 官方 103 音色 sid → name 目录 |
+| `Services/VoiceSynthesisService.swift` / `VoiceSynthesisText.swift` / `VoiceSynthesisAudio.swift` | 本地 TTS 编排（唯一引擎 CosyVoice3）：文本清洗、24k WAV 写出、失败改发文字 |
+| `Services/VoicePreviewController.swift` | 音色试听（共享 AVAudioPlayer，走本地 CosyVoice3 HTTP 服务） |
 | `Services/CosyVoiceClient.swift` | CosyVoice3 本地 HTTP 合成（health/voices/tts，24k PCM 解码，仅回环 endpoint） |
 | `Services/CosyVoiceRuntime.swift` / `CosyVoiceInstaller.swift` | 本地 sidecar 启停/健康轮询/日志；安装脚本执行、`PROGRESS` 解析、取消/删除 |
-| `Models/CosyVoiceVoice.swift` | 本机音色目录、health 快照、CosyVoice → Kokoro → 文字回退计划 |
-| `Services/VoiceReplyDecision.swift` | 语音回复决策（开关/概率/对等/短回复/模型就绪） |
+| `Models/CosyVoiceVoice.swift` | 本机音色目录、health 快照、CosyVoice3 就绪判定 |
+| `Services/VoiceReplyDecision.swift` | 语音回复决策（开关/概率/对等/短回复/CosyVoice3 就绪） |
 | `Services/VisionEngine.swift` | 识图支持：候选图片筛选、ImageIO 缩放/JPEG data URL、多模态请求消息、描述清洗 |
 | `Services/AIClient.swift` | OpenAI 兼容 `/chat/completions`，SSE 流式 / 非流式 / 超时 / 错误映射 |
 | `Services/RuleEngine.swift` | 白黑名单、私聊/群触发、唤醒窗口、冷却、频率、工作时段 |
@@ -342,7 +342,7 @@ id != active 或 active == _unassigned
 | `RuntimeCoordinator` | `@MainActor` | 编排、事件处理、统计；等待服务用 `await` 让出主线程 |
 | `MemoryStore` | `actor` + SQLite `FULLMUTEX` | 所有 SQL 串行；UI/服务层都 `await`；旧 `memories` 表只读 |
 | `CharacterStore` | `actor` + SQLite（每会话一个库） | 角色目录/记忆卡写入串行；按需打开并 LRU 缓存最多 4 个连接，不占主线程；旧 `persona.md` 清理串行执行 |
-| `MemoryEngine` | 无共享可变状态（依赖 `CharacterStore`/`AIClient`） | 召回、权重、相似度、提取解析为纯逻辑/异步调用，可单测 |
+| `MemoryEngine` | 仅一个全局 actor 并发闸门（`MemoryExtractionGate`，最多 3 个 AI 请求）；其余无共享可变状态（依赖 `CharacterStore`/`AIClient`） | 召回、权重、相似度、提取解析为纯逻辑/异步调用，可单测 |
 | `AccountProfile` | 静态状态 + `NSLock` | 账号解析/状态读写串行；迁移是阻塞 IO，调用方必须在后台线程执行 |
 | `SettingsPersistence` | `actor` | 编码、原子替换、合并写；config/profile 双写 |
 | `SchedulerService` | `actor` | 单循环 + `CheckedContinuation` 唤醒，无轮询 |
@@ -648,16 +648,18 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 - 路径：`accounts/<当前账号>/characters/<c-key>/`，每个微信会话一个；目录名由
   `CharacterDirectory.key(for:)` 编码（只保留 `A-Za-z0-9._-@`，其余 UTF-8 字节按 `%XX`；
   超 160 字符用 `c-<前 60>-<sha256 前 16>`），权威会话 ID 记录在 `memory.sqlite` 的
-  `meta.conversation_id`。私聊/群聊/公众号都按会话建卡，`filehelper` 等系统会话未实际回复则不建。
+  `meta.conversation_id`。私聊/群聊按会话建卡：会话第一条消息落库后由运行时后台自动创建
+  （`MemoryCapturePolicy` 跳过系统会话/公众号/关闭 AI 的会话），不再要求机器人先回复；
+  手动「为现有会话创建记忆卡」可补建。`filehelper` 等系统会话不会因消息自动建卡。
 - **人格单一来源**：目录里只有 `memory.sqlite`，不创建/读取 `persona.md`。人格名称/摘要/
   系统提示词/模型来自人格设定；`ensureCharacter(conversation:persona:activationTimestamp:)`
   只把 `persona_id` / `persona_name` 写入 meta 供展示，不保存提示词副本。
 - `actor`：文件/DB 操作串行、不占主线程；`memory.sqlite` 为 WAL + `synchronous=NORMAL`；
   按需打开记忆卡并 LRU 缓存最多 4 个连接；未激活/切号中返回未就绪错误，调用方 best-effort。
-- `ensureCharacter(...)`：首次为该会话生成回复时建目录、`memory.sqlite`，**新卡默认空**
-  （不写初始记忆），并把 `last_extracted_at` 初始化为触发消息时间戳 - 0.001
-  （本轮触发消息与其回复进入第一批提取，不回挖历史聊天）；已存在时同步标题/类型/人格 meta，
-  不覆盖任何记忆正文。
+- `ensureCharacter(...)`：首次建卡时建目录、`memory.sqlite`，**新卡默认空**（不写初始记忆），
+  把 `last_extracted_at` 初始化为触发消息时间戳 - 0.001（本轮触发消息与其回复进入第一批提取），
+  并写 `history_cutoff_at = 触发消息时间戳`：建卡前历史互动默认不进入普通提取，由首次维护的
+  历史补总结（最近 ≤500 条）处理。已存在时同步标题/类型/人格 meta，不覆盖任何记忆正文。
 - **起点记忆迁移**：打开旧 `memory.sqlite` 时 `CharacterDatabase.migrate()` 执行一次性迁移
   ——`origin_edited != '1'` 的 `kind='origin'` 行删除；`origin_edited = '1'` 的行转
   `kind='normal'`、`pinned=1`、`importance=MAX(importance,10)`、`source='manual'`；
@@ -670,8 +672,8 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
   人格名展示；`CharacterSummary.isGlobal` 标出全局卡，其余计数只有记忆/重要/待办/更新时间。
   `CharacterPersona` / `PersonaCardCodec` / `isCustomized` / 每会话模板同步已移除。
 - **旧 `persona.md` 清理**：创建/列出记忆卡时 best-effort 用 `FileManager.trashItem` 移入
-  废纸篓，不再读取；只含 `persona.md` 的旧目录不算有效角色卡，等首次回复时重建记忆卡。
-  未迁移的自定义正文不会采用，需要保留时应在人格设定中维护。
+  废纸篓，不再读取；只含 `persona.md` 的旧目录不算有效角色卡，等该会话下一条消息
+  （或下一次回复）时重建记忆卡。未迁移的自定义正文不会采用，需要保留时应在人格设定中维护。
 - 生命周期：启动/切号 `activate()`，切号前 `suspend()` 关闭全部连接；删除记忆卡/会话时
   整个角色目录移到废纸篓（失败则删除并记日志）。目录随账号目录整体复制/认领，不单独迁移。
 
@@ -680,11 +682,16 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 - 召回：`MemoryEngine.recall` 的分组、去重、token 预算见 §5.5 与
   [`memory.md`](memory.md) §8；读取当前会话记忆卡 + 全局共享卡（全局卡自己的预览不重复
   叠加），全局记忆注入所有会话但不覆盖本地记忆；提示词标签加「全局」。
-- 批量提取（后台、按会话去重）：`syncInteractions` 首次回填最多 5000 条、之后按 `interactions_synced_at` 游标增量同步到
-  `interactions` → `pendingInteractions` 取 `timestamp > meta.last_extracted_at`（升序、
-  单批 ≤40）→ 条数不足 `extractionBatchSize`（默认 8）不提取 → AI 输出 JSON →
-  合并/supersede → 推进游标 → `archiveStale()`。只有成功才推进游标；失败保留游标，
-  下次新消息重试；无 Key/AI 失败/解析失败时走本地兜底（压成 1 条 `fact`，来源 extraction）。
+- 批量提取（后台、按会话去重）：维护任务先按 `MemoryCapturePolicy` 在缺卡时自动建卡，再
+  `syncInteractions` 首次回填最多 5000 条、之后按 `interactions_synced_at` 游标增量同步到
+  `interactions` → 历史补总结（[`memory.md`](memory.md) §7.2，独立断点，最近 ≤500 条硬上限、
+  只做一次；必须 AI 成功，失败不写完成标记）→
+  `pendingInteractions` 取 `(timestamp, id) > meta.last_extracted_at 游标`（升序、单批 ≤40；
+  复合游标避免同秒被 LIMIT 截断的消息永久漏提取）→ 条数不足 `extractionBatchSize`（默认 8）
+  不提取 → AI 输出 JSON → 合并/supersede → 推进游标 → `archiveStale()`。只有成功才推进游标；
+  失败保留游标，下次新消息重试；无 Key/AI 失败/解析失败时走本地兜底（压成 1 条 `fact`，
+  来源 extraction）。**空闲兜底**：最后一条消息后 5 分钟无新消息且待提取 ≥ 半批时补跑一次；
+  启动时对已有记忆卡的会话补跑一次维护。
 - 合并/取代：`MemorySimilarity` 用字符 bigram 余弦 + 包含关系，≥`mergeSimilarity`
   （默认 0.92）自动折叠（关键词并集、取更完整正文、`merge_count+1`）；冲突 supersede
   双方留档、旧记忆不进入召回，置顶不被自动取代。规则见 [`memory.md`](memory.md) §6。
@@ -736,7 +743,7 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 - 账号隔离：账号目录名经过 `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` 校验，`_unassigned` 为保留名；
   UI 与日志展示 mask（见 `AppAccount.maskedID`），公开文档不写真实 wxid。
 - 旧版迁移只 copy、不删除旧库/旧媒体/旧配置；`account-state.json` 只存账号指针，不含聊天内容。
-- Keychain、语音模型、日志文件与备份全局共享；换账号不会复制或删除 API Key。
+- Keychain、CosyVoice3 安装与音色、日志文件与备份全局共享；换账号不会复制或删除 API Key。
 
 ## 8. 自检与测试
 
@@ -750,13 +757,13 @@ dry-run 只记录计划不发送。原生 sendpat 已于 2026-10-21 真机验证
 `HookSelfIDTests.swift`（4）、`WeChatAppmsgTests.swift`（26）、`AppmsgRoutingTests.swift`（20）、
 `WakeWindowTests.swift`（6）、`ImageFetchTests.swift`（16）、`OneBotEventParserTests.swift`（5）、
 `DataRepairTrustTests.swift`（2）、`VisionTests.swift`（12）、`SystemVitalsTests.swift`（16），
-以及 `VoiceReadTests` / `VoiceSynthesisTests` / `VoiceRuntimeStatusTests` / `VoiceCatalogTests` 等语音测试；
-2026-10-27 账号隔离 + 2026-10-28 记忆 v2（含人格单一来源 + 全局共享）后为 504 项（8 项按环境跳过）：
+以及 `VoiceReadTests` / `VoiceSynthesisTests` / `VoiceRuntimeStatusTests` / `CosyVoiceTests` 等语音测试；
+2026-10-27 账号隔离 + 2026-10-28 记忆 v2（含人格单一来源 + 全局共享）+ 2026-10-29 历史补总结修复后为 566 项（2 项按环境跳过：真实 CosyVoice3 服务 E2E）：
 
 ```bash
 cd app
 swift test --scratch-path .build-verify
-# Executed 504 tests, with 8 skipped, 0 failures
+# Executed 566 tests, with 2 skipped, 0 failures
 ```
 
 覆盖：MemoryStore 建表/批量写/分页/before 翻页/搜索/KV、消息溢出游标与 8 条批量阈值
@@ -790,10 +797,10 @@ profile seed、旧文件保留）、`claimUnassigned` 只复制不删除/不覆�
 config + profile 双文件加载/损坏备份/去重双写、`MemoryStore` 切换 A/B 库后会话/记忆/日志/KV
 互不可见。2026-10-28 审查修复另加回归：`_unassigned` 启动认领、`legacyMigrationDone` 门禁、
 空壳目标库替换、WAL 主库无 `-wal/-shm` 时的迁移、`MemoryStore.suspend()` 禁止隐式 open。
-当前 `swift test` 504 项通过
-（8 项按环境跳过）。
+当前 `swift test` 566 项通过
+（2 项按环境跳过：真实 CosyVoice3 服务 E2E）。
 
-记忆 v2（2026-10-28）新增 `CharacterMemoryTests.swift`（24 项，临时目录，不碰真实网络/数据）：
+记忆 v2（2026-10-28）新增、2026-10-29 扩展到 36 项的 `CharacterMemoryTests.swift`（临时目录，不碰真实网络/数据）：
 目录 key 编码/超长哈希/特殊字符、创建角色只生成 `memory.sqlite`（不生成 `persona.md`）、
 新卡 0 条记忆、`last_extracted_at`、`memory.sqlite` schema 与 `interactions` upsert/回填游标、
 相似度 ≥0.92 合并与 <0.92 新增、supersede 双方标记/取消/置顶保护、权重与 72h/半衰期/置顶、

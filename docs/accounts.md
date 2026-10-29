@@ -2,7 +2,7 @@
 
 > 2026-10-27 起，App 以**当前登录的微信账号**为边界保存聊天与机器人数据：同一台 Mac 上换一个
 > 微信账号登录，聊天记录、记忆卡（角色目录）、会话设置、机器人配置、人格与定时任务自动切到该账号自己的档案；
-> AI 模型、Hook、OneBot、Keychain、语音模型等「本机能力」仍全局共享。
+> AI 模型、Hook、OneBot、Keychain、CosyVoice3 安装与音色等「本机能力」仍全局共享。
 >
 > 对应实现：`Services/WeChatAccountResolver.swift`（识别当前微信账号）、
 > `Services/AccountProfile.swift`（账号档案路径/状态/旧版迁移）、
@@ -32,7 +32,7 @@
 - `config.json` 中的 `general`（外观/菜单栏/开机启动/语言/防睡眠等）、`hook`、`onebot`、`ai`、
   `providers`。
 - Keychain API Key（service = `com.gusionw.wechatai`，account = `AIProvider.apiKeyReference`）。
-- 语音引擎、TTS 模型与音色库（`models/`、`voice-clones/`）、CosyVoice 安装（`cosyvoice/`）。
+- CosyVoice3 安装、运行环境、模型与音色（`cosyvoice/`）。
 - 崩溃日志与面包屑（`~/Library/Logs/WeChatAI/`）、bridge 运行日志
   （`~/Library/Logs/WeChatAI/bridge/`）、微信 App 官方备份（`backups/`）。
 
@@ -58,7 +58,7 @@
 | 通用设置 `general` | `config.json` | ❌ | 外观/菜单栏/语言/防睡眠等本机偏好 |
 | Hook / OneBot / AI 通道设置 | `config.json` | ❌ | `hook`、`onebot`、`ai`、`providers` |
 | API Key | macOS Keychain | ❌ | 删账号档案不会删除 Keychain 条目 |
-| 语音引擎、模型、克隆音色、CosyVoice | `models/`、`voice-clones/`、`cosyvoice/` | ❌ | 模型文件较大，按本机共享 |
+| CosyVoice3 安装、运行环境、模型与音色 | `cosyvoice/` | ❌ | 约 8GB，按本机共享 |
 | 崩溃日志 / bridge 日志 | `~/Library/Logs/WeChatAI/` | ❌ | 文件日志不区分账号 |
 | 微信官方备份 | `backups/` | ❌ | 安装 Hook 前的完整备份 |
 | 账号指针 | `account-state.json` | 全局 | 只记录当前/最近账号，不存业务数据 |
@@ -93,9 +93,7 @@
 ├── media/                          # 旧版遗留媒体（只读保留，不迁移、不删除）
 ├── backups/                        # 微信 App 官方备份（全局）
 ├── runtime/                        # 运行期 Hook 配置（全局）
-├── cosyvoice/                      # CosyVoice 旁路安装（全局）
-├── voice-clones/                   # 克隆音色（全局）
-├── models/                         # TTS 模型（全局）
+├── cosyvoice/                      # CosyVoice3 安装：运行环境、模型与音色（全局）
 └── chatbot.sqlite                  # 旧版单库（迁移后保留，不删除）
 ```
 
@@ -389,8 +387,9 @@ struct LegacyMigrationOutcome {
   确实有 `bot` / `personas` / `schedules` 时，写入 `ProfileSettings` 种子。
   旧配置缺失这些键时保留 `.default`。若旧库已不存在但旧配置还在（「只剩配置」升级），
   当前 active 是真实账号时也会只做 profile 种子，不复制数据库。
-- **角色目录**：`characters/` 不单独迁移，登录后首次回复按人格设定新建**空记忆卡**
-  （只有 `memory.sqlite`，不写 `persona.md`、不生成初始记忆）。旧版本每会话的 `persona.md`
+- **角色目录**：`characters/` 不单独迁移，登录后收到消息（或首次回复）按人格设定新建记忆卡
+  （只有 `memory.sqlite`，不写 `persona.md`、不生成初始记忆；首次维护补总结最近 500 条
+  建卡前历史互动，见 [`memory.md`](memory.md) §7.2）。旧版本每会话的 `persona.md`
   不再读取，会在该会话创建/加载记忆卡时 best-effort 移到废纸篓，未迁移的自定义正文不会采用。
   打开旧 `memory.sqlite` 时还会执行 2026-10-28 起点迁移：生成型 `kind='origin'` 行删除，
   用户编辑过的转普通置顶手写记忆（见 [`memory.md`](memory.md) §4.3）。
@@ -504,8 +503,9 @@ bridge `get_login_info` 确认真实账号 `<id>` 后：
 4. **删除聊天只删当前账号**。`clearMessages` / `deleteConversation` 作用于当前 active 的
    `MemoryStore`，不会跨账号删除；删除会话仍会删除该会话的旧长期记忆与总结游标，并把该会话的
    角色目录移到废纸篓（见 [memory.md](memory.md) §10）。
-5. **Keychain、语音模型、CosyVoice、崩溃与 bridge 日志全局**。换账号不会更换 API Key、
-   不会重新下载 TTS 模型，也不会切换日志目录；排查问题时注意日志是全局的，业务数据是分账号的。
+5. **Keychain、CosyVoice3 安装与音色、崩溃与 bridge 日志全局**。换账号不会更换 API Key、
+   不会重新安装 CosyVoice3 运行环境/模型，也不会切换日志目录；排查问题时注意日志是全局的，
+   业务数据是分账号的。
 6. **旧媒体路径保留**。旧版 `media/` 不迁移；新账号的新媒体在账号目录。手动移动/删除旧目录
    会使旧消息中的媒体失效。
 7. **首次升级可能需要额外磁盘**。旧单库是「复制」而非移动，升级后新旧数据同时存在；
@@ -695,7 +695,7 @@ python3 scripts/check_docs.py
 bash scripts/check.sh --docs
 ```
 
-当前基线：`swift test` 504 项通过（8 项按环境跳过：模型未下载/联网/真实 E2E）。
+当前基线：`swift test` 566 项执行（564 通过 / 2 项按环境跳过：真实 CosyVoice3 服务 E2E）。
 
 ## 12. 排障
 

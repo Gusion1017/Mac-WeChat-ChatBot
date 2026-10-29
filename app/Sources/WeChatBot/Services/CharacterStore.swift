@@ -122,6 +122,176 @@ private final class CharacterDatabase {
             try setUserVersion(1)
         }
         try migrateLegacyOriginMemories()
+        migrateHistoricalMemoryTimestamps()
+    }
+
+    // MARK: Historical memory repair (2026-10-29)
+
+    /// 修复旧版历史补总结写错的两类数据，best-effort、一次性：
+    ///
+    /// 1. 时间锚点：旧逻辑把历史记忆的 created_at/updated_at 写成「补总结那一刻」，
+    ///    记忆页与权重会把旧内容当成最近/今天；
+    /// 2. 过期计划：旧逻辑对历史消息里的「今晚/这周末」按当前时间解析，可能生成
+    ///    已经过期的 todo。
+    ///
+    /// 处理方式：
+    /// - 来源全部早于建卡时刻、且用户没编辑过（updated_at == created_at）的旧自动记忆
+    ///   → 归档（可恢复），并清掉历史补总结完成标记，让新逻辑按正确时间/提示词重补；
+    /// - 用户编辑过或来源混合的记忆 → 只把时间修正为来源消息时间；来源已超过 24 小时
+    ///   且带近期时间词的 todo 降级为 fact（内容保留）。
+    ///
+    /// 失败不阻塞打开记忆卡，下次打开时重试；成功后写 `history_memory_repair_v1`。
+    private func migrateHistoricalMemoryTimestamps() {
+        do {
+            try performHistoricalMemoryRepair()
+        } catch {
+            // 迁移是 best-effort：打不开/写失败时下次打开再试，不影响记忆卡使用。
+        }
+    }
+
+    private func performHistoricalMemoryRepair() throws {
+        guard try meta("history_memory_repair_v1") == nil else { return }
+        guard try metaDate("history_backfilled_at") != nil else {
+            try setMeta("history_memory_repair_v1", "1")
+            return
+        }
+        guard let cutoff = try metaDate("history_cutoff_at")
+            ?? metaDate("interactions_backfilled_at") else {
+            try setMeta("history_memory_repair_v1", "1")
+            return
+        }
+        // 新逻辑（v2）补出的历史记忆时间/类别已经正确，不需要再修。
+        guard (try meta("history_backfill_version")) != "2" else {
+            try setMeta("history_memory_repair_v1", "1")
+            return
+        }
+
+        let now = Date()
+        var toArchive: [String] = []
+        var repairs: [(id: String, created: Double, updated: Double, category: String?)] = []
+
+        let select = try prepare("""
+        SELECT id, category, content, source_message_ids, created_at, updated_at
+        FROM memories
+        WHERE source = 'extraction' AND source_message_ids != '';
+        """)
+        var rows: [(id: String, category: String, content: String, ids: [String],
+                    created: Double, updated: Double)] = []
+        while sqlite3_step(select) == SQLITE_ROW {
+            rows.append((
+                text(select, 0),
+                text(select, 1),
+                text(select, 2),
+                (try? JSONDecoder().decode(
+                    [String].self,
+                    from: Data(text(select, 3).utf8))) ?? [],
+                sqlite3_column_double(select, 4),
+                sqlite3_column_double(select, 5)
+            ))
+        }
+        sqlite3_finalize(select)
+
+        for row in rows {
+            guard !row.ids.isEmpty,
+                  let range = try sourceTimestampRange(messageIDs: row.ids) else { continue }
+            // 只处理「来源全部在建卡之前」的纯历史记忆；混合来源保持原样。
+            guard range.max < cutoff.timeIntervalSince1970 else { continue }
+            if abs(row.updated - row.created) < 1 {
+                // 没被用户编辑过：归档后用新逻辑重补，不直接删除（可从废纸篓/已归档恢复）。
+                toArchive.append(row.id)
+            } else {
+                let category = HistoricalPlanHeuristics.shouldDowngradeStoredPlan(
+                    category: MemoryCategory(rawValue: row.category) ?? .fact,
+                    content: row.content,
+                    sourceNewest: Date(timeIntervalSince1970: range.max),
+                    now: now
+                ) ? MemoryCategory.fact.rawValue : nil
+                repairs.append((row.id, range.min, range.max, category))
+            }
+        }
+
+        try transaction {
+            if !toArchive.isEmpty {
+                let archive = try prepare("UPDATE memories SET archived = 1 WHERE id = ?;")
+                defer { sqlite3_finalize(archive) }
+                for id in toArchive {
+                    sqlite3_reset(archive)
+                    sqlite3_clear_bindings(archive)
+                    try bind(archive, 1, id)
+                    try stepDone(archive)
+                }
+            }
+            for repair in repairs {
+                let statement: OpaquePointer
+                if repair.category != nil {
+                    statement = try prepare("""
+                    UPDATE memories
+                    SET created_at = ?, updated_at = ?, category = ?
+                    WHERE id = ?;
+                    """)
+                } else {
+                    statement = try prepare("""
+                    UPDATE memories
+                    SET created_at = ?, updated_at = ?
+                    WHERE id = ?;
+                    """)
+                }
+                defer { sqlite3_finalize(statement) }
+                try bind(statement, 1, repair.created)
+                try bind(statement, 2, repair.updated)
+                if let category = repair.category {
+                    try bind(statement, 3, category)
+                    try bind(statement, 4, repair.id)
+                } else {
+                    try bind(statement, 3, repair.id)
+                }
+                try stepDone(statement)
+            }
+            if !toArchive.isEmpty {
+                // 让新逻辑重补：清掉完成标记与断点（下一轮维护会重新建立）。
+                try execute("""
+                DELETE FROM meta WHERE key IN (
+                    'history_backfilled_at',
+                    'history_backfill_cursor_at',
+                    'history_backfill_cursor_id',
+                    'history_backfill_cutoff_at',
+                    'history_backfill_version'
+                );
+                """)
+            }
+            try setMeta("history_memory_repair_v1", "1")
+        }
+    }
+
+    /// 来源消息的时间范围（分批查询，避免 SQL 变量过多）。
+    private func sourceTimestampRange(
+        messageIDs: [String]
+    ) throws -> (min: Double, max: Double)? {
+        let chunkSize = 400
+        var minimum = Double.infinity
+        var maximum = -Double.infinity
+        var found = false
+        var index = 0
+        while index < messageIDs.count {
+            let chunk = Array(messageIDs[index..<min(index + chunkSize, messageIDs.count)])
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            let statement = try prepare("""
+            SELECT MIN(timestamp), MAX(timestamp) FROM interactions
+            WHERE message_id IN (\(placeholders));
+            """)
+            defer { sqlite3_finalize(statement) }
+            for (offset, messageID) in chunk.enumerated() {
+                try bind(statement, Int32(offset + 1), messageID)
+            }
+            if sqlite3_step(statement) == SQLITE_ROW,
+               sqlite3_column_type(statement, 0) != SQLITE_NULL {
+                minimum = min(minimum, sqlite3_column_double(statement, 0))
+                maximum = max(maximum, sqlite3_column_double(statement, 1))
+                found = true
+            }
+            index += chunkSize
+        }
+        return found ? (minimum, maximum) : nil
     }
 
     /// 2026-10-28 移除「起点记忆」：生成型起点直接删除；用户编辑过的起点
@@ -309,7 +479,10 @@ private final class CharacterDatabase {
     }
 
     func setMetaDate(_ key: String, _ date: Date) throws {
-        try setMeta(key, String(format: "%.3f", date.timeIntervalSince1970))
+        // 必须保留完整 Double 精度：互动时间戳来自 `Date()`（微秒级），
+        // 只用 %.3f 会把游标截断到毫秒以下，导致同一条消息被反复当成「新消息」，
+        // 提取游标永远差一点点到不了边界（群聊/自消息尤其明显）。
+        try setMeta(key, String(date.timeIntervalSince1970))
     }
 }
 
@@ -485,9 +658,16 @@ actor CharacterStore {
             try database.setMeta("persona_name", reference.name)
         }
         if !databaseExisted {
-            let activation = (activationTimestamp ?? now).timeIntervalSince1970 - 0.001
+            let activationDate = activationTimestamp ?? now
+            let activation = activationDate.timeIntervalSince1970 - 0.001
             try database.setMetaDate(
                 "last_extracted_at", Date(timeIntervalSince1970: activation))
+            // 建卡时刻之前的历史互动只回填 `interactions`，默认不提取；
+            // 首次维护据此做一次「历史补总结」（见 beginHistoryBackfill）。
+            // 全局卡没有互动，不参与。
+            if conversation.id != Self.globalConversationID {
+                try database.setMetaDate("history_cutoff_at", activationDate)
+            }
         }
     }
 
@@ -663,10 +843,20 @@ actor CharacterStore {
         return decodeMemory(statement, characterID: conversationID)
     }
 
-    func upsertMemory(_ memory: CharacterMemory, now: Date = Date()) throws {
+    /// 写入/覆盖一条记忆。
+    ///
+    /// - Parameter preserveUpdatedAt: 默认 false（把 updated_at 抬到 now，保持既有语义）；
+    ///   历史补总结传 true，让记忆保留来源消息的真实时间，避免旧内容被当成「今天」。
+    func upsertMemory(
+        _ memory: CharacterMemory,
+        now: Date = Date(),
+        preserveUpdatedAt: Bool = false
+    ) throws {
         var updated = memory
-        updated.updatedAt = now
-        if updated.createdAt > now { updated.createdAt = now }
+        if !preserveUpdatedAt {
+            updated.updatedAt = now
+        }
+        if updated.createdAt > updated.updatedAt { updated.createdAt = updated.updatedAt }
         let database = try database(for: memory.characterID, createIfNeeded: true)
         try insertMemory(updated, database: database)
     }
@@ -861,6 +1051,30 @@ actor CharacterStore {
 
     // MARK: Extraction cursor
 
+    /// 提取游标是 `(timestamp, id)` 复合键：同一秒内的多条群消息也能跨批次续取，
+    /// 不会因为「本批最大时间戳」相同而永久漏掉边界上的消息。
+    ///
+    /// 旧库只有 `last_extracted_at`：首次读取时用该时间戳及之前的最大 rowid 补齐
+    /// `last_extracted_interaction_id`，保持旧语义（不重复提取已经处理过的同秒消息）。
+    private func extractionCursor(
+        database: CharacterDatabase
+    ) throws -> (timestamp: Date, rowID: Int64) {
+        let timestamp = try database.metaDate("last_extracted_at") ?? .distantPast
+        if let raw = try database.meta("last_extracted_interaction_id"),
+           let rowID = Int64(raw) {
+            return (timestamp, rowID)
+        }
+        let statement = try database.prepare(
+            "SELECT COALESCE(MAX(id), 0) FROM interactions WHERE timestamp <= ?;")
+        defer { sqlite3_finalize(statement) }
+        try database.bind(statement, 1, timestamp.timeIntervalSince1970)
+        let rowID = sqlite3_step(statement) == SQLITE_ROW
+            ? sqlite3_column_int64(statement, 0)
+            : 0
+        try database.setMeta("last_extracted_interaction_id", String(rowID))
+        return (timestamp, rowID)
+    }
+
     func pendingInteractions(
         conversationID: String,
         minCount: Int,
@@ -869,11 +1083,15 @@ actor CharacterStore {
         guard let database = try? database(for: conversationID, createIfNeeded: false) else {
             return nil
         }
-        let cursor = try database.metaDate("last_extracted_at") ?? .distantPast
-        let countStatement = try database.prepare(
-            "SELECT COUNT(*) FROM interactions WHERE timestamp > ?;")
+        let cursor = try extractionCursor(database: database)
+        let countStatement = try database.prepare("""
+        SELECT COUNT(*) FROM interactions
+        WHERE timestamp > ? OR (timestamp = ? AND id > ?);
+        """)
         defer { sqlite3_finalize(countStatement) }
-        try database.bind(countStatement, 1, cursor.timeIntervalSince1970)
+        try database.bind(countStatement, 1, cursor.timestamp.timeIntervalSince1970)
+        try database.bind(countStatement, 2, cursor.timestamp.timeIntervalSince1970)
+        try database.bind(countStatement, 3, cursor.rowID)
         guard sqlite3_step(countStatement) == SQLITE_ROW else { return nil }
         guard database.int(countStatement, 0) >= max(1, minCount) else { return nil }
 
@@ -886,19 +1104,21 @@ actor CharacterStore {
     private func fetchPending(
         conversationID: String,
         database: CharacterDatabase,
-        cursor: Date,
+        cursor: (timestamp: Date, rowID: Int64),
         maxMessages: Int
     ) throws -> [CharacterInteraction] {
         let statement = try database.prepare("""
         SELECT id, message_id, direction, sender_id, sender_name, content, timestamp, created_at
         FROM interactions
-        WHERE timestamp > ?
+        WHERE timestamp > ? OR (timestamp = ? AND id > ?)
         ORDER BY timestamp ASC, id ASC
         LIMIT ?;
         """)
         defer { sqlite3_finalize(statement) }
-        try database.bind(statement, 1, cursor.timeIntervalSince1970)
-        try database.bind(statement, 2, Int32(max(1, maxMessages)))
+        try database.bind(statement, 1, cursor.timestamp.timeIntervalSince1970)
+        try database.bind(statement, 2, cursor.timestamp.timeIntervalSince1970)
+        try database.bind(statement, 3, cursor.rowID)
+        try database.bind(statement, 4, Int32(max(1, maxMessages)))
         var result: [CharacterInteraction] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             let direction = ChatDirection(rawValue: database.text(statement, 2)) ?? .incoming
@@ -916,12 +1136,190 @@ actor CharacterStore {
         return result
     }
 
-    func markExtracted(conversationID: String, through timestamp: Date) throws {
+    /// 推进提取游标；只允许前进，重复/回退的调用会被忽略。
+    func markExtracted(
+        conversationID: String,
+        through timestamp: Date,
+        interactionID: Int64
+    ) throws {
         let database = try database(for: conversationID, createIfNeeded: false)
-        let current = try database.metaDate("last_extracted_at") ?? .distantPast
-        if timestamp > current {
+        let current = try extractionCursor(database: database)
+        let isNewer = timestamp.timeIntervalSince1970 > current.timestamp.timeIntervalSince1970
+            || (timestamp.timeIntervalSince1970 == current.timestamp.timeIntervalSince1970
+                && interactionID > current.rowID)
+        guard isNewer else { return }
+        try database.transaction {
             try database.setMetaDate("last_extracted_at", timestamp)
+            try database.setMeta("last_extracted_interaction_id", String(interactionID))
         }
+    }
+
+    /// 一次性「历史补总结」队列：建卡前（或旧版建卡时）的互动只回填进
+    /// `interactions`，永远不会进入普通提取，因为提取游标从建卡时刻开始。
+    ///
+    /// 这里用一组独立的 meta 游标在普通提取游标之外补总结，**不改动
+    /// `last_extracted_at`**（否则会把已经提取过的新消息重新拉回队列，产生重复记忆）：
+    ///
+    /// - `history_backfill_cursor_at` / `history_backfill_cursor_id`：补总结断点；
+    /// - `history_backfill_cutoff_at`：建卡时刻（历史互动必须早于它）；
+    /// - `history_backfilled_at`：一次性完成标记，写后不再补。
+    ///
+    /// 返回 `true` 表示还有历史待补；首次开始时把断点设到最近 `limit` 条的起点。
+    @discardableResult
+    func beginHistoryBackfill(
+        conversationID: String,
+        limit: Int,
+        now: Date = Date()
+    ) throws -> Bool {
+        let database = try database(for: conversationID, createIfNeeded: false)
+        guard try database.meta("history_backfilled_at") == nil else { return false }
+        // 互动还没完成首次全量回填时不做历史补总结：否则 count==0 会误写完成标记，
+        // 等 sync 恢复后旧聊天永远不会再被补总结。
+        guard (try database.meta("interactions_backfilled")) == "1" else { return false }
+        // 断点已存在：继续未完成的补总结。
+        if try database.meta("history_backfill_cursor_at") != nil { return true }
+
+        let cutoff = try database.metaDate("history_cutoff_at")
+            ?? database.metaDate("interactions_backfilled_at")
+            ?? database.metaDate("last_extracted_at")
+            ?? .distantPast
+        let cutoffTimestamp = cutoff.timeIntervalSince1970
+        let bound = max(1, limit)
+
+        let countStatement = try database.prepare(
+            "SELECT COUNT(*) FROM interactions WHERE timestamp < ?;")
+        defer { sqlite3_finalize(countStatement) }
+        try database.bind(countStatement, 1, cutoffTimestamp)
+        guard sqlite3_step(countStatement) == SQLITE_ROW else { return false }
+        let historyCount = database.int(countStatement, 0)
+        guard historyCount > 0 else {
+            try database.setMetaDate("history_backfilled_at", now)
+            return false
+        }
+
+        // 只补最近 limit 条：起点取这些历史互动里最早的一条，并用
+        // `(timestamp, id)` 复合断点精确切在同一条上——同一秒里更早的旧行
+        // 不会被多补，边界消息也不会漏。
+        let take = min(bound, historyCount)
+        let startStatement = try database.prepare("""
+        SELECT timestamp, id FROM interactions
+        WHERE timestamp < ?
+        ORDER BY timestamp DESC, id DESC
+        LIMIT 1 OFFSET ?;
+        """)
+        defer { sqlite3_finalize(startStatement) }
+        try database.bind(startStatement, 1, cutoffTimestamp)
+        try database.bind(startStatement, 2, Int32(take - 1))
+        guard sqlite3_step(startStatement) == SQLITE_ROW else { return false }
+        let startTimestamp = database.date(startStatement, 0)
+        let startID = sqlite3_column_int64(startStatement, 1)
+
+        try database.transaction {
+            try database.setMetaDate("history_backfill_cursor_at", startTimestamp)
+            try database.setMeta(
+                "history_backfill_cursor_id", String(max(0, startID - 1)))
+            try database.setMetaDate("history_backfill_cutoff_at", cutoff)
+        }
+        return true
+    }
+
+    /// 取一批历史补总结互动（早于建卡时刻、晚于补总结断点）。
+    func pendingHistoryBackfill(
+        conversationID: String,
+        maxMessages: Int
+    ) throws -> [CharacterInteraction] {
+        let database = try database(for: conversationID, createIfNeeded: false)
+        guard let cursorAt = try database.metaDate("history_backfill_cursor_at"),
+              let cutoff = try database.metaDate("history_backfill_cutoff_at") else {
+            return []
+        }
+        let cursorID = Int64((try database.meta("history_backfill_cursor_id")) ?? "0") ?? 0
+        let statement = try database.prepare("""
+        SELECT id, message_id, direction, sender_id, sender_name, content, timestamp, created_at
+        FROM interactions
+        WHERE (timestamp > ? OR (timestamp = ? AND id > ?))
+          AND timestamp < ?
+        ORDER BY timestamp ASC, id ASC
+        LIMIT ?;
+        """)
+        defer { sqlite3_finalize(statement) }
+        try database.bind(statement, 1, cursorAt.timeIntervalSince1970)
+        try database.bind(statement, 2, cursorAt.timeIntervalSince1970)
+        try database.bind(statement, 3, cursorID)
+        try database.bind(statement, 4, cutoff.timeIntervalSince1970)
+        try database.bind(statement, 5, Int32(max(1, maxMessages)))
+        var result: [CharacterInteraction] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let direction = ChatDirection(rawValue: database.text(statement, 2)) ?? .incoming
+            result.append(CharacterInteraction(
+                id: Int64(database.int(statement, 0)),
+                messageID: database.text(statement, 1),
+                direction: direction,
+                senderID: database.text(statement, 3),
+                senderName: database.text(statement, 4),
+                content: database.text(statement, 5),
+                timestamp: database.date(statement, 6),
+                createdAt: database.date(statement, 7)
+            ))
+        }
+        return result
+    }
+
+    /// 推进历史补总结断点；没有剩余历史时落一次性完成标记并清掉断点。
+    func advanceHistoryBackfill(
+        conversationID: String,
+        through timestamp: Date,
+        interactionID: Int64
+    ) throws {
+        let database = try database(for: conversationID, createIfNeeded: false)
+        guard let cutoff = try database.metaDate("history_backfill_cutoff_at") else { return }
+        let currentAt = try database.metaDate("history_backfill_cursor_at") ?? .distantPast
+        let currentID = Int64((try database.meta("history_backfill_cursor_id")) ?? "0") ?? 0
+        let isNewer = timestamp.timeIntervalSince1970 > currentAt.timeIntervalSince1970
+            || (timestamp.timeIntervalSince1970 == currentAt.timeIntervalSince1970
+                && interactionID > currentID)
+        guard isNewer else { return }
+        try database.transaction {
+            try database.setMetaDate("history_backfill_cursor_at", timestamp)
+            try database.setMeta("history_backfill_cursor_id", String(interactionID))
+            let remainingStatement = try database.prepare("""
+            SELECT COUNT(*) FROM interactions
+            WHERE (timestamp > ? OR (timestamp = ? AND id > ?))
+              AND timestamp < ?;
+            """)
+            defer { sqlite3_finalize(remainingStatement) }
+            try database.bind(remainingStatement, 1, timestamp.timeIntervalSince1970)
+            try database.bind(remainingStatement, 2, timestamp.timeIntervalSince1970)
+            try database.bind(remainingStatement, 3, interactionID)
+            try database.bind(remainingStatement, 4, cutoff.timeIntervalSince1970)
+            guard sqlite3_step(remainingStatement) == SQLITE_ROW else { return }
+            if database.int(remainingStatement, 0) == 0 {
+                try finishHistoryBackfill(database: database, now: Date())
+            }
+        }
+    }
+
+    /// 结束历史补总结：写一次性标记（含逻辑版本）并清理断点 meta。
+    func finishHistoryBackfill(conversationID: String, now: Date = Date()) throws {
+        let database = try database(for: conversationID, createIfNeeded: false)
+        try database.transaction {
+            try finishHistoryBackfill(database: database, now: now)
+        }
+    }
+
+    /// 事务内可调用的收尾实现。
+    private func finishHistoryBackfill(database: CharacterDatabase, now: Date) throws {
+        try database.setMetaDate("history_backfilled_at", now)
+        // v2：历史时间锚点 + 相对时间解析 + todo 降级逻辑。迁移用它在升级后
+        // 区分「旧逻辑补出来的历史记忆」与「新逻辑补出来的历史记忆」。
+        try database.setMeta("history_backfill_version", "2")
+        try database.execute("""
+        DELETE FROM meta WHERE key IN (
+            'history_backfill_cursor_at',
+            'history_backfill_cursor_id',
+            'history_backfill_cutoff_at'
+        );
+        """)
     }
 
     func lastArchiveAt(conversationID: String) throws -> Date? {

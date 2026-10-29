@@ -16,7 +16,7 @@ enum AppPaths {
 
     /// 测试专用覆盖：非 nil 时所有 Application Support 路径改到这个根目录。
     ///
-    /// 单测（如 `VoiceCloneStore` 的 CRUD）必须写临时目录：直接写用户的真实
+    /// 单测（如音色库 CRUD）必须写临时目录：直接写用户的真实
     /// `~/Library/Application Support/WeChatAI` 既会污染用户数据，在受限沙箱/CI
     /// 里还会因权限不足直接失败（CoreAudio 报 -54）。
     nonisolated(unsafe) static var supportDirectoryOverride: URL?

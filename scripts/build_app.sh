@@ -23,12 +23,6 @@ if [ "${SWIFT_DISABLE_SANDBOX:-0}" = "1" ]; then
   say "SwiftPM sandbox disabled (SWIFT_DISABLE_SANDBOX=1)"
 fi
 
-# TTS 静态库（sherpa-onnx，spec §3.1）。app/Vendor 不入库；缺库时按需下载。
-if ! bash "$ROOT_DIR/scripts/fetch_sherpa.sh" --check >/dev/null 2>&1; then
-  say "sherpa-onnx static libs missing; fetching (network)…"
-  bash "$ROOT_DIR/scripts/fetch_sherpa.sh" || fail "sherpa-onnx fetch failed (run scripts/fetch_sherpa.sh)"
-fi
-
 say "compiling SwiftUI app (release)"
 cd "$ROOT_DIR/app"
 swift build -c release --scratch-path "$SCRATCH" $SWIFT_EXTRA_FLAGS

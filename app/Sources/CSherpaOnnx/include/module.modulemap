@@ -1,4 +1,0 @@
-module CSherpaOnnx [system] {
-    header "sherpa-onnx/c-api/c-api.h"
-    export *
-}

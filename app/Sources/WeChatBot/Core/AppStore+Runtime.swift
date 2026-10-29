@@ -129,6 +129,16 @@ final class RuntimeCoordinator {
     private var memoryMaintenancePending: Set<String> = []
     /// 已发起的长记忆维护任务；切号前必须 cancel + await，避免跨账号写 memories。
     private var memoryMaintenanceTasks: [String: Task<Void, Never>] = [:]
+    /// 空闲兜底：最后一条消息后一段时间没新消息，就把不足一批的互动单独提取一次。
+    private var memoryIdleFlushTasks: [String: Task<Void, Never>] = [:]
+    /// 已请求的空闲兜底；维护任务结束时消费，避免在任务运行中丢失。
+    private var memoryPartialFlushRequested: Set<String> = []
+    /// 启动后补跑一次记忆维护（完成上次运行遗留的历史补总结/待提取）。
+    private var memoryStartupCatchUpTask: Task<Void, Never>?
+    /// 空闲兜底延迟：群里安静下来之后再总结「没攒够一批」的消息。
+    private static let memoryIdleFlushDelay: Duration = .seconds(300)
+    /// 停止/切号代际：定时器与启动补跑在挂起返回后据此丢弃过期回调。
+    private var memoryLifecycleGeneration: UInt64 = 0
     private var lastSchedulerTasks: [ScheduledTask] = []
     /// 主动聊天：运行期状态（今日计数 / 等待回复 / 上次发送时间）与轮询任务。
     private var proactiveState = ProactiveChatRuntimeState()
@@ -1136,6 +1146,8 @@ final class RuntimeCoordinator {
         )
         await scheduler.start(tasks: normalizedSchedules)
         startProactiveChatLoop()
+        // 记忆维护补跑：完成上次运行遗留的历史聊天补总结与不足一批的待提取。
+        scheduleStartupMemoryCatchUp()
 
         store.stats.startedAt = Date()
         scheduleStatsPersist()
@@ -1171,6 +1183,13 @@ final class RuntimeCoordinator {
         voiceTranscriptionAttempted.removeAll()
         lastVoiceTranscriptionEnabled = nil
         // 记忆维护可能正在写记忆卡：先取消并 await，避免停止后仍往数据库写。
+        memoryLifecycleGeneration &+= 1
+        memoryStartupCatchUpTask?.cancel()
+        memoryStartupCatchUpTask = nil
+        let idleFlushTasks = Array(memoryIdleFlushTasks.values)
+        memoryIdleFlushTasks.removeAll()
+        memoryPartialFlushRequested.removeAll()
+        idleFlushTasks.forEach { $0.cancel() }
         let maintenanceTasks = Array(memoryMaintenanceTasks.values)
         memoryMaintenanceTasks.removeAll()
         memoryMaintenanceInFlight.removeAll()
@@ -1355,9 +1374,18 @@ final class RuntimeCoordinator {
             await task.value
             backgroundPrefetchTask = nil
         }
+        memoryLifecycleGeneration &+= 1
+        memoryStartupCatchUpTask?.cancel()
+        if let task = memoryStartupCatchUpTask { await task.value }
+        memoryStartupCatchUpTask = nil
+        let idleFlushTasks = Array(memoryIdleFlushTasks.values)
+        memoryIdleFlushTasks.removeAll()
+        memoryPartialFlushRequested.removeAll()
+        idleFlushTasks.forEach { $0.cancel() }
         let maintenance = Array(memoryMaintenanceTasks.values)
         memoryMaintenanceTasks.removeAll()
         memoryMaintenanceInFlight.removeAll()
+        memoryMaintenancePending.removeAll()
         maintenance.forEach { $0.cancel() }
         for task in maintenance { await task.value }
 
@@ -1391,6 +1419,11 @@ final class RuntimeCoordinator {
         voiceTranscriptionAttempted.removeAll()
         memoryMaintenanceInFlight.removeAll()
         memoryMaintenancePending.removeAll()
+        memoryStartupCatchUpTask?.cancel()
+        memoryStartupCatchUpTask = nil
+        memoryIdleFlushTasks.values.forEach { $0.cancel() }
+        memoryIdleFlushTasks.removeAll()
+        memoryPartialFlushRequested.removeAll()
         lastSchedulerTasks = []
         stopProactiveChatLoop()
         proactiveState = ProactiveChatRuntimeState()
@@ -1603,16 +1636,26 @@ final class RuntimeCoordinator {
         let preview = chatMessage.text.isEmpty ? "[\(chatMessage.kind.rawValue)]" : String(chatMessage.text.prefix(80))
         log(.debug, "Bot", "\(event.isSelf ? "发出" : "收到") \(conversation.kind.label)消息（\(conversation.displayTitle)）：\(preview)")
 
+        // 历史回放会把很旧的消息重新投递（例如打开聊天时加载历史）。
+        // 这些消息仍入库供检索，但既不应触发「现在」的自动回复，也不应把
+        // 回放的第一条旧消息当作建卡时间——否则整段历史都会被当成「建卡后新消息」
+        // 走普通提取（绕过 500 条历史预算，并被模型当成今天）。
+        let messageAge = receivedAt.timeIntervalSince(event.timestamp)
+        let memoryActivationTimestamp = isStaleReplay
+            ? receivedAt
+            : chatMessage.timestamp
+
         guard !event.isSelf else {
-            scheduleMemoryMaintenance(conversationID: conversationID)
+            scheduleMemoryMaintenance(
+                conversationID: conversationID,
+                activationTimestamp: memoryActivationTimestamp)
             return
         }
-        // 历史回放会把很旧的消息重新投递（例如打开聊天时加载历史），
-        // 这些消息仍入库供检索，但不应触发一次「现在」的自动回复。
-        let age = receivedAt.timeIntervalSince(event.timestamp)
-        guard age <= Self.staleReplyWindow else {
-            log(.debug, "Bot", "跳过历史消息自动回复（\(Int(age)) 秒前）：\(preview)")
-            scheduleMemoryMaintenance(conversationID: conversationID)
+        guard !isStaleReplay else {
+            log(.debug, "Bot", "跳过历史消息自动回复（\(Int(messageAge)) 秒前）：\(preview)")
+            scheduleMemoryMaintenance(
+                conversationID: conversationID,
+                activationTimestamp: memoryActivationTimestamp)
             return
         }
         // 语音消息：自动回复必须等转写完成（≤15s）；超时按「转写失败」继续回复，
@@ -1628,7 +1671,8 @@ final class RuntimeCoordinator {
         guard epoch == accountEpoch else { return }
         await evaluateAndReply(conversation: conversation, message: replyMessage, receivedAt: receivedAt, epoch: epoch)
         guard epoch == accountEpoch else { return }
-        scheduleMemoryMaintenance(conversationID: conversationID)
+        scheduleMemoryMaintenance(
+            conversationID: conversationID, activationTimestamp: memoryActivationTimestamp)
     }
 
     private func upsertConversation(for event: OneBotEvent) -> Conversation {
@@ -3158,13 +3202,10 @@ final class RuntimeCoordinator {
 
     /// 尝试把一段 AI 回复合成语音并通过 bridge 发送。
     ///
-    /// 尝试把一段 AI 回复合成语音并通过 bridge 发送。
+    /// CosyVoice3 是唯一语音引擎：未安装、本地服务未就绪、未选择音色或合成失败时，
+    /// 本条回复改发文字（不再跨引擎回退）。
     ///
-    /// 引擎回退遵循 `VoiceFallbackPlanner`：
-    /// - `.cosyVoice`：服务就绪 → CosyVoice3；合成/服务失败 → Kokoro；Kokoro 也失败 → 文字；
-    /// - `.kokoro` / `.zipvoiceClone`：保持原行为（合成失败即文字）。
-    ///
-    /// 返回 `false` 时调用方必须降级为文字（spec §3.3）：模型未就绪、合成失败、
+    /// 返回 `false` 时调用方必须降级为文字（spec §3.3）：服务未就绪、合成失败、
     /// bridge 返回 `voice_send_unsupported`（4.2 Hook 尚未支持）都走这一条。
     /// 只有真正发送成功才落一条 outgoing 语音消息，避免出现「本地已发、微信没收到」。
     @discardableResult
@@ -3183,66 +3224,54 @@ final class RuntimeCoordinator {
             }
         }
 
-        let cosyVoiceSelected = settings.engine == .cosyVoice && settings.hasCosyVoiceVoice
-        // 没有选择音色时不做 CosyVoice 健康探测（启动/合成都不可用，直接按回退计划走）。
+        let hasVoice = settings.hasCosyVoiceVoice
+        // 没有选择音色时不做健康探测（启动/合成都不可用，直接改发文字）。
         let cosyVoice: (installed: Bool, serviceReady: Bool, endpoint: URL) =
-            cosyVoiceSelected
+            hasVoice
                 ? await cosyVoiceAvailability(settings)
                 : (false, false, settings.effectiveCosyVoiceEndpoint)
-        if settings.engine == .cosyVoice, !settings.hasCosyVoiceVoice {
-            log(.debug, "Voice", "未选择 CosyVoice3 音色，本条按回退计划处理")
+        if !hasVoice {
+            log(.debug, "Voice", "未选择 CosyVoice3 音色，本条改发文字")
         }
         // 服务未运行且允许自动启动：后台拉起（首次加载模型慢，不阻塞本条回复）。
         // 未选音色或音色库为空时不起服务（App 不内置任何音色）。
-        if settings.engine == .cosyVoice, cosyVoice.installed, !cosyVoice.serviceReady,
-           settings.cosyVoiceAutoStart, cosyVoiceSelected {
-            log(.info, "Voice", "CosyVoice3 服务未运行，已在后台启动；本条按回退计划处理")
+        if hasVoice, cosyVoice.installed, !cosyVoice.serviceReady,
+           settings.cosyVoiceAutoStart {
+            log(.info, "Voice", "CosyVoice3 服务未运行，已在后台启动；本条改发文字")
             startCosyVoiceInBackground(endpoint: cosyVoice.endpoint)
         }
-        if settings.engine == .cosyVoice {
-            await syncCosyVoiceEndpoint(settings)
+        await syncCosyVoiceEndpoint(settings)
+
+        guard VoiceEngineAvailability.canSynthesize(
+            cosyVoiceInstalled: cosyVoice.installed,
+            cosyVoiceServiceReady: cosyVoice.serviceReady,
+            hasVoice: hasVoice
+        ) else {
+            let reason: String
+            if !hasVoice {
+                reason = "未选择 CosyVoice3 音色"
+            } else if !cosyVoice.installed {
+                reason = "CosyVoice3 尚未安装"
+            } else {
+                reason = "CosyVoice3 本地服务未就绪"
+            }
+            log(.warning, "Voice", "语音合成不可用（\(reason)）；本条改发文字")
+            return false
         }
 
-        let attempts = VoiceFallbackPlanner.attempts(
-            for: settings.engine,
-            cosyVoiceInstalled: cosyVoice.installed,
-            cosyVoiceServiceReady: cosyVoice.serviceReady && cosyVoiceSelected,
-            kokoroReady: VoiceSynthesisService.isReady(.kokoro),
-            zipvoiceReady: VoiceSynthesisService.isReady(.zipvoiceClone)
-        )
-        var synthesis: SynthesisResult?
-        var lastFailure: String?
-        for (index, attempt) in attempts.enumerated() {
-            guard attempt != .text else { break }
-            let selection = voiceSelection(for: attempt, settings: settings)
-            do {
-                synthesis = try await store.voiceSynthesis.synthesize(
-                    text: text,
-                    voice: selection,
-                    maxSeconds: settings.effectiveMaxVoiceSeconds,
-                    allowsTruncation: settings.overLimit == .truncate
-                )
-                if index > 0 {
-                    log(.info, "Voice", "已回退 \(voiceEngineLabel(attempt)) 发送语音")
-                }
-                if attempt == .cosyVoice {
-                    // 记录最近合成活动：CosyVoice3 健康轮询据此从 5s 降频到 30s。
-                    await CosyVoiceRuntime.shared.noteSynthesisActivity()
-                }
-            } catch {
-                lastFailure = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-                log(.warning, "Voice",
-                    "\(voiceEngineLabel(attempt)) 语音合成失败：\(lastFailure ?? "未知错误")")
-                continue
-            }
-            if synthesis != nil { break }
-        }
-        guard let synthesis else {
-            let reason = lastFailure
-                ?? (settings.engine == .cosyVoice && !cosyVoice.installed
-                    ? "CosyVoice3 尚未安装"
-                    : "没有可用的语音引擎")
-            log(.warning, "Voice", "语音合成不可用（\(reason)）；本条改发文字")
+        let synthesis: SynthesisResult
+        do {
+            synthesis = try await store.voiceSynthesis.synthesize(
+                text: text,
+                voice: VoiceSelection(settings: settings),
+                maxSeconds: settings.effectiveMaxVoiceSeconds,
+                allowsTruncation: settings.overLimit == .truncate
+            )
+            // 记录最近合成活动：CosyVoice3 健康轮询据此从 5s 降频到 30s。
+            await CosyVoiceRuntime.shared.noteSynthesisActivity()
+        } catch {
+            let reason = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            log(.warning, "Voice", "CosyVoice3 语音合成失败：\(reason)；本条改发文字")
             return false
         }
         if let epoch, epoch != accountEpoch { return false }
@@ -3296,19 +3325,15 @@ final class RuntimeCoordinator {
         }
     }
 
-    /// 出站语音的模型就绪判定：CosyVoice3 允许「服务未起但 Kokoro 可用」，
-    /// 这样回复决策仍会尝试语音（实际发送时回退 Kokoro），而不是直接发文字。
+    /// 出站语音的就绪判定：CosyVoice3 已安装、已选择音色，且本地服务最近一次健康检查通过。
+    ///
+    /// 回复决策在 `@MainActor` 同步读取缓存快照；服务是否真的在跑由后台
+    /// `CosyVoiceRuntime` 健康轮询推进。
     private func voiceModelsReady(_ settings: VoiceSettings) -> Bool {
-        switch settings.engine {
-        case .cosyVoice:
-            guard CosyVoiceInstallation.isInstalled() else { return false }
-            // App 不内置音色：没选音色就没有可合成的 CosyVoice 音色。
-            guard settings.hasCosyVoiceVoice else { return false }
-            return CosyVoiceRuntime.shared.isServiceReadySnapshot
-                || VoiceSynthesisService.isReady(.kokoro)
-        case .kokoro, .zipvoiceClone:
-            return VoiceSynthesisService.isReady(settings.engine)
-        }
+        guard CosyVoiceInstallation.isInstalled() else { return false }
+        // App 不内置音色：没选音色就没有可合成的 CosyVoice 音色。
+        guard settings.hasCosyVoiceVoice else { return false }
+        return VoiceSynthesisService.isReady
     }
 
     /// 一次 CosyVoice3 可用性探测（安装状态 + 服务健康）。
@@ -3320,43 +3345,6 @@ final class RuntimeCoordinator {
         guard installed else { return (false, false, endpoint) }
         let state = await CosyVoiceRuntime.shared.quickStatus(endpoint: endpoint)
         return (true, state.isRunning, endpoint)
-    }
-
-    private func voiceSelection(
-        for attempt: VoiceSynthesisAttempt,
-        settings: VoiceSettings
-    ) -> VoiceSelection {
-        switch attempt {
-        case .cosyVoice:
-            return VoiceSelection(
-                engine: .cosyVoice,
-                speed: settings.effectiveCosyVoiceSpeed,
-                cosyVoiceVoiceID: settings.effectiveCosyVoiceVoiceID
-            )
-        case .kokoro:
-            return VoiceSelection(
-                engine: .kokoro,
-                kokoroSpeakerID: settings.effectiveKokoroSpeakerID,
-                speed: settings.effectiveKokoroSpeed
-            )
-        case .zipvoiceClone:
-            return VoiceSelection(
-                engine: .zipvoiceClone,
-                speed: settings.effectiveKokoroSpeed,
-                cloneID: settings.cloneID
-            )
-        case .text:
-            return VoiceSelection(engine: .kokoro)
-        }
-    }
-
-    private func voiceEngineLabel(_ attempt: VoiceSynthesisAttempt) -> String {
-        switch attempt {
-        case .cosyVoice: return "CosyVoice3"
-        case .kokoro: return "Kokoro"
-        case .zipvoiceClone: return "ZipVoice 克隆"
-        case .text: return "文字"
-        }
     }
 
     /// 本机音色库是否非空（空音色时 App 不启动服务，提示用户先添加音色）。
@@ -3392,10 +3380,13 @@ final class RuntimeCoordinator {
         }
     }
 
-    /// App 启动时按设置自动拉起 CosyVoice3 服务（安装完整且开启自动启动时）。
+    /// App 启动时按设置自动拉起 CosyVoice3 服务。
+    ///
+    /// 只在「允许语音回复 + 开启自动启动 + 已安装」时执行：CosyVoice3 是 8GB 级的
+    /// Python 旁路，没必要在用户没开语音回复时随 App 启动。
     private func autoStartCosyVoiceIfNeeded() {
         let voice = store.settings.bot.voiceSettings
-        guard voice.engine == .cosyVoice,
+        guard voice.replyEnabled,
               voice.cosyVoiceAutoStart,
               CosyVoiceInstallation.isInstalled() else { return }
         let endpoint = voice.effectiveCosyVoiceEndpoint
@@ -3482,7 +3473,8 @@ final class RuntimeCoordinator {
             if let epoch, epoch != accountEpoch { return false }
             let bridgeRTT = Int(Date().timeIntervalSince(sendStartedAt) * 1000)
             log(.info, "Bot", "已发送 \(conversation.kind.label)消息 → \(conversation.displayTitle)：\(displayText.prefix(60))（bridge 往返 \(bridgeRTT)ms）")
-            scheduleMemoryMaintenance(conversationID: conversation.id)
+            scheduleMemoryMaintenance(
+                conversationID: conversation.id, activationTimestamp: message.timestamp)
             return true
         } catch {
             if let epoch, epoch != accountEpoch { return false }
@@ -3826,11 +3818,10 @@ final class RuntimeCoordinator {
     func settingsDidChange() {
         guard bootstrapped || bootstrapping else { return }
         hookManager.configure(wechatPath: store.settings.hook.wechatPath)
-        if store.settings.bot.voiceSettings.engine == .cosyVoice {
-            let voice = store.settings.bot.voiceSettings
-            Task { @MainActor [weak self] in
-                await self?.syncCosyVoiceEndpoint(voice)
-            }
+        // CosyVoice3 是唯一语音引擎：设置变更后把服务地址同步给客户端。
+        let voice = store.settings.bot.voiceSettings
+        Task { @MainActor [weak self] in
+            await self?.syncCosyVoiceEndpoint(voice)
         }
         // 语音转写总开关关闭：取消未完成的语音获取（已在途的转写完成后仍会落库，
         // 只是不再发起新的 bridge 下载）。与图片开关的行为保持一致。
@@ -4020,6 +4011,7 @@ final class RuntimeCoordinator {
     }
 
     func deleteConversation(id: String) async {
+        cancelMemoryMaintenance(conversationID: id)
         do {
             try await memory.deleteConversation(id: id)
         } catch {
@@ -4075,30 +4067,41 @@ final class RuntimeCoordinator {
         }
     }
 
-    /// 为还没有记忆卡的现有微信会话创建空记忆卡（不提取旧聊天）。
-    /// 用户在记忆页手动触发，避免升级后必须等机器人回复一次才能看到角色。
+    /// 为还没有记忆卡的现有微信会话创建记忆卡。
+    ///
+    /// 手动触发时跳过系统会话；建卡后立即在后台补跑一次维护：历史互动进全量记录，
+    /// 并补总结最近一批建卡前历史（默认最多 500 条），不再要求先等一条新消息。
     @discardableResult
     func createMissingCharacterCards() async -> Int {
-        let systemIDs: Set<String> = [
-            "filehelper", "weixin", "newsapp", "fmessage", "medianote", "floatbottle"
-        ]
         let settings = store.settings
         var created = 0
+        let epoch = accountEpoch
+        var createdConversations: [Conversation] = []
         for conversation in store.conversations {
-            guard !systemIDs.contains(conversation.id.lowercased()) else { continue }
+            guard epoch == accountEpoch, !store.isSwitchingAccount else { break }
+            guard !ConversationName.isSystemAccount(conversation.id) else { continue }
             if await characterStore.hasCharacter(conversationID: conversation.id) { continue }
+            // await 之后可能已切号：不能再往新账号目录写旧账号的卡。
+            guard epoch == accountEpoch, !store.isSwitchingAccount else { break }
             let template = settings.persona(
                 id: conversation.personaID ?? settings.bot.defaultPersonaID)
             do {
                 try await characterStore.ensureCharacter(
                     conversation: conversation,
                     persona: template,
-                    activationTimestamp: Date()
+                    activationTimestamp: conversation.lastMessageAt ?? Date()
                 )
                 created += 1
+                createdConversations.append(conversation)
             } catch {
                 log(.warning, "Memory", "创建记忆卡失败（\(conversation.displayTitle)）：\(error.localizedDescription)")
             }
+        }
+        for conversation in createdConversations {
+            scheduleMemoryMaintenance(
+                conversationID: conversation.id,
+                activationTimestamp: conversation.lastMessageAt ?? Date()
+            )
         }
         guard created > 0 else { return 0 }
         await loadCharacterSummaries()
@@ -4147,7 +4150,7 @@ final class RuntimeCoordinator {
             if let conversation = store.conversations.first(where: { $0.id == conversationID }),
                (try? await characterStore.isInteractionsBackfilled(
                     conversationID: conversationID)) == false {
-                await syncCharacterInteractions(conversation: conversation)
+                _ = await syncCharacterInteractions(conversation: conversation)
             }
             store.characterInteractions = try await characterStore.fetchInteractions(
                 conversationID: conversationID, limit: 1_000)
@@ -4253,6 +4256,7 @@ final class RuntimeCoordinator {
             log(.warning, "Memory", "全局共享记忆卡不能删除")
             return
         }
+        cancelMemoryMaintenance(conversationID: conversationID)
         do {
             try await characterStore.deleteCharacter(conversationID: conversationID)
             store.characterSummaries.removeAll { $0.conversationID == conversationID }
@@ -4355,14 +4359,41 @@ final class RuntimeCoordinator {
     func saveMemorySettings(_ settings: MemorySettings) {
         store.settings.bot.memorySettings = settings
         store.persist()
+        if !settings.enabled {
+            // 关闭记忆后取消在途维护：旧任务持有旧设置快照，否则可能继续补总结
+            // 最多 500 条历史（13 次 AI 调用）。
+            memoryLifecycleGeneration &+= 1
+            memoryStartupCatchUpTask?.cancel()
+            memoryStartupCatchUpTask = nil
+            memoryIdleFlushTasks.values.forEach { $0.cancel() }
+            memoryIdleFlushTasks.removeAll()
+            memoryMaintenanceTasks.values.forEach { $0.cancel() }
+            memoryMaintenanceTasks.removeAll()
+            memoryMaintenanceInFlight.removeAll()
+            memoryMaintenancePending.removeAll()
+            memoryPartialFlushRequested.removeAll()
+        }
         log(.info, "Memory", "记忆设置已更新（批量 \(settings.extractionBatchSize) 条，"
             + "最近 \(settings.recentWindowHours)h，合并阈值 \(settings.mergeSimilarity)）")
     }
 
     /// 后台把新互动同步到记忆卡并批量提取；不阻塞回复。
-    private func scheduleMemoryMaintenance(conversationID: String) {
+    ///
+    /// - Parameter activationTimestamp: 建卡时的触发消息时间。卡片在收到消息时
+    ///   自动创建（不再要求机器人先回复），游标必须从这条消息之前开始，
+    ///   否则这条消息会因为早于 `Date()` 而被永久跳过。
+    /// - Parameter resetIdleFlush: 空闲兜底计时器是否重置。消息触发时为 true；
+    ///   计时器自己触发/维护任务补跑时为 false，避免 5 分钟空转。
+    private func scheduleMemoryMaintenance(
+        conversationID: String,
+        activationTimestamp: Date? = nil,
+        resetIdleFlush: Bool = true
+    ) {
         guard store.settings.bot.memorySettings.enabled else { return }
         guard let conversation = store.conversations.first(where: { $0.id == conversationID }) else { return }
+        if resetIdleFlush {
+            scheduleMemoryIdleFlush(conversationID: conversationID)
+        }
         if memoryMaintenanceInFlight.contains(conversationID) {
             memoryMaintenancePending.insert(conversationID)
             return
@@ -4371,81 +4402,294 @@ final class RuntimeCoordinator {
         let provider = providerForMaintenance(conversation: conversation)
         memoryMaintenanceInFlight.insert(conversationID)
         let epoch = accountEpoch
+        let generation = memoryLifecycleGeneration
         let task = Task { [weak self] in
             guard let self else { return }
             defer {
                 self.memoryMaintenanceInFlight.remove(conversationID)
                 self.memoryMaintenanceTasks.removeValue(forKey: conversationID)
-                if self.memoryMaintenancePending.remove(conversationID) != nil {
-                    self.scheduleMemoryMaintenance(conversationID: conversationID)
+                // 停止/切号/删除会话后不再排下一轮，避免孤儿任务反复自我重排。
+                if !Task.isCancelled,
+                   epoch == self.accountEpoch,
+                   generation == self.memoryLifecycleGeneration {
+                    if self.memoryMaintenancePending.remove(conversationID) != nil {
+                        self.scheduleMemoryMaintenance(
+                            conversationID: conversationID, resetIdleFlush: false)
+                    } else if self.memoryPartialFlushRequested.contains(conversationID) {
+                        self.scheduleMemoryMaintenance(
+                            conversationID: conversationID, resetIdleFlush: false)
+                    }
                 }
             }
-            guard epoch == self.accountEpoch else { return }
-            guard await self.characterStore.hasCharacter(conversationID: conversationID) else {
-                return
-            }
-            await self.syncCharacterInteractions(conversation: conversation)
-            guard epoch == self.accountEpoch else { return }
-            let result = await self.memoryEngine.extractIfNeeded(
+            guard epoch == self.accountEpoch,
+                  generation == self.memoryLifecycleGeneration else { return }
+            await self.performMemoryMaintenance(
                 conversation: conversation,
+                activationTimestamp: activationTimestamp,
+                settings: settings,
                 provider: provider,
-                settings: settings
+                epoch: epoch,
+                generation: generation
             )
-            guard epoch == self.accountEpoch else { return }
-            if let result, result.didChange {
-                await self.refreshCharacterUIAfterMaintenance(conversationID: conversationID)
-            }
         }
         memoryMaintenanceTasks[conversationID] = task
     }
 
-    private func syncCharacterInteractions(conversation: Conversation) async {
+    /// 删除会话/记忆卡时取消并清理该会话的后台记忆任务，避免旧任务把卡“复活”。
+    private func cancelMemoryMaintenance(conversationID: String) {
+        memoryMaintenanceTasks[conversationID]?.cancel()
+        memoryMaintenanceTasks.removeValue(forKey: conversationID)
+        memoryMaintenanceInFlight.remove(conversationID)
+        memoryMaintenancePending.remove(conversationID)
+        memoryPartialFlushRequested.remove(conversationID)
+        memoryIdleFlushTasks[conversationID]?.cancel()
+        memoryIdleFlushTasks.removeValue(forKey: conversationID)
+    }
+
+    /// 一次记忆维护：必要时自动建卡 → 同步全量互动 → 历史补总结 → 批量提取 → 空闲兜底。
+    private func performMemoryMaintenance(
+        conversation: Conversation,
+        activationTimestamp: Date?,
+        settings: AppSettings,
+        provider: AIProvider?,
+        epoch: UInt64,
+        generation: UInt64
+    ) async {
+        // 空闲兜底的请求在本轮开头消费：任何早退都不能把它留给 defer 触发重排。
+        let wantsPartialFlush = memoryPartialFlushRequested.remove(conversation.id) != nil
+        guard epoch == accountEpoch,
+              generation == memoryLifecycleGeneration,
+              // 用户可能已删除会话/记忆卡：旧快照不能重新建卡（避免「复活」）。
+              store.conversations.contains(where: { $0.id == conversation.id }) else { return }
+
+        // ① 记忆卡不再只在「生成回复」时创建：收到消息就补建，否则机器人平时
+        //    不回复的群聊永远没有记忆卡，消息既进不了全量记录也提取不成记忆。
+        if !(await characterStore.hasCharacter(conversationID: conversation.id)) {
+            guard store.conversations.contains(where: { $0.id == conversation.id }),
+                  epoch == accountEpoch,
+                  generation == memoryLifecycleGeneration,
+                  MemoryCapturePolicy.shouldCapture(
+                    conversation: conversation, settings: settings) else { return }
+            let persona = settings.persona(
+                id: conversation.personaID ?? settings.bot.defaultPersonaID)
+            do {
+                try await characterStore.ensureCharacter(
+                    conversation: conversation,
+                    persona: persona,
+                    activationTimestamp: activationTimestamp ?? Date()
+                )
+                log(.info, "Memory", "已自动创建记忆卡（\(conversation.displayTitle)）")
+            } catch {
+                log(.warning, "Memory",
+                    "自动创建记忆卡失败（\(conversation.displayTitle)）：\(error.localizedDescription)")
+                return
+            }
+        }
+        // 同步失败时不做历史补总结/提取：否则 historyCount==0 会误写完成标记，
+        // 等同步恢复后旧聊天永远补不回来（只保留待重试状态）。
+        guard await syncCharacterInteractions(conversation: conversation) else {
+            log(.warning, "Memory", "互动同步失败，保留待重试（\(conversation.displayTitle)）")
+            return
+        }
+        guard epoch == accountEpoch,
+              generation == memoryLifecycleGeneration,
+              store.conversations.contains(where: { $0.id == conversation.id }) else { return }
+
+        var changed = false
+        // ② 建卡前的历史互动只进过全量记录：第一次维护时补总结最近一批。
+        if let history = await memoryEngine.extractHistoryIfNeeded(
+            conversation: conversation,
+            provider: provider,
+            settings: settings
+        ) {
+            changed = changed || history.didChange
+        }
+        guard epoch == accountEpoch,
+              generation == memoryLifecycleGeneration else { return }
+        if let result = await memoryEngine.extractIfNeeded(
+            conversation: conversation,
+            provider: provider,
+            settings: settings
+        ) {
+            changed = changed || result.didChange
+        }
+        guard epoch == accountEpoch,
+              generation == memoryLifecycleGeneration else { return }
+        // ③ 空闲兜底：不足一批的消息在群里安静下来后单独总结。
+        if wantsPartialFlush {
+            let minimum = max(1, settings.bot.memorySettings.extractionBatchSize / 2)
+            if let flushed = await memoryEngine.extractIfNeeded(
+                conversation: conversation,
+                provider: provider,
+                settings: settings,
+                minCount: minimum
+            ) {
+                changed = changed || flushed.didChange
+            }
+        }
+        guard epoch == accountEpoch,
+              generation == memoryLifecycleGeneration else { return }
+        if changed {
+            await refreshCharacterUIAfterMaintenance(conversationID: conversation.id)
+        }
+    }
+
+    /// 空闲兜底计时器：每条新消息重置；安静 `memoryIdleFlushDelay` 后触发一次
+    /// 部分批次提取，解决「一整天只来了 9 条群消息、永远攒不够 10 条」不总结的问题。
+    private func scheduleMemoryIdleFlush(conversationID: String) {
+        memoryIdleFlushTasks[conversationID]?.cancel()
+        memoryIdleFlushTasks.removeValue(forKey: conversationID)
+        guard store.settings.bot.memorySettings.enabled else { return }
+        let epoch = accountEpoch
+        let generation = memoryLifecycleGeneration
+        let task = Task { [weak self] in
+            try? await Task.sleep(for: Self.memoryIdleFlushDelay)
+            guard !Task.isCancelled, let self else { return }
+            // 已被 stop/drain 取消并移出字典：不再排维护。
+            guard self.memoryIdleFlushTasks[conversationID] != nil else { return }
+            guard epoch == self.accountEpoch,
+                  generation == self.memoryLifecycleGeneration else { return }
+            self.memoryIdleFlushTasks.removeValue(forKey: conversationID)
+            guard self.store.settings.bot.memorySettings.enabled else { return }
+            guard let conversation = self.store.conversations.first(
+                where: { $0.id == conversationID }) else { return }
+            guard await self.characterStore.hasCharacter(
+                conversationID: conversation.id) else { return }
+            guard generation == self.memoryLifecycleGeneration else { return }
+            self.memoryPartialFlushRequested.insert(conversationID)
+            self.scheduleMemoryMaintenance(
+                conversationID: conversationID,
+                activationTimestamp: conversation.lastMessageAt,
+                resetIdleFlush: false
+            )
+        }
+        memoryIdleFlushTasks[conversationID] = task
+    }
+
+    /// 启动后补跑一次记忆维护：完成上次运行遗留的历史补总结与不足一批的待提取。
+    ///
+    /// 只为**已经有记忆卡**的会话排期，不在启动时给所有历史会话批量建卡：
+    /// 自动建卡发生在消息落库时（`performMemoryMaintenance`），避免升级后一次
+    /// 给几百个历史会话建卡。
+    private func scheduleStartupMemoryCatchUp() {
+        let settings = store.settings
+        guard settings.bot.memorySettings.enabled else { return }
+        // 已有记忆卡的会话才排期（下面 hasCharacter 过滤）；这里不按采集策略过滤，
+        // 手动为公众号/系统会话建的卡也要能补完历史总结。
+        let candidates = store.conversations
+        guard !candidates.isEmpty else { return }
+        let epoch = accountEpoch
+        let generation = memoryLifecycleGeneration
+        memoryStartupCatchUpTask?.cancel()
+        memoryStartupCatchUpTask = Task { [weak self] in
+            guard let self else { return }
+            var scheduled = 0
+            for conversation in candidates {
+                guard !Task.isCancelled,
+                      epoch == self.accountEpoch,
+                      generation == self.memoryLifecycleGeneration else { return }
+                guard await self.characterStore.hasCharacter(
+                    conversationID: conversation.id) else { continue }
+                guard !Task.isCancelled,
+                      generation == self.memoryLifecycleGeneration else { return }
+                self.scheduleMemoryMaintenance(
+                    conversationID: conversation.id,
+                    activationTimestamp: conversation.lastMessageAt ?? Date()
+                )
+                scheduled += 1
+            }
+            if scheduled > 0 {
+                self.log(.debug, "Memory",
+                    "启动记忆维护：\(scheduled) 个已有记忆卡的会话（历史补总结/待提取）")
+            }
+        }
+    }
+
+    /// 同步账号消息到记忆卡 `interactions`。返回是否**完整成功**：
+    /// 拉取/写入/游标推进任一失败都返回 false，调用方据此跳过本轮的
+    /// 历史补总结与提取，避免把「同步失败」误标成「已回填/已总结」。
+    private func syncCharacterInteractions(conversation: Conversation) async -> Bool {
         let needsBackfill = (try? await characterStore.isInteractionsBackfilled(
             conversationID: conversation.id)) == false
         let lastSynced = try? await characterStore.lastInteractionSyncedAt(
             conversationID: conversation.id)
         // 首次同步把历史聊天（最多最近 5000 条）一次性写入全量记忆卡；之后按
         // interactions_synced_at 增量取新消息，避免每条消息都重写最近 500 条。
-        // 提取游标早已越过回填的历史，不会把旧聊天重新交给 AI 提取。
+        // 建卡前的历史默认不提取（`last_extracted_at` 从建卡时刻开始）；
+        // `beginHistoryBackfill` 用独立断点补总结最近一批，不重拉普通提取游标。
         let fullBackfill = needsBackfill || lastSynced == nil
         let after = fullBackfill ? nil : lastSynced
         let limit = fullBackfill ? 5_000 : 500
-        guard let messages = try? await memory.fetchMessagesForMemory(
-            conversationID: conversation.id,
-            after: after,
-            limit: limit
-        ), !messages.isEmpty else {
-            if fullBackfill {
-                try? await characterStore.markInteractionsBackfilled(
-                    conversationID: conversation.id)
-            }
-            return
+        let fetched: [ChatMessage]
+        do {
+            fetched = try await memory.fetchMessagesForMemory(
+                conversationID: conversation.id,
+                after: after,
+                limit: limit
+            )
+        } catch {
+            log(.warning, "Memory", "读取待同步消息失败：\(error.localizedDescription)")
+            return false
         }
-        let inputs = MemoryEngine.interactionInputs(for: messages)
-        _ = try? await characterStore.upsertInteractions(
-            conversationID: conversation.id, records: inputs)
-        if let latest = messages.map(\.timestamp).max() {
-            try? await characterStore.markInteractionsSynced(
-                conversationID: conversation.id, through: latest)
+        if fetched.isEmpty {
+            if fullBackfill {
+                do {
+                    try await characterStore.markInteractionsBackfilled(
+                        conversationID: conversation.id)
+                } catch {
+                    log(.warning, "Memory", "写入回填标记失败：\(error.localizedDescription)")
+                    return false
+                }
+            }
+            return true
+        }
+        let inputs = MemoryEngine.interactionInputs(for: fetched)
+        do {
+            _ = try await characterStore.upsertInteractions(
+                conversationID: conversation.id, records: inputs)
+        } catch {
+            log(.warning, "Memory", "写入互动失败：\(error.localizedDescription)")
+            return false
+        }
+        if let latest = fetched.map(\.timestamp).max() {
+            do {
+                try await characterStore.markInteractionsSynced(
+                    conversationID: conversation.id, through: latest)
+            } catch {
+                log(.warning, "Memory", "写入同步游标失败：\(error.localizedDescription)")
+                return false
+            }
         }
         if fullBackfill {
-            try? await characterStore.markInteractionsBackfilled(
-                conversationID: conversation.id)
+            do {
+                try await characterStore.markInteractionsBackfilled(
+                    conversationID: conversation.id)
+            } catch {
+                log(.warning, "Memory", "写入回填标记失败：\(error.localizedDescription)")
+                return false
+            }
         }
+        return true
     }
 
     private func refreshCharacterUIAfterMaintenance(conversationID: String) async {
         guard store.isMemoryPageVisible else { return }
         await loadCharacterSummaries()
-        if store.selectedCharacterID == conversationID || store.selectedCharacterID == nil {
-            await selectCharacter(store.selectedCharacterID)
+        // 「无选择」与「全部角色」是两个分量：`selectedCharacterID == nil` 不能
+        // 当成聚合视图，否则后台每来一条消息都会把用户弹出的聚合页重新打开。
+        if store.selectedCharacterID == conversationID {
+            await selectCharacter(conversationID)
+        } else if store.isAllCharactersSelected {
+            await selectCharacter(nil)
         }
     }
 
     /// 维护任务使用的通道：会话覆盖 → 全局默认；模型覆盖会话/人格卡的 model 由 ChatEngine 处理。
     private func providerForMaintenance(conversation: Conversation) -> AIProvider? {
         let settings = store.settings
-        let providerID = conversation.providerID
+        // 会话覆盖的 provider 可能已被删除：回退到全局默认，避免历史补总结误判「无 AI」。
+        let overrideID = conversation.providerID.flatMap { settings.provider(id: $0) != nil ? $0 : nil }
+        let providerID = overrideID
             ?? settings.bot.defaultProviderID
             ?? settings.ai.defaultProviderID
         guard var provider = providerID.flatMap({ settings.provider(id: $0) }) else {

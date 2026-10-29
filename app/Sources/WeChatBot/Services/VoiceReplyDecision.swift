@@ -2,8 +2,8 @@ import Foundation
 
 /// 一次「这条回复要不要改成语音」的决策输入（纯值，便于单测）。
 ///
-/// 由运行时在生成文字回复后调用；`modelsReady` 表示 TTS 引擎与所选模型已就绪
-/// （由 `VoiceSynthesisService`/`VoiceModelStore` 判定后传入），`rng` 由调用方
+/// 由运行时在生成文字回复后调用；`modelsReady` 表示 CosyVoice3 已安装、已选音色且
+/// 本地服务就绪（由 `VoiceSynthesisService`/`CosyVoiceRuntime` 判定后传入），`rng` 由调用方
 /// 注入 `Double.random(in: 0..<1)`，测试里可固定。
 struct VoiceReplyContext: Sendable, Equatable {
     var global: VoiceSettings

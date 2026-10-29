@@ -15,7 +15,7 @@ copyright notices are listed with each component.
 | --- | --- |
 | GPL-3.0 | `LICENSE` |
 | Apache-2.0 | `LICENSES/Apache-2.0.txt` |
-| MIT | `LICENSES/MIT.txt` (plus component-specific texts, e.g. `LICENSES/MIT-Vocos.txt`) |
+| MIT | `LICENSES/MIT.txt` |
 | BSD-3-Clause | `LICENSES/BSD-3-Clause.txt` |
 | ISC | `LICENSES/ISC.txt` |
 | wxWindows Library Licence 3.1 | `LICENSES/wxWindows-Library-Licence-3.1.txt` |
@@ -53,20 +53,13 @@ copyright notices are listed with each component.
 - **protobuf-go** — BSD-3-Clause, copyright The Go Authors.
 - **lumberjack** — MIT, copyright Nate Finch.
 
-- **sherpa-onnx** — https://github.com/k2-fsa/sherpa-onnx
-  Static library for offline TTS inference. License: Apache-2.0
-  (`LICENSES/Apache-2.0.txt`), copyright the sherpa-onnx authors.
-  Its statically linked dependencies are distributed under their upstream
-  licenses: onnxruntime (MIT, Microsoft), kissfft (BSD-3-Clause),
-  utf8proc (MIT), kaldi-decoder / kaldi-native-fbank / kaldi-fst /
-  sentencepiece (Apache-2.0).
-- **Kokoro-82M (multi-lang v1_1)** — https://huggingface.co/hexgrad/Kokoro-82M
-  TTS model weights, downloaded on demand. License: Apache-2.0 (see model card).
-- **ZipVoice (distill int8 zh-en)** — https://github.com/k2-fsa/ZipVoice
-  Zero-shot voice-cloning TTS model, downloaded on demand. License: Apache-2.0.
-- **Vocos 24 kHz** — https://github.com/charactr-platform/vocos
-  Neural vocoder for ZipVoice. License: MIT (`LICENSES/MIT-Vocos.txt`),
-  copyright Charactr Inc.
+## Downloaded on demand (not bundled)
+
+- **CosyVoice3 (Fun-CosyVoice3-0.5B-2512)** — https://github.com/FunAudioLLM/CosyVoice
+  Local TTS sidecar runtime and model weights, installed by the user on demand;
+  they are not part of this repository or its release binaries. License:
+  Apache-2.0 (`LICENSES/Apache-2.0.txt`); the upstream repository and model card
+  govern the downloaded files.
 
 ## Apple
 

@@ -59,7 +59,6 @@ r3-seed.json
 # ---------------------------------------------------------------------------
 app/.build
 app/.build-*
-app/Vendor/
 app/.swiftpm
 .swiftpm/
 DerivedData/

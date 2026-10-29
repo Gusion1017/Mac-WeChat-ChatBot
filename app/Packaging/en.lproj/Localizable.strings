@@ -1166,7 +1166,6 @@
 "识图结果保存在本机，并随消息作为后续回复的上下文；建议选择支持图片输入的模型（如 gpt-4o-mini、qwen-vl-max）。" = "Recognition results are stored on this Mac and travel with the message as context for later replies; prefer a model that accepts image input (e.g. gpt-4o-mini, qwen-vl-max).";
 "复制识图描述" = "Copy Image Description";
 
-
 /* Voice (2026-10-26): inbound transcription, transcripts, and TTS settings. */
 "语音转写" = "Voice Transcription";
 "语音回复" = "Voice Replies";
@@ -1190,12 +1189,6 @@
 "超限处理" = "Over-Limit Handling";
 "改发文字" = "Send Text Instead";
 "按句截断" = "Truncate by Sentence";
-"合成引擎" = "Synthesis Engine";
-"ZipVoice 克隆" = "ZipVoice Clone";
-"克隆音色档案 ID" = "Clone Voice Profile ID";
-"Kokoro 音色" = "Kokoro Speaker";
-"Kokoro 语速" = "Kokoro Speed";
-"允许下载语音模型" = "Allow Voice Model Downloads";
 "需要安装中文语音资源" = "Chinese Speech Assets Required";
 "当前系统不支持本地中文语音识别" = "Local Chinese Speech Recognition Is Unsupported";
 "系统不支持" = "Unsupported";
@@ -1214,30 +1207,10 @@
 "仅短回复会转语音：「对等」只对语音消息回语音。发送失败（如未捕获语音句柄、上传链路未就绪）会安全降级为文字（不会重复发送）。" = "Only short replies become voice; Mirror only replies with voice to voice messages. If sending fails (no voice handle yet, upload path not ready), the reply falls back to text safely (never sent twice).";
 "超过上限时按下方策略处理（语音回复用）" = "Handled by the policy below when exceeded (voice replies)";
 "改发文字：直接降级；按句截断：切到不超限后重新合成" = "Send text: fall back immediately; Truncate: split by sentence until within the limit and synthesize again";
-"音色编号（以模型说明为准，0 为默认音色）" = "Speaker index (see model docs; 0 is the default voice)";
-"在语音模型管理中导入参考音频后填写（留空则不可用）" = "Fill in after importing reference audio in voice model management (empty means unavailable)";
 "0.5×–2.0×，默认 1.0×" = "0.5×–2.0×, default 1.0×";
-"模型首次使用时按需下载到本机；下载前必须同意。首次启用语音发送或微信重启后，请先在 Mac 微信手动发一条文字 + 一条语音以捕获发送句柄（bridge 重启会自动恢复）；发送失败会自动降级为文字。" = "Models download on demand on first use; consent is required first. After enabling voice sending or restarting WeChat, manually send one text and one voice in WeChat once to capture the send handles (bridge restarts restore them automatically); failures fall back to text.";
-"Kokoro 内置音色；ZipVoice 使用克隆音色（需导入参考音频）" = "Kokoro built-in voices; ZipVoice uses cloned voices (reference audio required)";
-"首次使用前需要同意；模型较大（Kokoro 约 365MB、ZipVoice 约 109MB）" = "Consent is required before first use; models are large (Kokoro ≈365MB, ZipVoice ≈109MB)";
 "%d 字" = "%d chars";
-"语音模型与克隆音色" = "Voice models & cloned voices";
-"模型按需下载到本机，不入 App 包体；下载前需先允许。ZipVoice 克隆需要参考音频与参考文本（导入后自动用本地语音识别转写，可手动修正）。" = "Models download on demand and are not bundled with the app; consent is required first. ZipVoice cloning needs reference audio and text (transcribed locally after import, editable).";
 "下载" = "Download";
-"下载全部语音模型" = "Download all voice models";
-"Kokoro 约 365MB、ZipVoice 约 109MB、声码器约 54MB；网络较慢时请耐心等待" = "Kokoro ≈365MB, ZipVoice ≈109MB, vocoder ≈54MB; allow time on slow networks";
-"下载全部" = "Download all";
-"克隆音色档案" = "Cloned voice profiles";
-"还没有克隆音色；导入 10–30 秒参考音频即可" = "No cloned voices yet; import a 10–30s reference clip";
-"共 %d 个克隆音色" = "%d cloned voices";
-"导入参考音频…" = "Import reference audio…";
-"参考文本已填写" = "Reference text ready";
-"缺少参考文本（克隆不可用）" = "Reference text missing (cloning unavailable)";
 "使用" = "Use";
-"请先打开「允许下载语音模型」" = "Enable “Allow voice model downloads” first";
-"语音模型下载完成" = "Voice models downloaded";
-"选择 10–30 秒、单人说话的参考音频（wav/m4a）" = "Choose a 10–30s single-speaker reference clip (wav/m4a)";
-"已导入克隆音色" = "Cloned voice imported";
 "语音发送状态" = "Voice sending status";
 "首次启用语音回复或微信重启后，需要在本机微信手动发一条文字和一条语音以捕获发送句柄；bridge 启动后的登录稳定期内不会发送语音。" = "After enabling voice replies or restarting WeChat, manually send one text and one voice message in WeChat to capture the send handles. Voice is not sent during the login-settling window after bridge startup.";
 "发送通道" = "Send channel";
@@ -1280,43 +1253,19 @@
 
 /* Voice panel v1.4.1 (2026-10-27): engine/voice/model/preview, slimmer layout. */
 "语音引擎与音色" = "Voice Engine & Voice";
+/* Voice engine (2026-10-29): CosyVoice3 is the only TTS engine. */
+"CosyVoice3 是本机离线语音引擎：运行环境与模型需单独安装（约 8GB），语音合成全部在本机完成、不联网。发布版 App 内置 CosyVoice3 安装/启动脚本；若脚本缺失，可用 WECHATAI_COSYVOICE_SCRIPT / WECHATAI_COSYVOICE_INSTALL_SCRIPT 指定路径。App 不内置任何音色：音色仅保存在本机，需在「管理音色…」中添加。" = "CosyVoice3 is the on-device offline voice engine: its runtime and model (about 8 GB) are installed separately, and all speech synthesis runs locally without network access. The packaged app bundles the CosyVoice3 install/start scripts; if they are missing, point WECHATAI_COSYVOICE_SCRIPT / WECHATAI_COSYVOICE_INSTALL_SCRIPT at them. The app ships no voices: voices are stored locally only, so add one under “Manage Voices…”.";
+"开启语音回复时，启动 App 或打开本页会拉起本地服务" = "While voice replies are enabled, launching the app or opening this page starts the local service";
 "音色" = "Voice";
 "试听" = "Preview";
-"停止试听" = "Stop Preview";
 "合成中…" = "Synthesizing…";
-"先下载语音模型" = "Download the voice model first";
-"先导入克隆音色" = "Import a cloned voice first";
-"补全参考文本后再试听" = "Fill in the reference text before previewing";
 "用当前音色试听示例短句" = "Preview a sample sentence with the current voice";
-"内置 103 个中英文音色，可逐个试听" = "103 built-in Chinese/English voices; preview each before choosing";
-"用参考音频克隆音色，需要参考文本" = "Clone a voice from reference audio; reference text is required";
 "语速" = "Speed";
-"0.5×–2.0×，Kokoro 与克隆音色共用" = "0.5×–2.0×; shared by Kokoro and cloned voices";
 "语音模型" = "Voice Model";
-"未下载 · 约 %@" = "Not downloaded · ~%@";
-"已就绪 · 约 %@" = "Ready · ~%@";
-"缺少 %@ · 约 %@" = "Missing %@ · ~%@";
-"下载中 %d%% · 约 %@" = "Downloading %d%% · ~%@";
-"下载中…" = "Downloading…";
-"校验中…" = "Verifying…";
-"解包中…" = "Extracting…";
-"下载失败：%@%@" = "Download failed: %@%@";
-"删除当前引擎模型…" = "Delete Current Engine Models…";
-"在 Finder 中显示模型" = "Show Models in Finder";
-"删除语音模型？" = "Delete Voice Models?";
-"删除后再次使用语音回复需要重新下载模型；已生成的语音文件不受影响。" = "Voice replies need the models again after deletion; already generated audio is kept.";
-"已删除语音模型" = "Voice models deleted";
-"下载语音模型" = "Download Voice Models";
-"同意并下载" = "Agree & Download";
-"将下载 %@ 到本机（约 %@）。下载过程不会上传音频或文本。" = "Will download %@ to this Mac (~%@). The download never uploads audio or text.";
-"Kokoro 语音模型" = "Kokoro voice model";
-"ZipVoice 克隆模型与声码器" = "ZipVoice clone model and vocoder";
-"已取消下载" = "Download cancelled";
 "已安装，可离线转写" = "Installed; transcription works offline";
 "系统支持但资源未安装，可直接在 App 内下载" = "Supported but not installed; download it in the app";
 "当前系统不支持本地中文识别，文字聊天不受影响" = "On-device Chinese recognition is unsupported; text chat is unaffected";
 "点击刷新检查本机语音资源状态" = "Refresh to check the local speech asset status";
-"模型按需下载到本机，下载前会确认体积；语音合成在本机离线完成。" = "Models download on demand after a size confirmation; speech synthesis runs locally offline.";
 "只对满足条件的文字回复改发语音；发送失败（句柄未就绪、上传失败等）会自动改发文字，不会重复发送。" = "Only matching text replies become voice; send failures (handles not ready, upload failures) fall back to text without retrying.";
 "按概率把部分文字回复改成语音" = "Some text replies become voice by probability";
 "每条符合条件的回复按概率转语音" = "Each eligible reply becomes voice by probability";
@@ -1325,26 +1274,9 @@
 "超过该字数的回复一律发文字" = "Replies longer than this stay text";
 "超过上限时按下方策略处理" = "Handled by the policy below when exceeded";
 "克隆音色" = "Cloned Voice";
-"选择克隆音色" = "Choose Cloned Voice";
 "音色不存在" = "Voice not found";
-"所选克隆音色不存在，请重新选择" = "The selected cloned voice no longer exists; choose another";
-"未选择克隆音色（共 %d 个档案）" = "No cloned voice selected (%d profiles)";
-"还没有克隆音色；导入 10–30 秒单人参考音频" = "No cloned voices yet; import a 10–30s single-speaker clip";
-"缺少参考文本，无法合成" = "Reference text missing; synthesis unavailable";
-"导入…" = "Import…";
-"删除当前克隆音色…" = "Delete Current Cloned Voice…";
-"删除克隆音色？" = "Delete Cloned Voice?";
-"参考音频与参考文本会一并删除，无法恢复。" = "The reference audio and text will be deleted permanently.";
-"已删除克隆音色" = "Cloned voice deleted";
 "选择音色" = "Choose Voice";
-"中文女声" = "Chinese Female";
-"中文男声" = "Chinese Male";
-"英文女声" = "English Female";
 "英文" = "English";
-"搜索音色" = "Search voices";
-"%d 个 Kokoro 内置音色；点按行选中，右侧可试听。" = "%d built-in Kokoro voices. Tap a row to select; preview on the right.";
-"当前音色：%@" = "Current voice: %@";
-"音色 #%d（未收录）" = "Voice #%d (not in catalog)";
 "试听播放失败" = "Preview playback failed";
 
 /* Bot page sub-tabs (2026-10-26): 常规 / 触发 / 互动 / 名单 / 节奏 / 语音。 */
@@ -1493,7 +1425,6 @@
 
 /* CosyVoice3 local engine (2026-10-27): service lifecycle, install progress, voices, endpoint. */
 "本地大模型（Fun-CosyVoice3-0.5B），需下载约 8GB；首次启动与合成较慢（非实时，适合高质量语音）" = "Local large model (Fun-CosyVoice3-0.5B). About 8 GB to download; startup and synthesis are slow (not real-time; suited to high-quality voice)";
-"Kokoro / ZipVoice 模型按需下载到本机；CosyVoice3 为可选高保真引擎，运行环境与模型需单独安装（约 8GB）。语音合成全部在本机离线完成。CosyVoice3 的安装/启动依赖仓库内 scripts/ 脚本：发布版 App 请从源码目录运行，或通过 WECHATAI_COSYVOICE_SCRIPT / WECHATAI_COSYVOICE_INSTALL_SCRIPT 指定脚本路径。" = "Kokoro / ZipVoice models download on demand. CosyVoice3 is an optional high-fidelity engine whose runtime and model (about 8 GB) are installed separately. All speech synthesis runs locally. CosyVoice3 installs/starts via scripts/ in the repository: run the packaged app from a source checkout, or point WECHATAI_COSYVOICE_SCRIPT / WECHATAI_COSYVOICE_INSTALL_SCRIPT at the scripts.";
 "本地服务" = "Local Service";
 "启动中" = "Starting";
 "运行环境与模型" = "Runtime & Model";
@@ -1501,7 +1432,6 @@
 "删除…" = "Delete…";
 "下载并安装…" = "Download & Install…";
 "自动启动" = "Auto-start";
-"启动 App 或切换到 CosyVoice3 时自动拉起本地服务" = "Start the local service when the app launches or when switching to CosyVoice3";
 "自动启动本地服务" = "Auto-start local service";
 "服务地址" = "Service URL";
 "默认 http://127.0.0.1:5051；仅允许本机回环地址，改端口后需重启本地服务" = "Default http://127.0.0.1:5051; loopback only. Restart the local service after changing the port";
@@ -1526,7 +1456,6 @@
 "未安装 · 合计约 %@（依赖约 2–3GB + 模型约 5–7GB）" = "Not installed · about %@ in total (≈2–3 GB dependencies + ≈5–7 GB model)";
 "音色 %@ 来自本地服务" = "Voice %@ provided by the local service";
 "快捷档位 1.0× / 1.25× / 1.5×（默认 1.25×），也可拖动滑杆微调" = "Presets 1.0× / 1.25× / 1.5× (default 1.25×); drag the slider to fine-tune";
-"0.5×–2.0×，ZipVoice 克隆使用" = "0.5×–2.0× for ZipVoice cloning";
 "0.5×–2.0×，仅对 CosyVoice3 生效" = "0.5×–2.0×, applies to CosyVoice3 only";
 "自定义 %@" = "Custom %@";
 "CosyVoice3 运行环境与模型" = "CosyVoice3 runtime & model";
@@ -1595,7 +1524,7 @@
 "添加音色…" = "Add Voice…";
 "启动本地 CosyVoice3 服务" = "Start the local CosyVoice3 service";
 "还没有任何音色" = "No voices yet";
-"App 不内置任何音色。添加一段 5–30 秒的参考音频后，就可以用本机 CosyVoice3 合成语音。" = "The app ships with no voices. Add a 5–30 s reference audio clip to synthesize speech locally with CosyVoice3.";
+"App 不内置任何音色。添加 1–5 条 5–30 秒的参考音频后，就可以用本机 CosyVoice3 合成语音。" = "The app ships with no voices. Add 1–5 clips of 5–30 s reference audio to synthesize speech locally with CosyVoice3.";
 "App 不内置任何音色，音色仅保存在本机。" = "The app ships with no voices; voices stay on this Mac.";
 "App 不内置任何音色；内置音色只允许改名称/简介，自定义音色可编辑或删除。空音色时无法启动服务。" = "The app ships with no voices. Built-in voices can only be renamed/described; custom voices can be edited or deleted. The service cannot start without a voice.";
 
@@ -1708,6 +1637,7 @@
 "搜索角色或人格" = "Search characters or personas";
 "还没有记忆卡" = "No memory cards yet";
 "机器人为某个会话生成第一次回复后会自动创建。" = "Created automatically after the bot's first reply in a conversation.";
+"机器人收到消息后会自动创建（系统会话、公众号、关闭 AI 的会话除外）。" = "Created automatically when a message arrives (system chats, official accounts and chats with AI disabled excluded).";
 "刷新角色与记忆卡" = "Refresh characters and memory cards";
 "记忆功能已关闭：不提取、不召回；已保存的记忆仍可浏览、编辑和导出。" = "Memory is off: nothing is extracted or recalled. Saved memories can still be viewed, edited and exported.";
 "聚合显示所有角色的记忆；选择具体角色后可编辑人设卡与全量记录" = "Aggregated view of all characters; select one to edit its persona card and full archive";
@@ -1729,6 +1659,7 @@
 "角色目录可能已被删除，或账号正在切换。重新选择角色或查看全部角色。" = "The character folder may have been deleted, or the account is switching. Select the character again or view all characters.";
 "查看全部角色" = "View all characters";
 "机器人为某个会话生成第一次回复后会自动创建记忆卡，之后每批维护把聊天内容提取成原子记忆。" = "A memory card is created after the bot's first reply in a conversation; later maintenance extracts chat content into atomic memories.";
+"机器人收到消息后会自动创建记忆卡（系统会话、公众号、关闭 AI 的会话除外），之后每批维护把聊天内容提取成原子记忆；首次维护还会补总结最近一批历史聊天。" = "A memory card is created automatically when a message arrives (system chats, official accounts and chats with AI disabled excluded); later maintenance extracts chat content into atomic memories, and the first maintenance also summarizes the most recent batch of historical chat.";
 "这个角色还没有记忆" = "This character has no memories yet";
 "起点记忆会在创建记忆卡时写入；也可以新增一条手写记忆，或等待机器人回复后自动提取。" = "The origin memory is written when the card is created. You can also add a handwritten memory or wait for automatic extraction.";
 "新增一条手写记忆" = "Add a handwritten memory";
@@ -1809,6 +1740,7 @@
 "还没有全量记录" = "No full archive yet";
 "没有匹配的记录" = "No matching records";
 "机器人为该会话生成第一次回复后回填最多 5000 条历史消息，之后按游标增量同步。" = "After the bot's first reply, up to 5,000 historical messages are backfilled; later updates sync incrementally.";
+"该会话的记忆卡会回填最多 5000 条历史消息，之后按游标增量同步。" = "The memory card backfills up to 5,000 historical messages and later syncs incrementally.";
 "尝试其它关键词；搜索只匹配互动正文。" = "Try another keyword; search matches interaction text only.";
 "全量记录永久保存，不随聊天记录清理删除" = "The full archive is permanent and unaffected by clearing chat records";
 "记忆总开关" = "Memory switches";
@@ -1887,6 +1819,7 @@
 "为现有会话创建记忆卡？" = "Create memory cards for existing chats?";
 "创建记忆卡" = "Create memory cards";
 "将为还没有记忆卡的现有微信会话创建空记忆卡（人设卡 + 起点记忆），不会提取旧聊天；之后可在各角色中导入旧记忆。" = "Empty memory cards (persona card + origin memory) will be created for existing WeChat chats that have none. Old chats are not extracted; you can import old memories per character later.";
+"将为还没有记忆卡的现有微信会话创建记忆卡；建卡后会自动补总结最近一批旧聊天（最多 500 条），更早的历史仍可在各角色中导入旧记忆。" = "Memory cards will be created for existing WeChat chats that have none. The most recent old chats (up to 500 messages) are summarized automatically; older history can still be imported per character.";
 
 /* Proactive chat (2026-10-28): Bot → Proactive panel and ProactiveChatSettings.idleLabel. */
 "启用主动聊天" = "Enable proactive chat";
@@ -2009,3 +1942,65 @@
 "各对象实际时段" = "Effective window per target";
 "主动权提示词与可选话题；最终消息由 AI 生成" = "Proactive prompt and optional topics; the AI writes the final message";
 "会和人格、最近聊天与记忆一起交给模型；写「怎么开口」，不要写死具体内容。" = "Sent to the model together with the persona, recent chat and memories. Describe how to open; do not hardcode the content.";
+
+/* CosyVoice3 voice manager: multiple reference clips per voice (2026-10-29). */
+"%d 条参考音频" = "%d reference clip(s)";
+"%d / %d 条" = "%d / %d clips";
+"合并约 %.1f 秒" = "≈ %.1f s combined";
+"参考音频 %d" = "Reference Audio %d";
+"参考音频与文本" = "Reference Audio & Text";
+"支持 1–5 条参考音频，每条 5–30 秒；保存时按顺序合并成一个 prompt（总长 ≤30 秒）。" = "Supports 1–5 reference clips of 5–30 s each. They are concatenated into one prompt in order when saved (≤30 s total).";
+"支持 wav / m4a / aiff；每条 5–30 秒、单人说话、清晰无背景音乐。多条按顺序合并；总长 ≤30 秒。" = "Supports wav / m4a / aiff; 5–30 s per clip, single speaker, clear audio without background music. Multiple clips are concatenated in order (≤30 s total).";
+"添加参考音频…" = "Add Reference Audio…";
+"再添加一条参考音频" = "Add another reference clip";
+"再添加一条参考音频（可多选或拖入）" = "Add another reference clip (select multiple or drop files)";
+"最多保存 %d 条参考音频" = "Up to %d reference clips can be saved";
+"最多保存 %d 条参考音频。" = "Up to %d reference clips can be saved.";
+"最多保存 %d 条参考音频，多余的已忽略。" = "Up to %d reference clips can be saved; the extra files were ignored.";
+"未选择音频" = "No audio selected";
+"选择音频…" = "Choose Audio…";
+"更换…" = "Replace…";
+"用系统本地语音识别转写这条参考音频" = "Transcribe this reference clip with on-device speech recognition";
+"删除这条参考音频" = "Delete this reference clip";
+"与这条音频逐字对应的参考文本" = "Reference text matching this clip word for word";
+"建议为每条参考音填写逐字对应的参考文本；多条必须同时填写或同时留空。全部留空或开启 cross-lingual 时只使用参考音，音色相似度可能略低。自动转写失败可手动填写。" = "Enter reference text that matches each clip word for word; with multiple clips, fill in all of them or leave all blank. If all are blank or cross-lingual is enabled, only the reference audio is used and similarity may be slightly lower. Type it manually if transcription fails.";
+"该音色没有可展示的参考音频。" = "This voice has no reference audio to display.";
+"该条参考音没有参考文本（cross-lingual）。" = "This reference clip has no reference text (cross-lingual).";
+"内置音色的参考音频/参考文本与官方参考音严格对应，不可替换。" = "Built-in voices' reference audio/text match the official reference and cannot be replaced.";
+"请为每条参考音频选择音频文件。" = "Choose an audio file for every reference clip.";
+"多条参考音频的参考文本需要同时填写或同时留空；也可以全部留空使用 cross-lingual。" = "With multiple reference clips, reference texts must be either all filled in or all blank; or leave all blank and use cross-lingual.";
+"请填写名称；新增时还需选择至少一条参考音频" = "Enter a name; adding a voice also requires at least one reference clip";
+
+/* CosyVoice3 voice manager: faster multi-clip import / transcription / text input (2026-10-29). */
+"支持 1–5 条参考音频，可拖入或一次多选；保存时按顺序合并成一个 prompt（总长 ≤30 秒）。" = "Supports 1–5 reference clips; drag in files or select multiple at once. They are concatenated into one prompt in order when saved (≤30 s total).";
+"拖入或选择参考音频" = "Drag in or choose reference audio";
+"一次可选择多条，最多 %d 条；每条 5–30 秒。" = "Select multiple at once, up to %d clips; 5–30 s each.";
+"也可以把音频文件直接拖进这里。" = "You can also drag audio files here.";
+"松开以添加参考音频" = "Release to add reference audio";
+"上移（决定合并顺序）" = "Move up (changes merge order)";
+"下移（决定合并顺序）" = "Move down (changes merge order)";
+"自动转写全部" = "Transcribe All";
+"自动转写 %d 条尚未填写文本的参考音频" = "Auto-transcribe %d clip(s) without reference text";
+"所有参考文本都已填写" = "All reference texts are filled in";
+"正在转写参考文本…" = "Transcribing reference text…";
+"正在转写…" = "Transcribing…";
+"正在转写参考文本，请稍候。" = "Transcribing reference text; please wait.";
+"没有需要转写的参考音频" = "No reference clips need transcription";
+"正在保存…" = "Saving…";
+"请填写名称" = "Enter a name";
+"请至少添加一条参考音频" = "Add at least one reference clip";
+"参考文本最多 %d 个字符" = "Reference text can be at most %d characters";
+"cross-lingual 开启时此文本不参与合成" = "This text is ignored while cross-lingual is on";
+"已开启 cross-lingual：保存后参考文本不参与合成；开始手动输入文本会自动关闭它。" = "cross-lingual is on: reference text is ignored after saving. Starting to type text turns it off automatically.";
+"建议为每条参考音填写逐字对应的参考文本；多条必须同时填写或同时留空。全部留空时自动使用 cross-lingual，只克隆音色。自动转写失败可手动填写。" = "Enter text that matches each clip word for word; with multiple clips, fill in all of them or leave all blank. If all are blank, cross-lingual is used automatically to clone the voice only. Type it manually if transcription fails.";
+"还有 %d 条参考文本为空：多条参考音频需要同时填写或同时留空。" = "%d reference clip(s) still have no text: with multiple clips, fill in all of them or leave all blank.";
+"多条参考音频的参考文本需要同时填写或同时留空。" = "With multiple reference clips, reference texts must be either all filled in or all blank.";
+"参考音频总时长 %.1f 秒，超过上限 %.0f 秒。" = "Total reference audio is %.1f s, over the %.0f s limit.";
+"以下音频未能加入：%@" = "These audio files could not be added: %@";
+"已忽略 %d 个非 wav / m4a / aiff 文件" = "Ignored %d file(s) that are not wav / m4a / aiff";
+"请选择 wav / m4a / aiff 音频文件。" = "Choose a wav / m4a / aiff audio file.";
+"已更换音频，请重新填写或转写参考文本" = "Audio replaced; re-enter or transcribe the reference text";
+"无法读取该音频文件" = "Could not read this audio file";
+"音频太短（%.1f 秒），需要 5–30 秒" = "Audio is too short (%.1f s); it must be 5–30 s";
+"音频太长（%.1f 秒），需要 5–30 秒" = "Audio is too long (%.1f s); it must be 5–30 s";
+"试听" = "Preview";

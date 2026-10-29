@@ -70,6 +70,47 @@ enum MemorySource: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// 历史补总结的「过期计划」启发式（纯函数，可单测）。
+///
+/// 历史消息里的「今天/今晚/这周末」等相对时间必须按消息发送时间理解。历史补总结
+/// 无法保证模型每次都能正确换算，因此带近期时间词的 todo 一律降级为 fact：
+/// 信息仍保留，但不会出现在「待办」里被当成当前计划；如果确实仍未完成，
+/// 之后的新消息会重新提取成 todo。
+enum HistoricalPlanHeuristics {
+    /// 近期相对时间词；命中说明这条记忆把「当时」说成了「现在」。
+    static let nearTermMarkers = [
+        "今天", "今晚", "明早", "明天", "明晚", "后天", "大后天",
+        "这周末", "本周末", "周末", "这周", "本周", "这两天", "周中"
+    ]
+
+    static func containsNearTermMarker(_ content: String) -> Bool {
+        nearTermMarkers.contains { content.contains($0) }
+    }
+
+    /// 历史补总结里命中近期时间词的 todo 一律降级为 fact。
+    /// - Parameter isHistoryBackfill: 只有历史补总结生效；普通实时提取不动。
+    static func downgradedCategory(
+        for category: MemoryCategory,
+        content: String,
+        isHistoryBackfill: Bool
+    ) -> MemoryCategory {
+        guard isHistoryBackfill, category == .todo,
+              containsNearTermMarker(content) else { return category }
+        return .fact
+    }
+
+    /// 迁移旧数据时使用：来源消息已超过 24 小时、且带近期时间词的 todo 降级。
+    static func shouldDowngradeStoredPlan(
+        category: MemoryCategory,
+        content: String,
+        sourceNewest: Date,
+        now: Date
+    ) -> Bool {
+        guard category == .todo, containsNearTermMarker(content) else { return false }
+        return now.timeIntervalSince(sourceNewest) > 86_400
+    }
+}
+
 /// v2 记忆的可调参数，保存在账号 `profile.json` 的 `bot.memory`。
 ///
 /// 所有数值都会在写入/读取时收敛；旧配置缺键时逐字段回退默认值。
@@ -466,9 +507,22 @@ struct MemoryMaintenanceResult: Sendable, Equatable {
     var superseded: Int = 0
     var archived: Int = 0
     var usedFallback: Bool = false
+    /// 本批是否成功推进了提取游标；历史补总结循环据此判断有没有卡住。
+    var cursorAdvanced: Bool = false
 
     var didChange: Bool {
         processedInteractions > 0 || added > 0 || merged > 0 || superseded > 0 || archived > 0
+    }
+
+    /// 把同一会话的多批提取结果合并成一条汇总（历史补总结按批循环时使用）。
+    mutating func merge(_ other: MemoryMaintenanceResult) {
+        processedInteractions += other.processedInteractions
+        added += other.added
+        merged += other.merged
+        superseded += other.superseded
+        archived += other.archived
+        usedFallback = usedFallback || other.usedFallback
+        cursorAdvanced = other.cursorAdvanced
     }
 }
 

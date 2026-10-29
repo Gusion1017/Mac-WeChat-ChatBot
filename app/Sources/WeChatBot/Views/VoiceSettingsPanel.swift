@@ -1,18 +1,15 @@
-import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
-/// 语音设置面板（2026-10-26，2026-10-27 精简）。
+/// 语音设置面板（2026-10-29，语音引擎收敛为 CosyVoice3）。
 ///
-/// 唯一入口是「机器人 → 语音」：2026-10-27 移除了设置页里重复的「语音」分类，
-/// 面板本身与复用方式不变。本轮把原来分散的
-/// 「语音引擎（TTS）」「语音模型与克隆音色」合并为「语音引擎与音色」：
-/// - 音色按官方 sid → name 映射展示（103 个，可搜索/分组/试听），不再让用户手填编号；
-/// - 模型只展示当前引擎需要的那一份，下载/取消/重试/删除都在同一行，
-///   去掉「下载全部」与三个独立模型行的重复信息；
-/// - 克隆音色用档案选择器替代「克隆音色档案 ID」文本框；
-/// - 试听复用真实合成服务，本地播放，不发往微信；
-/// - 语音发送状态只在开启语音回复时展示，并去掉与摘要重复的两行句柄明细。
+/// 唯一入口是「机器人 → 语音」。CosyVoice3 是唯一 TTS 引擎（本机 Python 旁路），
+/// 因此面板不再有引擎选择器、Kokoro 音色目录、ZipVoice 克隆档案或模型下载：
+/// - 本地服务：状态/启动/停止/重新检测；
+/// - 运行环境与模型：安装/重装/删除（约 8GB，需单独下载）；
+/// - 音色：本机 `voices.json` 列表 +「管理音色…」（App 不内置任何音色）；
+/// - 语速、自动启动、服务地址；
+/// - 试听直接调用本机服务并用 `AVAudioPlayer` 播放，不发往微信；
+/// - 语音发送状态只在开启语音回复时展示。
 struct VoiceSettingsPanel: View {
     @Environment(AppStore.self) private var store
     @Environment(ToastCenter.self) private var toast
@@ -22,12 +19,6 @@ struct VoiceSettingsPanel: View {
     @State private var isInstallingVoiceAsset = false
     @State private var voiceStatusTick = Date()
     @State private var voiceSetupPresented = false
-    @State private var isImportingVoiceClone = false
-    @State private var voicePickerPresented = false
-    @State private var pendingModelDownload = false
-    @State private var pendingModelDelete = false
-    @State private var clonePendingDelete: String?
-
     // CosyVoice3：服务状态/安装状态用 1s 轮询刷新（actor 内不驱动 UI）。
     // App 不内置任何音色：列表只来自本机 voices.json / 服务端 /voices，空库显示「未添加音色」。
     @State private var cosyVoiceRuntime = CosyVoiceRuntimeSnapshot.initial
@@ -42,9 +33,6 @@ struct VoiceSettingsPanel: View {
 
     private var voiceSettings: VoiceSettings { store.settings.bot.voiceSettings }
 
-    /// Kokoro 语速三档快捷（默认 1.25×）。
-    private static let kokoroSpeedPresets: [Double] = [1.0, 1.25, 1.5]
-
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.sectionSpacing) {
             transcriptionSection
@@ -54,12 +42,9 @@ struct VoiceSettingsPanel: View {
                 sendStatusSection
             }
         }
-        .task {
-            VoiceModelStore.shared.refresh()
-            await refreshVoiceAssetStatus()
-        }
+        .task { await refreshVoiceAssetStatus() }
         .task(id: voiceSettings.replyEnabled) { await pollVoiceStatus() }
-        .task(id: voiceSettings.engine) { await pollCosyVoice() }
+        .task { await pollCosyVoice() }
         .onChange(of: voiceSettings.replyEnabled) { _, enabled in
             guard enabled else {
                 store.voicePreview.stop()
@@ -75,63 +60,14 @@ struct VoiceSettingsPanel: View {
                 }
             }
         }
-        // 音色/语速/引擎变化时立刻停掉旧试听，避免“听到的是上一个音色”。
-        .onChange(of: voiceSettings.engine) { _, _ in store.voicePreview.stop() }
-        .onChange(of: voiceSettings.kokoroSpeakerID) { _, _ in store.voicePreview.stop() }
-        .onChange(of: voiceSettings.kokoroSpeed) { _, _ in store.voicePreview.stop() }
-        .onChange(of: voiceSettings.cloneID) { _, _ in store.voicePreview.stop() }
+        // 音色/语速/服务地址变化时立刻停掉旧试听，避免“听到的是上一个音色”。
         .onChange(of: voiceSettings.cosyVoiceVoiceID) { _, _ in store.voicePreview.stop() }
         .onChange(of: voiceSettings.cosyVoiceSpeed) { _, _ in store.voicePreview.stop() }
+        .onChange(of: voiceSettings.cosyVoiceEndpoint) { _, _ in store.voicePreview.stop() }
         .onDisappear { store.voicePreview.stop() }
-        .sheet(isPresented: $voicePickerPresented) {
-            KokoroVoicePickerSheet()
-                .environment(store)
-                .environment(toast)
-        }
         .sheet(isPresented: $voiceSetupPresented) {
             VoiceHandleSetupSheet()
                 .environment(store)
-        }
-        .confirmationDialog(
-            L("下载语音模型"),
-            isPresented: $pendingModelDownload,
-            titleVisibility: .visible
-        ) {
-            Button(L("同意并下载")) {
-                store.settings.bot.voiceSettings.modelDownloadConsent = true
-                store.persist()
-                startModelDownload()
-            }
-            Button(L("取消"), role: .cancel) {}
-        } message: {
-            Text(modelDownloadMessage)
-        }
-        .confirmationDialog(
-            L("删除语音模型？"),
-            isPresented: $pendingModelDelete,
-            titleVisibility: .visible
-        ) {
-            Button(L("删除"), role: .destructive) {
-                deleteCurrentEngineModels()
-            }
-            Button(L("取消"), role: .cancel) {}
-        } message: {
-            Text(L("删除后再次使用语音回复需要重新下载模型；已生成的语音文件不受影响。"))
-        }
-        .confirmationDialog(
-            L("删除克隆音色？"),
-            isPresented: Binding(
-                get: { clonePendingDelete != nil },
-                set: { if !$0 { clonePendingDelete = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button(L("删除"), role: .destructive) {
-                deletePendingClone()
-            }
-            Button(L("取消"), role: .cancel) {}
-        } message: {
-            Text(L("参考音频与参考文本会一并删除，无法恢复。"))
         }
         .confirmationDialog(
             L("下载并安装 CosyVoice3"),
@@ -403,240 +339,23 @@ struct VoiceSettingsPanel: View {
     private var engineSection: some View {
         SettingsSection(
             title: "语音引擎与音色",
-            footer: "Kokoro / ZipVoice 模型按需下载到本机；CosyVoice3 为可选高保真引擎，运行环境与模型需单独安装（约 8GB）。语音合成全部在本机离线完成。发布版 App 内置 CosyVoice3 安装/启动脚本；若脚本缺失，可用 WECHATAI_COSYVOICE_SCRIPT / WECHATAI_COSYVOICE_INSTALL_SCRIPT 指定路径。App 不内置任何音色：音色仅保存在本机，需在「管理音色…」中添加。"
+            footer: "CosyVoice3 是本机离线语音引擎：运行环境与模型需单独安装（约 8GB），语音合成全部在本机完成、不联网。发布版 App 内置 CosyVoice3 安装/启动脚本；若脚本缺失，可用 WECHATAI_COSYVOICE_SCRIPT / WECHATAI_COSYVOICE_INSTALL_SCRIPT 指定路径。App 不内置任何音色：音色仅保存在本机，需在「管理音色…」中添加。"
         ) {
-            SettingsRow(
-                title: "合成引擎",
-                subtitle: engineSubtitle,
-                symbol: "waveform.circle",
-                tint: Theme.violet
-            ) {
-                Picker(L("合成引擎"), selection: engineBinding) {
-                    Text("Kokoro").tag(VoiceEngineKind.kokoro)
-                    Text(L("ZipVoice 克隆")).tag(VoiceEngineKind.zipvoiceClone)
-                    Text("CosyVoice3").tag(VoiceEngineKind.cosyVoice)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 330)
-            }
+            cosyVoiceServiceRow
             SettingsDivider()
-            switch voiceSettings.engine {
-            case .kokoro:
-                kokoroVoiceRow
-                SettingsDivider()
-                kokoroSpeedRow
-                SettingsDivider()
-                modelRow
-            case .zipvoiceClone:
-                cloneVoiceRow
-                SettingsDivider()
-                cloneSpeedRow
-                SettingsDivider()
-                modelRow
-            case .cosyVoice:
-                cosyVoiceServiceRow
-                SettingsDivider()
-                cosyVoiceInstallRow
-                SettingsDivider()
-                cosyVoiceVoiceRow
-                SettingsDivider()
-                cosyVoiceSpeedRow
-                SettingsDivider()
-                cosyVoiceAutoStartRow
-                SettingsDivider()
-                cosyVoiceEndpointRow
-            }
+            cosyVoiceInstallRow
+            SettingsDivider()
+            cosyVoiceVoiceRow
+            SettingsDivider()
+            cosyVoiceSpeedRow
+            SettingsDivider()
+            cosyVoiceAutoStartRow
+            SettingsDivider()
+            cosyVoiceEndpointRow
         }
     }
 
-    private var engineSubtitle: String {
-        switch voiceSettings.engine {
-        case .kokoro: return L("内置 103 个中英文音色，可逐个试听")
-        case .zipvoiceClone: return L("用参考音频克隆音色，需要参考文本")
-        case .cosyVoice: return L("本地大模型（Fun-CosyVoice3-0.5B），需下载约 8GB；首次启动与合成较慢（非实时，适合高质量语音）")
-        }
-    }
-
-    private var kokoroVoiceRow: some View {
-        SettingsRow(
-            title: "音色",
-            subtitle: kokoroVoiceSubtitle,
-            symbol: "person.wave.2",
-            tint: .secondary
-        ) {
-            HStack(spacing: 8) {
-                previewButton(
-                    selection: currentSelection,
-                    enabled: VoiceSynthesisService.isReady(.kokoro)
-                )
-                Button {
-                    store.voicePreview.stop()
-                    voicePickerPresented = true
-                } label: {
-                    Label(L("选择…"), systemImage: "list.bullet")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-        }
-    }
-
-    private var cloneVoiceRow: some View {
-        SettingsRow(
-            title: "克隆音色",
-            subtitle: cloneSubtitle,
-            symbol: "person.wave.2",
-            tint: .secondary
-        ) {
-            HStack(spacing: 8) {
-                previewButton(
-                    selection: currentSelection,
-                    enabled: selectedCloneProfile?.hasReferenceText == true
-                        && VoiceSynthesisService.isReady(.zipvoiceClone),
-                    disabledHint: clonePreviewDisabledHint
-                )
-                if VoiceCloneStore.shared.profiles.isEmpty {
-                    Button {
-                        importVoiceClone()
-                    } label: {
-                        if isImportingVoiceClone {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Label(L("导入…"), systemImage: "plus")
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(isImportingVoiceClone)
-                } else {
-                    Menu {
-                        cloneMenuContent
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(cloneMenuLabel)
-                                .lineLimit(1)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 8, weight: .semibold))
-                        }
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .disabled(isImportingVoiceClone)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var cloneMenuContent: some View {
-        Section(L("选择音色")) {
-            ForEach(VoiceCloneStore.shared.profiles) { profile in
-                Button {
-                    selectClone(profile)
-                } label: {
-                    Label(
-                        "\(profile.name) · \(Int(profile.duration.rounded()))s",
-                        systemImage: voiceSettings.cloneID == profile.id ? "checkmark" : "circle"
-                    )
-                }
-            }
-        }
-        Divider()
-        Button {
-            importVoiceClone()
-        } label: {
-            Label(L("导入参考音频…"), systemImage: "square.and.arrow.down")
-        }
-        if let profile = selectedCloneProfile {
-            Divider()
-            Button(role: .destructive) {
-                clonePendingDelete = profile.id
-            } label: {
-                Label(L("删除当前克隆音色…"), systemImage: "trash")
-            }
-        }
-    }
-
-    /// Kokoro 语速：三档快捷（1.0 / 1.25 / 1.5，默认 1.25）+ 滑杆微调。
-    private var kokoroSpeedRow: some View {
-        SettingsRow(
-            title: "语速",
-            subtitle: "快捷档位 1.0× / 1.25× / 1.5×（默认 1.25×），也可拖动滑杆微调",
-            symbol: "speedometer",
-            tint: .secondary
-        ) {
-            VStack(alignment: .trailing, spacing: 6) {
-                speedPresetPicker(
-                    value: voiceSettings.effectiveKokoroSpeed,
-                    presets: Self.kokoroSpeedPresets,
-                    binding: bind(\.bot.voiceSettings.kokoroSpeed)
-                )
-                HStack(spacing: 10) {
-                    Slider(value: bind(\.bot.voiceSettings.kokoroSpeed), in: 0.5...2.0, step: 0.05)
-                        .frame(width: 200)
-                        .labelsHidden()
-                    Text(String(format: "%.2f×", voiceSettings.effectiveKokoroSpeed))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 48, alignment: .trailing)
-                }
-            }
-        }
-    }
-
-    /// ZipVoice 克隆语速（沿用 Kokoro 语速设置）。
-    private var cloneSpeedRow: some View {
-        SettingsRow(
-            title: "语速",
-            subtitle: "0.5×–2.0×，ZipVoice 克隆使用",
-            symbol: "speedometer",
-            tint: .secondary
-        ) {
-            HStack(spacing: 10) {
-                Slider(value: bind(\.bot.voiceSettings.kokoroSpeed), in: 0.5...2.0, step: 0.05)
-                    .frame(width: 200)
-                    .labelsHidden()
-                Text(String(format: "%.2f×", voiceSettings.effectiveKokoroSpeed))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 48, alignment: .trailing)
-            }
-        }
-    }
-
-    /// 语速展示：去掉多余小数（1.0 → 1×，1.25 → 1.25×）。
-    private static func speedLabel(_ value: Double) -> String {
-        var text = String(format: "%.2f", value)
-        while text.hasSuffix("0") { text.removeLast() }
-        if text.hasSuffix(".") { text.removeLast() }
-        return text + "×"
-    }
-
-    /// 三档快捷语速的分段选择；当前值不在预设档位时额外显示「自定义」段。
-    @ViewBuilder
-    private func speedPresetPicker(
-        value: Double,
-        presets: [Double],
-        binding: Binding<Double>
-    ) -> some View {
-        Picker("", selection: Binding(
-            get: { presets.first(where: { abs($0 - value) < 0.001 }) ?? value },
-            set: { binding.wrappedValue = $0 }
-        )) {
-            ForEach(presets, id: \.self) { preset in
-                Text(Self.speedLabel(preset)).tag(preset)
-            }
-            if !presets.contains(where: { abs($0 - value) < 0.001 }) {
-                Text(Lf("自定义 %@", Self.speedLabel(value))).tag(value)
-            }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .frame(width: 220)
-    }
-
-    /// CosyVoice3 语速：独立于 Kokoro，默认 1.0。
+    /// CosyVoice3 语速：0.5–2.0，默认 1.0。
     private var cosyVoiceSpeedRow: some View {
         SettingsRow(
             title: "语速",
@@ -942,7 +661,7 @@ struct VoiceSettingsPanel: View {
     private var cosyVoiceAutoStartRow: some View {
         SettingsRow(
             title: "自动启动",
-            subtitle: "启动 App 或切换到 CosyVoice3 时自动拉起本地服务",
+            subtitle: "开启语音回复时，启动 App 或打开本页会拉起本地服务",
             symbol: "power",
             tint: .secondary
         ) {
@@ -980,12 +699,14 @@ struct VoiceSettingsPanel: View {
     // MARK: - CosyVoice3 状态轮询 / 动作
 
     private func pollCosyVoice() async {
-        guard voiceSettings.engine == .cosyVoice else { return }
         cosyVoiceEndpointDraft = voiceSettings.cosyVoiceEndpoint
         await refreshCosyVoiceState(loadVoices: true)
         if !didAttemptCosyVoiceAutoStart {
             didAttemptCosyVoiceAutoStart = true
-            if voiceSettings.cosyVoiceAutoStart,
+            // 只在「允许语音回复 + 开启自动启动」时拉起 8GB 级的本地服务；
+            // 面板里仍可手动点「启动」。
+            if voiceSettings.replyEnabled,
+               voiceSettings.cosyVoiceAutoStart,
                cosyVoiceInstall.state.isInstalled,
                !cosyVoiceVoices.isEmpty,
                !cosyVoiceRuntime.state.isRunning,
@@ -1142,95 +863,6 @@ struct VoiceSettingsPanel: View {
         )
     }
 
-    private var modelRow: some View {
-        let status = engineModelStatus
-        return SettingsRow(
-            title: "语音模型",
-            subtitle: modelSubtitle(status),
-            symbol: status.isReady ? "checkmark.circle.fill" : "arrow.down.circle",
-            tint: status.isReady ? Theme.success : Theme.warning
-        ) {
-            HStack(spacing: 8) {
-                if status.isBusy {
-                    if status.isIndeterminateDownload {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        ProgressView(value: status.progress)
-                            .frame(width: 90)
-                    }
-                    Button(L("取消")) {
-                        VoiceModelStore.shared.cancel()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                } else if status.isReady {
-                    modelMenu(status)
-                } else {
-                    Button(status.failedState != nil ? L("重试") : L("下载")) {
-                        requestModelDownload()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(VoiceModelStore.shared.isDownloading)
-                    if !status.readyKinds.isEmpty {
-                        modelMenu(status)
-                    }
-                }
-            }
-        }
-    }
-
-    private func modelMenu(_ status: VoiceEngineModelStatus) -> some View {
-        Menu {
-            if !status.readyKinds.isEmpty {
-                Button(role: .destructive) {
-                    pendingModelDelete = true
-                } label: {
-                    Label(L("删除当前引擎模型…"), systemImage: "trash")
-                }
-                Divider()
-            }
-            Button {
-                NSWorkspace.shared.open(VoiceModelStore.modelsDirectory)
-            } label: {
-                Label(L("在 Finder 中显示模型"), systemImage: "folder")
-            }
-        } label: {
-            Image(systemName: "ellipsis.circle")
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-    }
-
-    private func modelSubtitle(_ status: VoiceEngineModelStatus) -> String {
-        if let busy = status.busyState {
-            switch busy {
-            case .downloading(let progress):
-                if let progress {
-                    return Lf("下载中 %d%% · 约 %@", Int((progress * 100).rounded()), sizeText(status.missingBytes))
-                }
-                return L("下载中…")
-            case .verifying:
-                return L("校验中…")
-            case .extracting:
-                return L("解包中…")
-            case .notDownloaded, .ready, .failed:
-                break
-            }
-        }
-        if let reason = status.failureReason {
-            let short = String(reason.prefix(72))
-            return Lf("下载失败：%@%@", short, reason.count > 72 ? "…" : "")
-        }
-        if status.isReady {
-            return Lf("已就绪 · 约 %@", sizeText(status.totalBytes))
-        }
-        if status.readyKinds.isEmpty {
-            return Lf("未下载 · 约 %@", sizeText(status.missingBytes))
-        }
-        return Lf("缺少 %@ · 约 %@", missingModelNames(status), sizeText(status.missingBytes))
-    }
-
     private var sendStatusSection: some View {
         SettingsSection(
             title: "语音发送状态",
@@ -1271,93 +903,10 @@ struct VoiceSettingsPanel: View {
 
     // MARK: - Derived values
 
-    private var kokoroVoice: KokoroVoice? {
-        KokoroVoiceCatalog.voice(for: voiceSettings.effectiveKokoroSpeakerID)
-    }
-
-    private var kokoroVoiceSubtitle: String {
-        guard let kokoroVoice else {
-            return Lf("音色 #%d（未收录）", voiceSettings.effectiveKokoroSpeakerID)
-        }
-        return "\(kokoroVoice.localizedGroupTitle) · \(kokoroVoice.name)"
-    }
-
-    private var selectedCloneProfile: VoiceCloneProfile? {
-        guard let id = voiceSettings.cloneID, !id.isEmpty else { return nil }
-        return VoiceCloneStore.shared.profile(id: id)
-    }
-
-    private var clonePreviewDisabledHint: String {
-        if !VoiceSynthesisService.isReady(.zipvoiceClone) { return "先下载语音模型" }
-        if selectedCloneProfile == nil { return "先导入克隆音色" }
-        return "补全参考文本后再试听"
-    }
-
-    private var cloneMenuLabel: String {
-        if let profile = selectedCloneProfile {
-            return profile.name
-        }
-        if voiceSettings.cloneID != nil {
-            return L("音色不存在")
-        }
-        return L("选择克隆音色")
-    }
-
-    private var cloneSubtitle: String {
-        let profiles = VoiceCloneStore.shared.profiles
-        guard !profiles.isEmpty else {
-            return L("还没有克隆音色；导入 10–30 秒单人参考音频")
-        }
-        if let profile = selectedCloneProfile {
-            let state = profile.hasReferenceText
-                ? L("参考文本已填写")
-                : L("缺少参考文本，无法合成")
-            return "\(Int(profile.duration.rounded()))s · \(state)"
-        }
-        if voiceSettings.cloneID != nil {
-            return L("所选克隆音色不存在，请重新选择")
-        }
-        return Lf("未选择克隆音色（共 %d 个档案）", profiles.count)
-    }
-
     private var currentSelection: VoiceSelection {
-        switch voiceSettings.engine {
-        case .cosyVoice:
-            return VoiceSelection(
-                engine: .cosyVoice,
-                speed: voiceSettings.effectiveCosyVoiceSpeed,
-                cosyVoiceVoiceID: voiceSettings.effectiveCosyVoiceVoiceID
-            )
-        case .kokoro, .zipvoiceClone:
-            return VoiceSelection(
-                engine: voiceSettings.engine,
-                kokoroSpeakerID: voiceSettings.effectiveKokoroSpeakerID,
-                speed: voiceSettings.effectiveKokoroSpeed,
-                cloneID: voiceSettings.engine == .zipvoiceClone ? voiceSettings.cloneID : nil
-            )
-        }
-    }
-
-    private var engineModelStatus: VoiceEngineModelStatus {
-        VoiceModelStore.shared.status(for: voiceSettings.engine)
-    }
-
-    private var modelDownloadMessage: String {
-        let status = engineModelStatus
-        let name: String
-        if voiceSettings.engine == .kokoro {
-            name = L("Kokoro 语音模型")
-        } else if voiceSettings.engine == .cosyVoice {
-            name = L("CosyVoice3 运行环境与模型")
-        } else if status.missing == [.zipvoice, .vocoder] {
-            name = L("ZipVoice 克隆模型与声码器")
-        } else {
-            name = missingModelNames(status)
-        }
-        return Lf(
-            "将下载 %@ 到本机（约 %@）。下载过程不会上传音频或文本。",
-            name,
-            sizeText(status.missingBytes)
+        VoiceSelection(
+            cosyVoiceVoiceID: voiceSettings.effectiveCosyVoiceVoiceID,
+            speed: voiceSettings.effectiveCosyVoiceSpeed
         )
     }
 
@@ -1366,38 +915,9 @@ struct VoiceSettingsPanel: View {
             && !store.voiceRuntimeStatus.canSendVoice(now: voiceStatusTick)
     }
 
-    private var engineBinding: Binding<VoiceEngineKind> {
-        Binding(
-            get: { store.settings.bot.voiceSettings.engine },
-            set: { engine in
-                store.voicePreview.stop()
-                store.settings.bot.voiceSettings.engine = engine
-                if engine == .zipvoiceClone, selectedCloneProfile == nil {
-                    store.settings.bot.voiceSettings.cloneID =
-                        VoiceCloneStore.shared.profiles.first?.id
-                }
-                store.persist()
-                if engine == .cosyVoice,
-                   store.settings.bot.voiceSettings.cosyVoiceAutoStart,
-                   cosyVoiceInstall.state.isInstalled,
-                   !cosyVoiceVoices.isEmpty,
-                   !cosyVoiceRuntime.state.isRunning,
-                   !cosyVoiceRuntime.state.isStarting {
-                    Task { await startCosyVoiceService(userInitiated: false) }
-                }
-            }
-        )
-    }
-
     private func sizeText(_ bytes: Int64) -> String {
-        // 模型体积按 1024 进制展示，与文档/模型页的 “365MB / 163MB” 对齐。
+        // 体积按 1024 进制展示，与安装页/文档的 “2–3GB + 5–7GB” 对齐。
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .binary)
-    }
-
-    private func missingModelNames(_ status: VoiceEngineModelStatus) -> String {
-        status.missing.compactMap { kind in
-            VoiceModelStore.catalog.first { $0.kind == kind }?.displayName
-        }.joined(separator: " / ")
     }
 
     // MARK: - Preview
@@ -1406,21 +926,14 @@ struct VoiceSettingsPanel: View {
     private func previewButton(
         selection: VoiceSelection,
         enabled: Bool,
-        disabledHint: String = "先下载语音模型"
+        disabledHint: String = "先启动本地服务"
     ) -> some View {
         let active = store.voicePreview.isActive(selection)
         let phase = store.voicePreview.phase
         Button {
             store.voicePreview.toggle(
                 voice: selection,
-                cosyVoice: selection.engine == .cosyVoice
-                    ? VoicePreviewCosyVoiceOptions(
-                        voiceID: selection.cosyVoiceVoiceID
-                            ?? voiceSettings.effectiveCosyVoiceVoiceID,
-                        endpoint: voiceSettings.effectiveCosyVoiceEndpoint,
-                        speed: selection.speed
-                    )
-                    : nil
+                endpoint: voiceSettings.effectiveCosyVoiceEndpoint
             ) { message in
                 toast.show(message, tone: .error)
             }
@@ -1440,105 +953,6 @@ struct VoiceSettingsPanel: View {
         .controlSize(.small)
         .disabled(!enabled)
         .help(enabled ? L("用当前音色试听示例短句") : L(disabledHint))
-    }
-
-    // MARK: - Model actions
-
-    private func requestModelDownload() {
-        guard !engineModelStatus.missing.isEmpty else { return }
-        if voiceSettings.modelDownloadConsent {
-            startModelDownload()
-        } else {
-            pendingModelDownload = true
-        }
-    }
-
-    private func startModelDownload() {
-        let kinds = engineModelStatus.missing
-        guard !kinds.isEmpty else { return }
-        Task {
-            do {
-                try await VoiceModelStore.shared.download(kinds, consent: true)
-                toast.show(L("语音模型下载完成"), tone: .success)
-            } catch let error as VoiceModelError where error == .cancelled {
-                toast.show(L("已取消下载"), tone: .info)
-            } catch {
-                toast.show(
-                    (error as? LocalizedError)?.errorDescription ?? "\(error)",
-                    tone: .error
-                )
-            }
-        }
-    }
-
-    private func deleteCurrentEngineModels() {
-        let kinds = engineModelStatus.readyKinds
-        guard !kinds.isEmpty else { return }
-        store.voicePreview.stop()
-        do {
-            for kind in kinds {
-                try VoiceModelStore.shared.delete(kind)
-            }
-            toast.show(L("已删除语音模型"), tone: .info)
-        } catch {
-            toast.show(error.localizedDescription, tone: .error)
-        }
-    }
-
-    // MARK: - Clone actions
-
-    private func selectClone(_ profile: VoiceCloneProfile) {
-        store.voicePreview.stop()
-        store.settings.bot.voiceSettings.engine = .zipvoiceClone
-        store.settings.bot.voiceSettings.cloneID = profile.id
-        store.persist()
-    }
-
-    private func deletePendingClone() {
-        guard let id = clonePendingDelete else { return }
-        clonePendingDelete = nil
-        do {
-            try VoiceCloneStore.shared.delete(id: id)
-            if store.settings.bot.voiceSettings.cloneID == id {
-                store.settings.bot.voiceSettings.cloneID = nil
-                store.persist()
-            }
-            store.voicePreview.stop()
-            toast.show(L("已删除克隆音色"), tone: .info)
-        } catch {
-            toast.show(error.localizedDescription, tone: .error)
-        }
-    }
-
-    /// 导入克隆参考音频：导入 → 本地转写参考文本（失败可稍后手动补）→ 自动选中。
-    private func importVoiceClone() {
-        guard !isImportingVoiceClone else { return }
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.audio]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.message = L("选择 10–30 秒、单人说话的参考音频（wav/m4a）")
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        isImportingVoiceClone = true
-        Task {
-            defer { Task { @MainActor in isImportingVoiceClone = false } }
-            do {
-                let name = url.deletingPathExtension().lastPathComponent
-                let profile = try VoiceCloneStore.shared.add(name: name, audioURL: url)
-                if let transcription = try? await store.voiceTranscription.transcribe(
-                    fileURL: profile.audioURL
-                ), !transcription.text.isEmpty {
-                    try? VoiceCloneStore.shared.setReferenceText(id: profile.id, text: transcription.text)
-                }
-                store.voicePreview.stop()
-                store.settings.bot.voiceSettings.engine = .zipvoiceClone
-                store.settings.bot.voiceSettings.cloneID = profile.id
-                store.persist()
-                toast.show(L("已导入克隆音色"), tone: .success)
-            } catch {
-                toast.show(error.localizedDescription, tone: .error)
-            }
-        }
     }
 
     // MARK: - Voice runtime

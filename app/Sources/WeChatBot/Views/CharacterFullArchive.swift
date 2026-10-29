@@ -82,7 +82,7 @@ struct CharacterFullArchive: View {
                 symbol: search.isEmpty ? "archivebox" : "magnifyingglass",
                 title: search.isEmpty ? "还没有全量记录" : "没有匹配的记录",
                 message: search.isEmpty
-                    ? "机器人为该会话生成第一次回复后回填最多 5000 条历史消息，之后按游标增量同步。"
+                    ? "该会话的记忆卡会回填最多 5000 条历史消息，之后按游标增量同步。"
                     : "尝试其它关键词；搜索只匹配互动正文。"
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)

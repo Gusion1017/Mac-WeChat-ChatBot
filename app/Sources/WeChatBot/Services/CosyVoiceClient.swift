@@ -296,10 +296,11 @@ actor CosyVoiceClient {
     /// `POST /voices/reload`：让服务重新读取 `voices.json` 并返回最新音色。
     ///
     /// 设置页新增/编辑/删除音色后调用；服务未运行时由调用方跳过（下次启动生效）。
+    /// 多条参考音会合成最长 30s 的 prompt，首次提取特征可能明显超过 10s，所以超时放宽到 30s。
     func reloadVoices() async throws -> [CosyVoiceVoice] {
         let request = try Self.reloadVoicesRequest(
             endpoint: configuration.endpoint,
-            timeout: max(5, configuration.voicesTimeout * 2))
+            timeout: max(30, configuration.voicesTimeout * 2))
         let (data, response) = try await perform(request)
         guard (200..<300).contains(response.statusCode) else {
             throw CosyVoiceError.httpError(

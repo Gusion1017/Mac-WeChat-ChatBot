@@ -6,6 +6,80 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-10-29
+
+### 修复
+
+- **历史补总结时间语义与过期计划（2026-10-29）**：修复历史消息被当成「最近/今天」，导致补出来的
+  计划已过期的问题。提取提示词现在逐行带 `[yyyy-MM-dd HH:mm]` 发送时间并给出消息时间范围，
+  明确要求按发送时间解析「今晚/这周末」等相对时间、过期计划不再输出为 todo/decision；
+  历史补总结写入的 `created_at/updated_at` 改为来源消息时间（不再写补总结时刻），因此不会进入
+  「最近 72h」或被近期权重加成；历史批中带近期时间词的 todo 统一降级为 fact（普通实时提取不受影响）。
+  历史补总结必须 AI 成功才推进断点，AI 不可用/失败时不再用本地兜底并写完成标记，模型恢复后可续补；
+  历史窗口改为 `(timestamp, id)` 硬上限（严格最多 500 条，同秒边界不重不漏），提取请求增加
+  全局 3 并发闸门，交互同步失败不再误标「已回填」。旧逻辑补出的历史记忆在升级首次打开时一次性修复：未编辑的归档并从新逻辑重补，
+  编辑过的只修正时间、过期 todo 降级；同时修复删除会话/记忆卡后旧维护任务「复活」记忆卡、
+  启动补跑对空任务自我重排、会话 provider 被删后不回退默认通道等问题。文档见
+  [`docs/memory.md`](docs/memory.md) §7.1–§7.4/§15、[`docs/core-services.md`](docs/core-services.md) §5.10/§5.11。
+
+- **群聊/私聊聊天记录不写记忆（2026-10-29）**：修复「机器人平时不回复的会话没有记忆卡，
+  消息只留在账号库、既不进全量记录也不会被总结」的问题。记忆卡改为会话第一条消息落库后
+  由后台自动创建（系统会话/公众号/关闭 AI 的会话除外，手动「为现有会话创建记忆卡」仍可用）；
+  首次维护把建卡前的历史互动（最近最多 500 条）用独立断点补总结成记忆，不改动普通提取游标、
+  不会把已提取消息重新拉回队列。普通提取游标改为 `(timestamp, id)` 复合键，同一秒内被单批
+  40 条上限截断的忙群消息不再永久漏提取；新增空闲兜底：最后一条消息 5 分钟后若仍有 ≥半批
+  未提取互动（例如一天只来了 7 条群消息、永远攒不够默认 8 条）补跑一次提取；启动时对已有记忆卡
+  的会话补跑一次维护。`meta` 时间戳改为保留完整 Double 精度（原先 `%.3f` 截断会让游标差
+  一点点、反复重取同一条消息），并修正后台提取完成后记忆页被自动切到「全部角色」聚合视图。
+  文档见 [`docs/memory.md`](docs/memory.md) §2/§3.2/§7.1/§7.2/§15、
+  [`docs/core-services.md`](docs/core-services.md) §5.10/§5.11。
+
+### 变更
+
+- **音色支持多条参考音频/参考文本（2026-10-29）**：一个音色可保存 **1–5 条**参考音频
+  （每条 5–30 秒），每条配一段逐字对应的参考文本；多条合并后总时长 ≤30 秒（含片段间
+  0.25 秒静音）。合成方式不变：App 保存时按顺序把多条参考音频拼接为一条 `prompt.wav`
+  （文本以换行连接为 `prompt.txt`），sidecar 仍按单条 prompt 合成，不做运行时拼接。
+  原始片段保存在 `voices/<id>/refs/ref-N.wav|txt`；`voices.json` / `meta.json` 增加
+  `references` 数组，同时保留旧的 `prompt_wav` / `prompt_text` 字段（= 合并 prompt）。
+  多条参考文本必须同时填写或同时留空（全空即 `cross_lingual`）；旧单参考音色继续可用，
+  只在主动编辑参考片段时才迁移到 `refs/`，仅改名称/简介不重写音频。音色列表显示参考音频
+  条数；服务端 `/voices` 与导出 `voice.json` 增加 `reference_count`，导出 zip 包含 `refs/`。
+  音频与文本仍只存本机。注意：CosyVoice3 的 speech tokenizer **硬限制参考音 ≤30 秒**，因此合并
+  prompt（含片段间静音）上限为 30 秒；超过会合成失败，App 保存时直接拦截（早期按 60 秒设计
+  已在本次收紧）。详见 [`docs/cosyvoice.md`](docs/cosyvoice.md)、[`docs/voice.md`](docs/voice.md)。
+- **音色多条参考音频的操作与输入优化（2026-10-29）**：新增音色不再预置空卡片，参考音频可
+  **拖放或多选批量导入**，导入时即时校验格式/5–30 秒时长并逐个列出失败文件；片段可上移/下移
+  调整合并顺序，支持「自动转写全部」，更换音频会清空该条旧文本并让进行中的转写结果失效
+  （避免音频/文本错配）；多条文本不完整或合计超过 30 秒时在表单内提示并禁用保存。
+  参考文本改用原生 `NSTextView` 输入（[`ReferenceTextEditor.swift`](app/Sources/WeChatBot/Views/Components/ReferenceTextEditor.swift)），
+  修复 SwiftUI `TextEditor` 在片段数组绑定下打断中文输入法组词/焦点的问题；`cross-lingual`
+  不再锁死文本输入，手动输入或转写出文本会自动关闭它，保存前先提交正在组词的内容。
+  同步更新 [`docs/cosyvoice.md`](docs/cosyvoice.md)、[`docs/ui-design.md`](docs/ui-design.md)。
+- **语音引擎收敛为 CosyVoice3（2026-10-29）**：出站 TTS 只保留 CosyVoice3 本地旁路
+  （`Fun-CosyVoice3-0.5B-2512`），Kokoro 与 ZipVoice 引擎/模型/音色目录/克隆档案已从代码、
+  构建与产品中移除。删除 `VoiceEngineKind`、引擎选择器、Kokoro 官方 103 音色目录与选择器、
+  ZipVoice 克隆档案；`BotSettings.voice` 只保留 `cosyVoiceVoiceID` / `cosyVoiceEndpoint` /
+  `cosyVoiceAutoStart` / `cosyVoiceSpeed` 与转写、回复策略字段，旧 `engine` / `kokoroSpeakerID` /
+  `kokoroSpeed` / `cloneID` / `modelDownloadConsent` 键在解码时忽略、保存时不再写入。
+  回退链只剩一条：CosyVoice3 未安装 / 服务未启动 / 合成失败 → 本条改发文字，不再跨引擎回退。
+  「语音引擎与音色」面板只剩 CosyVoice3 一组行：本地服务（状态/启动/停止/重检）、运行环境与模型
+  （安装/重装/删除，约 8GB）、音色（本机音色 + 管理音色…，App 不内置音色）、语速
+  （0.5×–2.0×，默认 1.0×）、自动启动、服务地址（默认 `http://127.0.0.1:5051`，仅回环）。
+  自动启动仅在「允许语音回复」开启、该开关开启、CosyVoice3 已安装且有音色时，于启动 App /
+  打开语音面板触发，面板内仍有手动「启动」。
+- **移除 sherpa-onnx 静态依赖与 App 内模型下载（构建/数据）**：删除 `app/Sources/CSherpaOnnx`、
+  `app/Vendor/sherpa` 与 `scripts/fetch_sherpa.sh`，`swift build` 不再需要下载 112MB 静态库；
+  release 二进制由约 42MB 降至约 17MB（`.app` 约 193MB → 168MB）；
+  删除模型下载与克隆音色存储（`VoiceModelStore` / `VoiceCloneStore`）及模型下载同意
+  （`modelDownloadConsent`）与「下载全部」：App 不再下载旧引擎模型，
+  `~/Library/Application Support/WeChatAI/models/` 不再由 App 使用（CosyVoice3 使用独立的安装目录）。
+  数字/日期/电话的 `rule_fsts` 规范化属于旧引擎专属能力，已随引擎删除；语音文本清洗
+  （Markdown/emoji/URL、`[语音 Ns]` 标注、`%`→百分之、货币口语化等）仍保留。
+  文档同步更新 [`docs/voice.md`](docs/voice.md)、[`docs/cosyvoice.md`](docs/cosyvoice.md)、
+  [`docs/core-services.md`](docs/core-services.md)、[`docs/ui-design.md`](docs/ui-design.md)、
+  [`docs/install.md`](docs/install.md)、[`docs/accounts.md`](docs/accounts.md)、根 `README.md` 与本文。
+
 ## [1.8.0] — 2026-10-29
 
 ### 新增
@@ -749,7 +823,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/compare/v2.0.0...HEAD
 [1.3.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.3.0
 [1.4.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.4.0
 [1.5.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.5.0
@@ -760,6 +834,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 [1.6.2]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.6.2
 [1.7.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.7.0
 [1.8.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.8.0
+[2.0.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v2.0.0
 [1.0.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.2.0

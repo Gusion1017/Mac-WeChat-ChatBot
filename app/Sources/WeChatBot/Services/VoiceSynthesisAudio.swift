@@ -23,16 +23,17 @@ enum VoiceSynthesisAudioError: Error, LocalizedError, Equatable {
 
 // MARK: - Audio helpers
 
-/// TTS 输出/参考音频的音频处理层（spec §3.1：sherpa 24k → AVAudioConverter → 16k）。
+/// TTS 输出的音频处理层（CosyVoice3 原生 24k float → 16-bit WAV），并提供通用的
+/// 重采样/解码工具（`AVAudioConverter`）。
 ///
 /// 统一约定：
 /// - 语音合成产物是 **16 kHz 单声道 16-bit WAV**（微信 SILK 链路按 16k PCM 编码）；
 /// - 内部计算都用 float 单声道，写盘交给 `AVAudioFile`（它会按 settings 落成 16-bit PCM）；
-/// - 克隆参考音频导入时用同一个转换器做「多声道 → 单声道 + 任意采样率 → 16k」。
+/// - 任意采样率的输入音频可用同一个转换器做「多声道 → 单声道 + 重采样」。
 enum VoiceSynthesisAudio {
-    /// 输出/参考音频统一采样率。
+    /// 参考/解码音频统一采样率。
     static let targetSampleRate = 16_000
-    /// 克隆参考音频最长时长（超过会截断，避免合成前处理过长）。
+    /// 参考音频最长时长（超过会截断，避免合成前处理过长）。
     static let maxReferenceSeconds: TimeInterval = 30
 
     // MARK: 24k → 16k（TTS 主链路）
@@ -61,13 +62,13 @@ enum VoiceSynthesisAudio {
 
     // MARK: 写 WAV
 
-    /// 写 16 kHz 单声道 16-bit PCM WAV（兼容旧调用；克隆参考/单测用）。
+    /// 写 16 kHz 单声道 16-bit PCM WAV（兼容旧调用；未指定采样率时使用 16k）。
     @discardableResult
     static func writePCM16WAV(samples: [Float], to url: URL) throws -> URL {
         try writePCM16WAV(samples: samples, sampleRate: targetSampleRate, to: url)
     }
 
-    /// 按指定采样率写单声道 16-bit PCM WAV（Kokoro/ZipVoice 原生 24k 直通）。
+    /// 按指定采样率写单声道 16-bit PCM WAV（CosyVoice3 原生 24k 直通）。
     @discardableResult
     static func writePCM16WAV(samples: [Float], sampleRate: Int, to url: URL) throws -> URL {
         guard !samples.isEmpty else { throw VoiceSynthesisAudioError.emptyAudio }
@@ -109,7 +110,7 @@ enum VoiceSynthesisAudio {
         return url
     }
 
-    // MARK: 读取（克隆参考音频 / 单测）
+    // MARK: 读取（单测 / 任意输入音频）
 
     /// 读取 wav/m4a 等任意 `AVAudioFile` 支持的文件，转成 16 kHz 单声道 float。
     /// `maxSeconds != nil` 时只保留前 N 秒。

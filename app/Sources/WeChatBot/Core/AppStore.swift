@@ -110,10 +110,10 @@ final class AppStore {
     /// 本地语音转写（SpeechAnalyzer actor）；UI 查询资源状态、Runtime 调用转写。
     let voiceTranscription = VoiceTranscriptionService()
 
-    /// 本地语音合成（sherpa-onnx actor）；回复投递时按设置决定是否改用语音。
+    /// 本地语音合成（CosyVoice3 本地 HTTP 服务）；回复投递时按设置决定是否改用语音。
     let voiceSynthesis: VoiceSynthesisService
 
-    /// 音色试听：与合成服务共用引擎；两个设置入口共用一个播放器，避免同时出声。
+    /// 音色试听：直接调用同一个 CosyVoice3 服务；两个设置入口共用一个播放器，避免同时出声。
     let voicePreview: VoicePreviewController
 
     init(settings: AppSettings? = nil) {
@@ -125,9 +125,8 @@ final class AppStore {
             AccountProfile.preparePaths()
         }
         let loaded = settings ?? SettingsStore.load()
-        let synthesis = VoiceSynthesisService()
-        self.voiceSynthesis = synthesis
-        self.voicePreview = VoicePreviewController(synthesis: synthesis)
+        self.voiceSynthesis = VoiceSynthesisService()
+        self.voicePreview = VoicePreviewController()
         self.settings = loaded
         self.providers = loaded.providers
         self.personas = loaded.personas

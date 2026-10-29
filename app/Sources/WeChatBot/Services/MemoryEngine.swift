@@ -1,5 +1,59 @@
 import Foundation
 
+// MARK: - Extraction AI gate
+
+/// 记忆提取的全局并发闸门：启动补跑/历史补总结可能同时有多个会话要调用模型，
+/// 限制同时进行的提取请求数，避免一次向模型发几十个并发请求（限流/费用失控）。
+/// 普通提取与历史补总结共用（按「一次 AI 请求」占用，不是按会话）。
+private actor MemoryExtractionGate {
+    static let shared = MemoryExtractionGate(limit: 3)
+
+    private var available: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) {
+        available = max(1, limit)
+    }
+
+    func acquire() async {
+        if available > 0 {
+            available -= 1
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        if waiters.isEmpty {
+            available += 1
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
+// MARK: - Capture policy
+
+/// 哪些会话在「收到消息」时就应该有记忆卡（不再要求机器人先回复）。
+///
+/// 记忆卡以前只在生成回复时惰性创建，因此机器人不回复的群聊/私聊（平时群里
+/// 没 @ 机器人）永远没有记忆卡：消息只留在账号库，既不进 `interactions`，
+/// 也不会被批量提取。现在消息落库后由运行时按这里判定并后台建卡。
+enum MemoryCapturePolicy {
+    static func shouldCapture(conversation: Conversation, settings: AppSettings) -> Bool {
+        guard settings.bot.memorySettings.enabled else { return false }
+        let id = conversation.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, id != CharacterStore.globalConversationID else { return false }
+        guard !ConversationName.isSystemAccount(id) else { return false }
+        // 公众号/服务号没有长期记忆价值；文档约定默认不建卡。
+        if conversation.kind == .official || id.lowercased().hasPrefix("gh_") {
+            return false
+        }
+        // 用户在这个会话关闭了 AI：不再自动采集/总结。
+        return conversation.aiEnabled
+    }
+}
+
 // MARK: - MemoryEngine
 
 /// 记忆 v2 的召回、批量提取、归档、压缩与导出。
@@ -23,6 +77,9 @@ final class MemoryEngine: @unchecked Sendable {
     static let promptContentLimit = 240
     /// 提取提示词里最多引用的已有记忆条数。
     static let extractionReferenceLimit = 12
+    /// 首次维护时补总结「建卡前历史互动」的上限：只补最近这么多条，
+    /// 避免一次建卡把 5000 条历史全交给 AI（也不丢弃更早的 `interactions`）。
+    static let historyBackfillMessageLimit = 500
 
     private let characters: CharacterStore
     private let aiClient: AIClient
@@ -210,25 +267,55 @@ final class MemoryEngine: @unchecked Sendable {
     // MARK: Extraction
 
     /// 满足阈值时提取一批；返回 nil 表示没有达到批量阈值。
+    ///
+    /// - Parameter minCount: 覆盖 `extractionBatchSize` 的最低待提取条数。
+    ///   空闲兜底会传入「半批」来总结不足一批的新消息；历史补总结传 1。
     func extractIfNeeded(
         conversation: Conversation,
         provider: AIProvider?,
         settings: AppSettings,
-        now: Date = Date()
+        now: Date = Date(),
+        minCount: Int? = nil
     ) async -> MemoryMaintenanceResult? {
         let memorySettings = settings.bot.memorySettings
         guard memorySettings.enabled, !Task.isCancelled else { return nil }
+        let pendingThreshold = max(1, minCount ?? memorySettings.extractionBatchSize)
         guard let interactions = try? await characters.pendingInteractions(
             conversationID: conversation.id,
-            minCount: memorySettings.extractionBatchSize,
+            minCount: pendingThreshold,
             maxMessages: Self.maxExtractionBatch
         ), !interactions.isEmpty else {
             return nil
         }
+        return await extractBatch(
+            interactions: interactions,
+            conversation: conversation,
+            provider: provider,
+            settings: settings,
+            now: now,
+            advanceNormalCursor: true
+        )
+    }
 
+    /// 对一批互动做提取、落库与游标推进；普通提取与历史补总结共用。
+    ///
+    /// - Parameter advanceNormalCursor: true 推进普通提取游标；false 推进
+    ///   独立的「历史补总结」断点（不碰 `last_extracted_at`）。
+    /// - Parameter historyBackfill: 提示词标记为「建卡前历史」，避免把旧事件
+    ///   补成新的待办/决定。
+    private func extractBatch(
+        interactions: [CharacterInteraction],
+        conversation: Conversation,
+        provider: AIProvider?,
+        settings: AppSettings,
+        now: Date,
+        advanceNormalCursor: Bool,
+        historyBackfill: Bool = false
+    ) async -> MemoryMaintenanceResult? {
+        let memorySettings = settings.bot.memorySettings
         var result = MemoryMaintenanceResult(characterID: conversation.id)
-        result.processedInteractions = interactions.count
         var persisted = true
+        var batchInteractions = interactions
 
         let allExisting = (try? await characters.fetchMemories(conversationID: conversation.id))?
             .filter { !$0.archived && !$0.isSuperseded } ?? []
@@ -237,19 +324,30 @@ final class MemoryEngine: @unchecked Sendable {
 
         var extracted: [ExtractedMemory]?
         var usedFallback = false
-        if let provider, aiClient.hasCredential(for: provider) {
+        let hasAI = provider.map { aiClient.hasCredential(for: $0) } ?? false
+        if let provider, hasAI {
+            let prompt = Self.extractionPrompt(
+                conversation: conversation,
+                persona: settings.persona(
+                    id: conversation.personaID ?? settings.bot.defaultPersonaID),
+                existingMemories: reference,
+                interactions: interactions,
+                memoryLimit: Self.maxExtractedMemories,
+                now: now,
+                historyBackfill: historyBackfill
+            )
+            // 提示词受 6000 字预算限制：只把实际进入提示词的前缀记为已提取，
+            // 否则批尾被截断的消息会被误标成已处理。
+            let includedCount = min(max(0, prompt.includedCount), interactions.count)
+            if includedCount > 0 {
+                batchInteractions = Array(interactions.prefix(includedCount))
+            }
+            var requestProvider = provider
+            requestProvider.stream = false
+            requestProvider.maxTokens = max(provider.maxTokens, 2_000)
+            // 全局并发闸门：一次 AI 请求占一个名额，普通提取与历史补总结共用。
+            await MemoryExtractionGate.shared.acquire()
             do {
-                let prompt = Self.extractionPrompt(
-                    conversation: conversation,
-                    persona: settings.persona(
-                        id: conversation.personaID ?? settings.bot.defaultPersonaID),
-                    existingMemories: reference,
-                    interactions: interactions,
-                    memoryLimit: Self.maxExtractedMemories
-                )
-                var requestProvider = provider
-                requestProvider.stream = false
-                requestProvider.maxTokens = max(provider.maxTokens, 2_000)
                 let response = try await completion(
                     [.system(prompt.system), .user(prompt.user)],
                     requestProvider,
@@ -257,20 +355,35 @@ final class MemoryEngine: @unchecked Sendable {
                 )
                 extracted = Self.parseExtraction(response.text)
                 if extracted == nil {
-                    onLog?(.warning, "记忆提取返回无法解析，改用本地兜底（\(conversation.displayTitle)）")
+                    onLog?(.warning, "记忆提取返回无法解析（\(conversation.displayTitle)）")
                 }
             } catch {
-                onLog?(.warning, "记忆提取失败，改用本地兜底：\(error.localizedDescription)")
+                onLog?(.warning, "记忆提取失败：\(error.localizedDescription)")
             }
+            await MemoryExtractionGate.shared.release()
         }
 
         // 停止机器人/切号会取消维护任务：取消后不再写库，避免停止后仍落盘。
         guard !Task.isCancelled else { return nil }
+        result.processedInteractions = batchInteractions.count
+        // 历史补总结的记忆时间锚点 = 这批实际进入提示词的最后一条时间，不能写 now：
+        // 否则旧聊天会被记忆页与权重当成「最近/今天」，并生成过期计划。
+        let memoryTimestamp = historyBackfill
+            ? (batchInteractions.last?.timestamp ?? now)
+            : now
+
+        // 历史补总结必须由 AI 完成：没配 AI / 调用失败 / 解析失败时保留断点，
+        // 下次维护重试；不能用本地兜底把压缩旧聊天永久标记成「已总结」。
+        if historyBackfill, extracted == nil {
+            onLog?(.warning, "历史补总结等待 AI 恢复，保留断点（\(conversation.displayTitle)）")
+            return nil
+        }
+
         let effective = extracted ?? []
         if extracted == nil {
             usedFallback = true
             let fallback = Self.localFallback(
-                interactions: interactions,
+                interactions: batchInteractions,
                 characterID: conversation.id,
                 now: now
             )
@@ -281,34 +394,74 @@ final class MemoryEngine: @unchecked Sendable {
                     existing: allExisting,
                     conversationID: conversation.id,
                     settings: memorySettings,
-                    sourceMessageIDs: interactions.map(\.messageID),
-                    now: now
+                    sourceMessageIDs: batchInteractions.map(\.messageID),
+                    timestamp: memoryTimestamp
                 )
             }
         } else {
+            // 历史补总结里的「今晚/这周末」等近期计划无法保证换算正确，
+            // 统一把带近期时间词的 todo 降级为 fact：信息保留，不冒充当前待办。
+            var candidates = effective
+            var downgraded = 0
+            if historyBackfill {
+                candidates = effective.map { candidate in
+                    var value = candidate
+                    let category = HistoricalPlanHeuristics.downgradedCategory(
+                        for: candidate.category,
+                        content: candidate.content,
+                        isHistoryBackfill: true
+                    )
+                    if category != candidate.category { downgraded += 1 }
+                    value.category = category
+                    return value
+                }
+            }
+            if downgraded > 0 {
+                onLog?(.info, "历史补总结：\(downgraded) 条近期计划降级为事实（\(conversation.displayTitle)）")
+            }
             persisted = await persist(
-                candidates: effective,
+                candidates: candidates,
                 result: &result,
                 existing: allExisting,
                 conversationID: conversation.id,
                 settings: memorySettings,
-                sourceMessageIDs: interactions.map(\.messageID),
-                now: now
+                sourceMessageIDs: batchInteractions.map(\.messageID),
+                timestamp: memoryTimestamp
             )
         }
         result.usedFallback = usedFallback
 
         // 只有成功处理（含空结果/本地兜底）且落库成功才推进游标；
         // 失败时不推进，下批重试会走相似度折叠，不会重复堆积。
-        if persisted, let lastTimestamp = interactions.map(\.timestamp).max() {
-            try? await characters.markExtracted(
-                conversationID: conversation.id, through: lastTimestamp)
+        // 普通游标用本批最后一条的 `(timestamp, id)`：同一秒内被 LIMIT 截断的消息
+        // 下一批仍能续上，不会因为「本批最大时间戳」相同而永久漏掉。
+        if persisted, let last = batchInteractions.last {
+            do {
+                if advanceNormalCursor {
+                    try await characters.markExtracted(
+                        conversationID: conversation.id,
+                        through: last.timestamp,
+                        interactionID: last.id
+                    )
+                } else {
+                    try await characters.advanceHistoryBackfill(
+                        conversationID: conversation.id,
+                        through: last.timestamp,
+                        interactionID: last.id
+                    )
+                }
+                result.cursorAdvanced = true
+            } catch {
+                onLog?(.warning, "记忆提取游标推进失败：\(error.localizedDescription)")
+            }
         } else if !persisted {
             onLog?(.warning, "记忆写入失败，保留提取游标等待重试（\(conversation.displayTitle)）")
             return result
         }
 
-        if memorySettings.autoArchive {
+        // 历史补总结批次不跑归档：它们的 updated_at 是历史时间，
+        // 若历史窗口超过归档阈值，刚补出来的记忆会被立刻归档。
+        if memorySettings.autoArchive, !historyBackfill {
             result.archived = (try? await archiveStale(
                 conversationID: conversation.id,
                 settings: memorySettings,
@@ -323,6 +476,73 @@ final class MemoryEngine: @unchecked Sendable {
         return result
     }
 
+    // MARK: History backfill
+
+    /// 一次性历史补总结：把建卡前的历史互动（最近 `messageLimit` 条）按批提取成记忆。
+    ///
+    /// 背景：`ensureCharacter` 把提取游标初始化在建卡时刻，历史回填只进
+    /// `interactions`（全量记录），永远不会被 AI 总结——「平时」的群聊历史
+    /// 就是这样只存档、不形成记忆的。现在记忆卡第一次维护时：
+    ///
+    /// 1. `beginHistoryBackfill` 建立一份**独立于普通提取游标**的补总结断点，
+    ///    范围是建卡时刻之前最近 `messageLimit` 条互动；
+    /// 2. 这里按批取 `pendingHistoryBackfill`（每批 ≤40 条）并提取，
+    ///    最多补 `messageLimit` 条；普通 `last_extracted_at` 全程不动；
+    /// 3. 补完写一次性标记；中途退出保留断点，下次维护继续。
+    ///
+    /// 返回 nil 表示这张卡不需要（或已经做过）历史补总结。
+    func extractHistoryIfNeeded(
+        conversation: Conversation,
+        provider: AIProvider?,
+        settings: AppSettings,
+        now: Date = Date(),
+        messageLimit: Int = MemoryEngine.historyBackfillMessageLimit
+    ) async -> MemoryMaintenanceResult? {
+        guard settings.bot.memorySettings.enabled, !Task.isCancelled else { return nil }
+        // 历史补总结必须由 AI 完成：没有可用模型时直接跳过（断点未建立/未推进），
+        // 等模型恢复后的下一次维护再补；不能用本地兜底把旧聊天永久标记为已总结。
+        guard let provider, aiClient.hasCredential(for: provider) else {
+            onLog?(.debug, "历史补总结跳过：没有可用的 AI 凭据（\(conversation.displayTitle)）")
+            return nil
+        }
+        let limit = max(1, messageLimit)
+        guard (try? await characters.beginHistoryBackfill(
+            conversationID: conversation.id,
+            limit: limit
+        )) == true else { return nil }
+
+        var total = MemoryMaintenanceResult(characterID: conversation.id)
+        while !Task.isCancelled, total.processedInteractions < limit {
+            let remaining = limit - total.processedInteractions
+            guard let batch = try? await characters.pendingHistoryBackfill(
+                conversationID: conversation.id,
+                maxMessages: min(Self.maxExtractionBatch, max(1, remaining))
+            ) else { break }
+            guard !batch.isEmpty else {
+                // 断点之外没有再早于建卡时刻的互动：一次性补总结完成。
+                try? await characters.finishHistoryBackfill(
+                    conversationID: conversation.id)
+                break
+            }
+            guard let result = await extractBatch(
+                interactions: batch,
+                conversation: conversation,
+                provider: provider,
+                settings: settings,
+                now: now,
+                advanceNormalCursor: false,
+                historyBackfill: true
+            ) else { break }
+            total.merge(result)
+            // 落库失败/等待 AI 时游标不前进，必须停下等下次维护，避免原地重试刷 AI。
+            if !result.cursorAdvanced { break }
+        }
+        guard total.processedInteractions > 0 else { return nil }
+        onLog?(.info, "历史聊天补总结（\(conversation.displayTitle)：处理 \(total.processedInteractions) 条，"
+            + "新增 \(total.added)，合并 \(total.merged)，取代 \(total.superseded)）")
+        return total
+    }
+
     /// 把提取结果落库：同类别相似度 ≥ 阈值折叠；supersede 双方留档。
     private func persist(
         candidates: [ExtractedMemory],
@@ -331,7 +551,7 @@ final class MemoryEngine: @unchecked Sendable {
         conversationID: String,
         settings: MemorySettings,
         sourceMessageIDs: [String],
-        now: Date
+        timestamp: Date
     ) async -> Bool {
         guard !candidates.isEmpty else { return true }
         var succeeded = true
@@ -348,8 +568,8 @@ final class MemoryEngine: @unchecked Sendable {
                 importance: candidate.importance,
                 source: .extraction,
                 sourceMessageIDs: sourceMessageIDs,
-                createdAt: now,
-                updatedAt: now
+                createdAt: timestamp,
+                updatedAt: timestamp
             )
             var candidateMemory = memory
             candidateMemory.normalizeKind(threshold: settings.importanceThreshold)
@@ -378,7 +598,8 @@ final class MemoryEngine: @unchecked Sendable {
                 merged.mergeCount += 1
                 merged.sourceMessageIDs = Array(
                     Set(merged.sourceMessageIDs + sourceMessageIDs).sorted())
-                merged.updatedAt = now
+                // 不把历史记忆的 updated_at 拖回过去覆盖更新的记忆；普通提取时 timestamp≈now。
+                merged.updatedAt = max(merged.updatedAt, timestamp)
                 if merged.source != .manual && merged.source != .legacyImport {
                     merged.source = .extraction
                 }
@@ -409,10 +630,10 @@ final class MemoryEngine: @unchecked Sendable {
                     }
                     if target.isSuperseded { continue }
                     target.supersededBy = stored.id
-                    target.supersededAt = now
+                    target.supersededAt = timestamp
                     working[index] = target
                     do {
-                        try await characters.upsertMemory(target, now: now)
+                        try await characters.upsertMemory(target, now: timestamp)
                     } catch {
                         succeeded = false
                     }
@@ -425,7 +646,8 @@ final class MemoryEngine: @unchecked Sendable {
             }
 
             do {
-                try await characters.upsertMemory(stored, now: now)
+                try await characters.upsertMemory(
+                    stored, now: timestamp, preserveUpdatedAt: true)
             } catch {
                 succeeded = false
             }
@@ -536,27 +758,50 @@ final class MemoryEngine: @unchecked Sendable {
         return result
     }
 
+    /// 生成提取提示词。
+    ///
+    /// - Returns: `includedCount` 是实际写进提示词的互动条数（受 6000 字预算限制）；
+    ///   游标与 `source_message_ids` 只能推进/记录到这一条，否则批尾被截断的消息
+    ///   会被误标成已提取。
     static func extractionPrompt(
         conversation: Conversation,
         persona: Persona?,
         existingMemories: [CharacterMemory],
         interactions: [CharacterInteraction],
-        memoryLimit: Int
-    ) -> (system: String, user: String) {
+        memoryLimit: Int,
+        now: Date = Date(),
+        historyBackfill: Bool = false
+    ) -> (system: String, user: String, includedCount: Int) {
         let system = """
-        你负责维护一个微信聊天机器人的长期记忆卡。请从下面的新对话中提取值得长期记住的原子记忆。
+        你负责维护一个微信聊天机器人的长期记忆卡。请从下面给出的消息中提取值得长期记住的原子记忆。
         只输出 JSON，不要解释、不要 Markdown 代码围栏。格式：
         {"memories":[{"category":"fact|decision|todo|lesson","content":"...","importance":1-10,"keywords":["..."],"supersedes":["旧记忆 id"]}]}
         规则：
-        1. 每条 content 必须能独立理解，用中文，不超过 \(memoryContentLimit) 字；
-        2. 只记录可核实的信息：用户身份/偏好、约定与决策、未完成待办、互动经验；
-        3. 不记录群聊玩笑、临时外号、自称或「某人其实是某人」的玩梗；
-        4. 与已有记忆矛盾时用 supersedes 指向旧 id，不要改写旧记忆；没有矛盾就不填；
-        5. 已有未完成待办优先保留；已经完成或过时的待办可以不再输出；
-        6. 没有值得记录的内容时返回 {"memories":[]}；每批最多 \(memoryLimit) 条。
+        1. 每个消息行以 `[yyyy-MM-dd HH:mm]` 开头，这是消息的发送时间；「今天/明天/今晚/这周末/下周」
+           等相对时间必须按该发送时间理解，不能按当前时间或对话顺序揣测；
+        2. 每条 content 必须能独立理解，用中文，不超过 \(memoryContentLimit) 字；
+        3. 只记录可核实的信息：用户身份/偏好、约定与决策、未完成待办、互动经验；
+        4. 不记录群聊玩笑、临时外号、自称或「某人其实是某人」的玩梗；
+        5. 已经过去的事件、已经过期或完成的计划/待办不要再输出为 todo/decision；确有长期价值的
+           用 fact 以过去时客观记录（例如「当时约定…」），不要编造日期；
+        6. 与已有记忆矛盾时用 supersedes 指向旧 id，不要改写旧记忆；没有矛盾就不填；
+        7. 已有未完成待办优先保留；已经完成或过时的待办可以不再输出；
+        8. 没有值得记录的内容时返回 {"memories":[]}；每批最多 \(memoryLimit) 条。
         """
 
-        var user = "当前时间：\(Self.promptDateFormatter.string(from: Date()))\n"
+        let timestamps = interactions.map(\.timestamp)
+        let rangeStart = timestamps.min()
+        let rangeEnd = timestamps.max()
+        var user = "当前时间：\(Self.promptDateFormatter.string(from: now))\n"
+        if let rangeStart, let rangeEnd {
+            user += "消息时间范围：\(Self.promptLineDateFormatter.string(from: rangeStart))"
+                + " ~ \(Self.promptLineDateFormatter.string(from: rangeEnd))\n"
+        }
+        if historyBackfill {
+            user += "说明：以下消息是记忆卡创建之前的**历史聊天**（一次性补总结），发送时间见每行行首，"
+                + "均早于当前时间。请按每条消息的发送时间解析相对时间：已经过去的「今晚/这周末」等"
+                + "计划不要输出成当前待办或决定；仍有长期价值的用 fact 以过去时记录。\n"
+        }
         if let persona {
             let summary = persona.summary.trimmingCharacters(in: .whitespacesAndNewlines)
             let name = persona.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -574,9 +819,11 @@ final class MemoryEngine: @unchecked Sendable {
                 user += "- \(memory.id) | \(memory.category.rawValue) | \(content)\n"
             }
         }
-        user += "\n新对话（\(interactions.count) 条）：\n"
-        user += transcript(for: interactions)
-        return (system, user)
+        user += "\n对话（\(interactions.count) 条）：\n"
+        let transcriptResult = promptTranscript(
+            for: interactions, includeTimestamps: true)
+        user += transcriptResult.text
+        return (system, user, transcriptResult.includedCount)
     }
 
     private static let promptDateFormatter: DateFormatter = {
@@ -586,26 +833,42 @@ final class MemoryEngine: @unchecked Sendable {
         return formatter
     }()
 
-    static func transcript(for interactions: [CharacterInteraction]) -> String {
+    private static let promptLineDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter
+    }()
+
+    /// 提示词里的对话文本。返回实际纳入的互动条数：提示词超预算时只取前缀，
+    /// 调用方必须只把前缀记为「已提取」。
+    static func promptTranscript(
+        for interactions: [CharacterInteraction],
+        includeTimestamps: Bool
+    ) -> (text: String, includedCount: Int) {
         var lines: [String] = []
         var total = 0
+        var included = 0
         for interaction in interactions {
             let content = interaction.content
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .replacingOccurrences(of: "\n", with: " ")
             guard !content.isEmpty else { continue }
-            let who: String
-            if interaction.direction == .outgoing {
-                who = "我"
-            } else {
-                who = interaction.speakerLabel
-            }
-            let line = "\(who)：\(content)"
+            let who = interaction.direction == .outgoing ? "我" : interaction.speakerLabel
+            let prefix = includeTimestamps
+                ? "[\(Self.promptLineDateFormatter.string(from: interaction.timestamp))] "
+                : ""
+            let line = "\(prefix)\(who)：\(content)"
             guard total + line.count <= 6_000 else { break }
             lines.append(line)
             total += line.count + 1
+            included += 1
         }
-        return lines.joined(separator: "\n")
+        return (lines.joined(separator: "\n"), included)
+    }
+
+    static func transcript(for interactions: [CharacterInteraction]) -> String {
+        promptTranscript(for: interactions, includeTimestamps: false).text
     }
 
     /// 解析模型 JSON；非法返回 nil（调用方走本地兜底）。

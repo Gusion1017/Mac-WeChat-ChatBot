@@ -2,13 +2,13 @@ import AVFoundation
 import Foundation
 import Observation
 
-/// 语音试听（2026-10-27）。
+/// 语音试听（2026-10-29，随语音引擎收敛为 CosyVoice3 重写）。
 ///
-/// 与真实回复共用同一个 `VoiceSynthesisService`（同一引擎、音色、语速与 16k WAV 链路），
-/// 合成完成后在本机用 `AVAudioPlayer` 播放，不发往微信、不联网。
+/// 直接调用本机 CosyVoice3 HTTP 服务合成一句示例文本，再用 `AVAudioPlayer`
+/// 在本机播放：不发往微信、不上传音频或文本。
 ///
-/// 全局只保留一个播放器（由 `AppStore` 持有），切换音色/语速、离开页面或
-/// 再点一次即停止，避免重复试听与跨页面残留播放。
+/// 全局只保留一个播放器（由 `AppStore` 持有），切换音色/语速/服务地址、
+/// 离开页面或再点一次即停止，避免重复试听与跨页面残留播放。
 @MainActor
 @Observable
 final class VoicePreviewController {
@@ -18,23 +18,18 @@ final class VoicePreviewController {
         case playing
     }
 
-    /// 试听文本：短句，Kokoro 首次加载后约 1–3 秒可出声。
+    /// 试听文本：短句，服务热态约 1–3 秒可出声。
     static let sampleText = "你好呀，我是你的微信 AI 助手。"
-    /// 试听时长上限（远小于正式语音上限，避免误合成长文本）。
-    static let maxSeconds = 15
 
     private(set) var phase: Phase = .idle
     /// 当前正在合成/播放的音色参数（用于按钮状态与行高亮）。
     private(set) var activeVoice: VoiceSelection?
 
-    @ObservationIgnored private let synthesis: VoiceSynthesisService
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var player: AVAudioPlayer?
     @ObservationIgnored private var playerDelegate: PreviewPlayerDelegate?
 
-    init(synthesis: VoiceSynthesisService) {
-        self.synthesis = synthesis
-    }
+    init() {}
 
     /// 指定的音色是否正在合成/播放（用于避免重复点按与行高亮）。
     func isActive(_ voice: VoiceSelection) -> Bool {
@@ -43,12 +38,9 @@ final class VoicePreviewController {
     }
 
     /// 点按试听：同一个音色再次点按 → 停止；换音色 → 停止旧的再合成新的。
-    ///
-    /// - `cosyVoice`：引擎为 `.cosyVoice` 时必传（HTTP 合成需要地址/音色/语速）；
-    ///   Kokoro/ZipVoice 传 nil 走本地合成服务。
     func toggle(
         voice: VoiceSelection,
-        cosyVoice: VoicePreviewCosyVoiceOptions? = nil,
+        endpoint: URL,
         onError: (@MainActor (String) -> Void)? = nil
     ) {
         if isActive(voice) {
@@ -56,7 +48,7 @@ final class VoicePreviewController {
             return
         }
         stop()
-        start(voice: voice, cosyVoice: cosyVoice, onError: onError)
+        start(voice: voice, endpoint: endpoint, onError: onError)
     }
 
     /// 停止播放并取消尚未完成的合成。
@@ -74,7 +66,7 @@ final class VoicePreviewController {
 
     private func start(
         voice: VoiceSelection,
-        cosyVoice: VoicePreviewCosyVoiceOptions?,
+        endpoint: URL,
         onError: (@MainActor (String) -> Void)?
     ) {
         activeVoice = voice
@@ -83,35 +75,22 @@ final class VoicePreviewController {
         task = Task { [weak self] in
             guard let self else { return }
             do {
-                if voice.engine == .cosyVoice {
-                    guard let options = cosyVoice, !options.voiceID.isEmpty else {
-                        throw VoicePreviewError.cosyVoiceOptionsMissing
-                    }
-                    // CosyVoice3 直接走 HTTP 合成：拿到 24k 原始 WAV 后本地播放。
-                    let raw = try await CosyVoiceClient.shared.synthesizeRaw(
-                        text: Self.sampleText,
-                        voiceID: options.voiceID,
-                        speed: options.speed,
-                        timeout: 90,
-                        endpoint: options.endpoint
-                    )
-                    try Task.checkCancellation()
-                    guard self.activeVoice == voice else { return }
-                    guard let wavURL = raw.sourceWAVURL else {
-                        throw VoicePreviewError.cosyVoiceAudioUnavailable
-                    }
-                    try self.play(url: wavURL)
-                    return
+                guard voice.hasVoice else {
+                    throw VoicePreviewError.voiceNotSelected
                 }
-                let result = try await self.synthesis.synthesize(
+                let raw = try await CosyVoiceClient.shared.synthesizeRaw(
                     text: Self.sampleText,
-                    voice: voice,
-                    maxSeconds: Self.maxSeconds,
-                    allowsTruncation: true
+                    voiceID: voice.trimmedVoiceID,
+                    speed: voice.effectiveSpeed,
+                    timeout: 90,
+                    endpoint: endpoint
                 )
                 try Task.checkCancellation()
                 guard self.activeVoice == voice else { return }
-                try self.play(url: result.wavURL)
+                guard let wavURL = raw.sourceWAVURL else {
+                    throw VoicePreviewError.cosyVoiceAudioUnavailable
+                }
+                try self.play(url: wavURL)
             } catch is CancellationError {
                 // 用户主动停止/切换：不报错。
             } catch {
@@ -156,24 +135,17 @@ final class VoicePreviewController {
     }
 }
 
-/// CosyVoice3 试听参数（HTTP 合成不经过 `VoiceSynthesisService` 的 WAV 落盘链路）。
-struct VoicePreviewCosyVoiceOptions: Sendable, Equatable {
-    var voiceID: String
-    var endpoint: URL
-    var speed: Double
-}
-
 enum VoicePreviewError: Error, LocalizedError, Equatable {
     case playbackFailed
-    case cosyVoiceOptionsMissing
+    case voiceNotSelected
     case cosyVoiceAudioUnavailable
 
     var errorDescription: String? {
         switch self {
         case .playbackFailed:
             return "试听播放失败"
-        case .cosyVoiceOptionsMissing:
-            return "CosyVoice3 试听缺少服务地址"
+        case .voiceNotSelected:
+            return "试听前请先选择音色"
         case .cosyVoiceAudioUnavailable:
             return "CosyVoice3 试听音频写入失败"
         }

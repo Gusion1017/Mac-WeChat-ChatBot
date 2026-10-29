@@ -4,7 +4,7 @@
 > GitHub 的「Download ZIP」默认只给**源码**，不含已编译的 App、bridge 二进制和 Frida Gadget。
 > 非开发者请让发布者提供 **Releases 里的 App 压缩包**；只有源码时按「源码构建」操作。
 >
-> 当前发布版本：**1.8.0（build 20，2026-10-29）**，Releases 压缩包约 72MB。
+> 当前发布版本：**2.0.0（build 21，2026-10-29）**，Releases 压缩包约 65MB。
 
 ## 1. 先确认环境
 
@@ -17,7 +17,7 @@
 | 权限 | 安装到 `/Applications`、修改微信或移除 quarantine 时可能需要管理员密码 / Touch ID |
 | 磁盘 | 安装 Hook 会完整备份微信（约 665MB），建议预留 ≥2.5GB |
 | 源码构建 | 仅方式 B 需要 Xcode 27（含命令行工具）；方式 A 只需上面的 CLT |
-| CosyVoice3（可选） | 本地大模型旁路：额外需要 `uv`（或 conda）与 `ffmpeg`，首次安装约 8GB 磁盘（运行环境 ~2–3GB + 模型 ~5.4GB）；App 不内置音色，需自行导入参考音；不装不影响 Kokoro/ZipVoice |
+| CosyVoice3（语音引擎） | 本地大模型旁路，也是 App 唯一的 TTS 引擎：额外需要 `uv`（或 conda）与 `ffmpeg`，首次安装约 8GB 磁盘（运行环境 ~2–3GB + 模型 ~5.4GB）；App 不内置音色，需自行导入参考音；不装时语音回复自动改发文字 |
 
 > 微信版本必须**精确匹配**上表四个版本之一；不在列表时向导会提示不匹配，不要强行安装 Hook。
 > 当前安装脚本默认以 4.2.0.9 (270345) 为目标；4.2.0.5 / 4.1.15.55 / 4.1.12.53 仍在已知支持列表，
@@ -32,13 +32,13 @@
 
 ## 2. 方式 A：Releases 里的 App 压缩包（推荐给普通用户）
 
-发布者在本地构建后，把 `WeChat AI.app` 压缩上传到 GitHub Releases。当前版本 **1.8.0（约 72MB）**。
+发布者在本地构建后，把 `WeChat AI.app` 压缩上传到 GitHub Releases。当前版本 **2.0.0（约 65MB）**。
 
-1. 下载 `WeChat-AI-1.8.0.zip`（建议同时下载 `.sha256`），解压 zip，得到 `WeChat AI.app`。
+1. 下载 `WeChat-AI-2.0.0.zip`（建议同时下载 `.sha256`），解压 zip，得到 `WeChat AI.app`。
    可选校验（在下载目录执行）：
 
    ```bash
-   shasum -a 256 -c WeChat-AI-1.8.0.zip.sha256
+   shasum -a 256 -c WeChat-AI-2.0.0.zip.sha256
    ```
 
 2. 把 `WeChat AI.app` 拖到 `~/Applications`（当前用户，无需管理员）或 `/Applications`（所有用户）。
@@ -114,13 +114,12 @@ Xcode 自带 Command Line Tools，满足 Hook 的 `python3` / `otool` 依赖。
    cd ~/Downloads/WeChat-ChatBot-Mac-main   # 以实际解压目录为准
    ```
 
-3. 依次执行（首次会下载 Go 1.25、Frida devkit、sherpa-onnx 静态库与 Gadget，
-   约需数分钟和数 GB 磁盘）：
+3. 依次执行（首次会下载 Go 1.25、Frida devkit 与 Gadget，约需数分钟和数 GB 磁盘）：
 
    ```bash
    bash scripts/fetch_gadget.sh      # 下载 Frida Gadget 17.8.0（校验 SHA256）
    bash scripts/build_bridge.sh      # 构建 bridge/onebot（含 Go 测试）
-   bash scripts/build_app.sh         # 生成 dist/WeChat AI.app（缺 TTS 库时自动 fetch_sherpa）
+   bash scripts/build_app.sh         # 生成 dist/WeChat AI.app
    bash scripts/install_app.sh       # 安装到 ~/Applications（移除 quarantine 并重签）
    open "$HOME/Applications/WeChat AI.app"
    ```
@@ -133,28 +132,27 @@ Xcode 自带 Command Line Tools，满足 Hook 的 `python3` / `otool` 依赖。
 
 ## 4. 发布者：如何制作可下载的 App 压缩包
 
-当前发布版本 **1.8.0（build 20，2026-10-29）**，zip 约 **72MB**。在已具备 Xcode 27 / CLT 的机器上，
-按下面顺序构建（`build_app.sh` 会在缺库时自动下载 sherpa-onnx，但显式执行更便于定位失败）：
+当前发布版本 **2.0.0（build 21，2026-10-29）**，zip 约 **65MB**。在已具备 Xcode 27 / CLT 的机器上，
+按下面顺序构建：
 
 ```bash
 bash scripts/fetch_gadget.sh
 bash scripts/build_bridge.sh
-bash scripts/fetch_sherpa.sh
 bash scripts/build_app.sh
 bash scripts/package_release.sh      # 或 make release
 ```
 
 脚本会校验必需资源、检查签名、打包并生成 SHA256，产物：
 
-- `dist/WeChat-AI-1.8.0.zip`
-- `dist/WeChat-AI-1.8.0.zip.sha256`
+- `dist/WeChat-AI-2.0.0.zip`
+- `dist/WeChat-AI-2.0.0.zip.sha256`
 
 `package_release.sh --skip-build` 可复用 `dist/WeChat AI.app` 重新打包。也可以手动执行：
 
 ```bash
 bash scripts/build_app.sh
-/usr/bin/ditto -c -k --norsrc --keepParent "dist/WeChat AI.app" "dist/WeChat-AI-1.8.0.zip"
-( cd dist && shasum -a 256 "WeChat-AI-1.8.0.zip" > "WeChat-AI-1.8.0.zip.sha256" )
+/usr/bin/ditto -c -k --norsrc --keepParent "dist/WeChat AI.app" "dist/WeChat-AI-2.0.0.zip"
+( cd dist && shasum -a 256 "WeChat-AI-2.0.0.zip" > "WeChat-AI-2.0.0.zip.sha256" )
 ```
 
 签名与公证的预期：
@@ -170,10 +168,10 @@ bash scripts/build_app.sh
 
 ```bash
 cd dist
-shasum -a 256 -c WeChat-AI-1.8.0.zip.sha256
+shasum -a 256 -c WeChat-AI-2.0.0.zip.sha256
 ```
 
-把 zip 与 `.sha256` 上传到 GitHub **Releases**（tag 建议 `v1.8.0`），在说明里写清：
+把 zip 与 `.sha256` 上传到 GitHub **Releases**（tag 建议 `v2.0.0`），在说明里写清：
 
 - 支持 Apple Silicon / macOS 26+ / 微信 4.2.0.9、4.2.0.5、4.1.15.55 或 4.1.12.53；
 - **安装 Hook 需要 Xcode Command Line Tools**（`xcode-select --install`，无需开发者账号），
@@ -193,13 +191,13 @@ shasum -a 256 -c WeChat-AI-1.8.0.zip.sha256
 | 向导提示缺少 Command Line Tools / 安装 Hook 按钮禁用 | 点「安装 Command Line Tools」或终端执行 `xcode-select --install`，完成系统安装后点「重新检测」；完整 Xcode 亦可；不需要开发者账号。终端报 `invalid active developer path` 时执行 `sudo xcode-select -s /Library/Developer/CommandLineTools` |
 | 微信从 App Store 安装，或 `/Applications/WeChat.app` 属主是 root | Hook 需要当前用户可写 `/Applications/WeChat.app`。App Store 版路径/签名不同，建议换官网 arm64 版；属主异常时重装微信，或在明确风险后 `sudo chown -R "$USER":staff /Applications/WeChat.app`。可用 `ls -ld /Applications/WeChat.app` 检查 |
 | 打开后没有窗口 | 这是菜单栏 App（默认同时显示 Dock 图标）：**左键**单击顶部菜单栏图标开合状态面板，面板内提供「打开主窗口」、启停、设置与退出；右键 / Control-左键不执行操作。Dock 图标可在设置关闭 |
-| 换微信账号后聊天记录、记忆、会话设置会切换吗 | **会，且旧账号数据不会被删除。** App 以当前登录的微信账号为边界：聊天记录/记忆卡（角色目录）/会话设置/机器人配置/人格/定时任务/新媒体自动切到该账号自己的档案（`~/Library/Application Support/WeChatAI/accounts/<wxid>/`）；AI 通道/Keychain/Hook/OneBot/语音模型/崩溃与 bridge 日志仍全局共享。升级旧版时会把旧单库复制到旧 `settings.onebot.self_id` 所属账号（只 copy 不删，旧媒体保留），因此升级后需要**切回原微信账号**才能看到旧聊天。运行中换号会停止机器人、提示后需手动重新启动；App 不提供手动选库。未登录时数据先写 `_unassigned`，登录后自动认领。详见 [`accounts.md`](accounts.md) |
+| 换微信账号后聊天记录、记忆、会话设置会切换吗 | **会，且旧账号数据不会被删除。** App 以当前登录的微信账号为边界：聊天记录/记忆卡（角色目录）/会话设置/机器人配置/人格/定时任务/新媒体自动切到该账号自己的档案（`~/Library/Application Support/WeChatAI/accounts/<wxid>/`）；AI 通道/Keychain/Hook/OneBot/CosyVoice3 安装与音色/崩溃与 bridge 日志仍全局共享。升级旧版时会把旧单库复制到旧 `settings.onebot.self_id` 所属账号（只 copy 不删，旧媒体保留），因此升级后需要**切回原微信账号**才能看到旧聊天。运行中换号会停止机器人、提示后需手动重新启动；App 不提供手动选库。未登录时数据先写 `_unassigned`，登录后自动认领。详见 [`accounts.md`](accounts.md) |
 | 微信版本不匹配 | 已知支持 4.2.0.9 (270345) / 4.2.0.5 (270341) / 4.1.15.55 (270135) / 4.1.12.53 (269365)；用 `/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/WeChat.app/Contents/Info.plist` 与 `:CFBundleVersion` 核对。其他版本需自行适配、用 `WECHAT_SUPPORTED_VERSION`/`WECHAT_SUPPORTED_BUILD` 覆盖或还原，**不要强装** |
 | 图片/语音获取失败，或 `image_path` 检测失败 | 检查 系统设置 → 隐私与安全性 → App 数据 中是否允许 WeChat AI；拒绝授权会导致这些功能失败。修改微信时可能还需要「App 管理」授权 |
 | 安装 Hook 后微信打不开 | 先完全退出微信，再用 App 的「设置 → Hook → 还原官方微信」或 `bash tools/manage_wechat.sh restore` 还原 |
 | 发送不出去 / 一直排队 | 确认「R3 原生发送」开关已开；首次或微信重启后在本机微信手动发一条消息（语音再发一条语音）捕获句柄；bridge 启动 60 秒内 CdnManager 未就绪时先等待或用图片触发恢复 |
 | 端口被占用（58080 / 27042） | `lsof -nP -iTCP:58080 -sTCP:LISTEN` 与 `lsof -nP -iTCP:27042 -sTCP:LISTEN` 查看占用进程；退出冲突 App，或在「设置 → OneBot」改端口后重启 bridge。27042 是 Gadget 注入端口，只允许一个微信实例 |
-| 语音模型下载失败 | 确认已勾选同意、网络与代理可用、磁盘足够（模型合计约 528MB），然后重试；失败会自动降级文字，不影响文本回复。系统中文语音资源缺失时可在 系统设置 → 辅助功能 → 朗读内容 下载，或点「机器人 → 语音」的「下载中文语音资源」 |
+| 语音回复没有声音 / 只收到文字 | 语音回复的唯一引擎是 CosyVoice3：先在「机器人 → 语音 → 语音引擎与音色」确认「运行环境与模型」已安装、本地服务已启动、已选择音色；未安装/服务未启动/合成失败时该条会自动改发文字。系统中文语音资源缺失时可在 系统设置 → 辅助功能 → 朗读内容 下载，或点「机器人 → 语音」的「下载中文语音资源」 |
 | 从源码构建报 `swift: command not found` | 安装 Xcode 27 并执行 `sudo xcode-select -s /Applications/Xcode.app`；只装 CLT 不足以源码构建（Hook 安装只需要 CLT） |
 
 > 换微信账号前不需要备份或重装 Hook；账号数据按微信账号自动归档。首次升级建议先备份

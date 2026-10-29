@@ -280,7 +280,7 @@ struct MemoryView: View {
             Button(L("创建记忆卡")) { performCreateMissingCards() }
             Button(L("取消"), role: .cancel) {}
         } message: {
-            Text(L("将为还没有记忆卡的现有微信会话创建空记忆卡，不会提取旧聊天；之后可在各角色中导入旧记忆。"))
+            Text(L("将为还没有记忆卡的现有微信会话创建记忆卡；建卡后会自动补总结最近一批旧聊天（最多 500 条），更早的历史仍可在各角色中导入旧记忆。"))
         }
     }
 
@@ -353,7 +353,7 @@ struct MemoryView: View {
                         .foregroundStyle(Theme.accent)
                     Text(L("还没有记忆卡"))
                         .font(.caption.weight(.semibold))
-                    Text(L("机器人为某个会话生成第一次回复后会自动创建。"))
+                    Text(L("机器人收到消息后会自动创建（系统会话、公众号、关闭 AI 的会话除外）。"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -860,7 +860,7 @@ struct MemoryView: View {
                 EmptyState(
                     symbol: "brain.head.profile",
                     title: "还没有记忆卡",
-                    message: "机器人为某个会话生成第一次回复后会自动创建记忆卡，之后每批维护把聊天内容提取成原子记忆。",
+                    message: "机器人收到消息后会自动创建记忆卡（系统会话、公众号、关闭 AI 的会话除外），之后每批维护把聊天内容提取成原子记忆；首次维护还会补总结最近一批历史聊天。",
                     actionTitle: "刷新"
                 ) {
                     refresh()

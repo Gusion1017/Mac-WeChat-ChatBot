@@ -4,10 +4,10 @@ import XCTest
 @testable import WeChatAI
 
 /// CosyVoice3 App 侧集成（2026-10-27）：
-/// - `VoiceSettings`/`VoiceEngineKind` 的 Codable 兼容（旧 JSON 缺键走默认）；
+/// - `VoiceSettings` 的 Codable 兼容（旧 JSON 缺键走默认、已移除的引擎键被忽略）；
 /// - `CosyVoiceClient` 的 health/voices/tts（URLProtocol 注入）与 WAV 解码；
 /// - 安装器 `PROGRESS` 解析、安装/取消/删除状态机（本地 fake 脚本 + 临时目录）；
-/// - 启动器健康轮询（注入 fake 时钟/探测/进程）与回退计划。
+/// - 启动器健康轮询（注入 fake 时钟/探测/进程）与引擎可用性判定。
 final class CosyVoiceTests: XCTestCase {
     override func setUp() {
         super.setUp()
@@ -34,36 +34,41 @@ final class CosyVoiceTests: XCTestCase {
         XCTAssertEqual(settings.cosyVoiceSpeed, 1.0, accuracy: 0.0001)
         XCTAssertEqual(settings.effectiveCosyVoiceSpeed, 1.0, accuracy: 0.0001)
         XCTAssertEqual(settings.effectiveCosyVoiceEndpoint.absoluteString, "http://127.0.0.1:5051")
-        XCTAssertFalse(settings.usesCosyVoice)
-        // Kokoro 默认语速改为 1.25（三档快捷的中间档）。
-        XCTAssertEqual(settings.kokoroSpeed, 1.25, accuracy: 0.0001)
-        XCTAssertEqual(settings.effectiveKokoroSpeed, 1.25, accuracy: 0.0001)
         // 语音回复默认跳过拟人化延迟。
         XCTAssertTrue(settings.skipHumanizeDelayForVoiceReply)
     }
 
     func testLegacyVoiceSettingsJSONWithoutNewKeysUsesDefaults() throws {
-        // 旧 config.json 的 voice 段：只有 Kokoro 相关键，没有 cosyVoice*。
+        // 旧 config.json 的 voice 段：只有 Kokoro/ZipVoice/引擎选择相关的键，
+        // 没有 cosyVoice*。这些键已随引擎移除：解码时忽略，重新编码时不再写回。
         let json = """
         {
           "engine": "kokoro",
           "kokoroSpeakerID": 7,
           "kokoroSpeed": 1.5,
+          "cloneID": "old-clone",
+          "modelDownloadConsent": true,
           "replyEnabled": true,
           "replyProbability": 0.4
         }
         """.data(using: .utf8)!
         let settings = try JSONDecoder().decode(VoiceSettings.self, from: json)
-        XCTAssertEqual(settings.engine, .kokoro)
-        XCTAssertEqual(settings.kokoroSpeakerID, 7)
-        XCTAssertEqual(settings.kokoroSpeed, 1.5, accuracy: 0.0001)
         XCTAssertTrue(settings.replyEnabled)
+        XCTAssertEqual(settings.replyProbability, 0.4, accuracy: 0.0001)
         XCTAssertEqual(settings.cosyVoiceVoiceID, "", "旧配置缺键时不能默认 girl")
         XCTAssertEqual(settings.effectiveCosyVoiceVoiceID, "")
         XCTAssertEqual(settings.cosyVoiceEndpoint, "http://127.0.0.1:5051")
         XCTAssertTrue(settings.cosyVoiceAutoStart)
         XCTAssertEqual(settings.cosyVoiceSpeed, 1.0, accuracy: 0.0001)
         XCTAssertTrue(settings.skipHumanizeDelayForVoiceReply, "旧配置缺键时默认跳过拟人化延迟")
+
+        let encoded = try JSONEncoder().encode(settings)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        for removedKey in ["engine", "kokoroSpeakerID", "kokoroSpeed", "cloneID",
+                           "modelDownloadConsent"] {
+            XCTAssertNil(object[removedKey], "已移除的配置键不应再写入：\(removedKey)")
+        }
     }
 
     func testCosyVoiceSettingsRoundTripAndClamp() throws {
@@ -77,7 +82,6 @@ final class CosyVoiceTests: XCTestCase {
         }
         """.data(using: .utf8)!
         let settings = try JSONDecoder().decode(VoiceSettings.self, from: json)
-        XCTAssertEqual(settings.engine, .cosyVoice)
         XCTAssertEqual(settings.cosyVoiceVoiceID, "loli")
         XCTAssertEqual(settings.effectiveCosyVoiceVoiceID, "loli")
         XCTAssertEqual(settings.cosyVoiceSpeed, 2.0, accuracy: 0.0001, "语速必须收敛到 0.5–2.0")
@@ -87,29 +91,25 @@ final class CosyVoiceTests: XCTestCase {
 
         let encoded = try JSONEncoder().encode(settings)
         let decoded = try JSONDecoder().decode(VoiceSettings.self, from: encoded)
-        XCTAssertEqual(decoded.engine, .cosyVoice)
         XCTAssertEqual(decoded.effectiveCosyVoiceVoiceID, "loli")
         XCTAssertEqual(decoded.effectiveCosyVoiceEndpoint.absoluteString, "http://127.0.0.1:6060")
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: encoded) as? [String: Any])
-        XCTAssertEqual(object["engine"] as? String, "cosyvoice")
+        XCTAssertNil(object["engine"], "引擎选择已移除，不再写入")
         XCTAssertNotNil(object["cosyVoiceVoiceID"])
         XCTAssertNotNil(object["cosyVoiceEndpoint"])
         XCTAssertEqual(object["cosyVoiceAutoStart"] as? Bool, false)
     }
 
-    func testEngineRawValueAndUnknownEngineFallback() throws {
-        XCTAssertEqual(VoiceEngineKind.cosyVoice.rawValue, "cosyvoice")
-        XCTAssertEqual(VoiceEngineKind.cosyVoice.displayName, "CosyVoice3")
-        XCTAssertEqual(VoiceEngineKind.allCases.count, 3)
-        // 历史引擎值仍可解码。
-        let legacy = try JSONDecoder().decode(
-            VoiceEngineKind.self, from: Data(#""zipvoiceClone""#.utf8))
-        XCTAssertEqual(legacy, .zipvoiceClone)
-        // 未知引擎回退默认 Kokoro（由 VoiceSettings 自定义 Codable 负责）。
-        let unknown = Data(#"{"engine":"whisper-tts"}"#.utf8)
-        let settings = try JSONDecoder().decode(VoiceSettings.self, from: unknown)
-        XCTAssertEqual(settings.engine, .kokoro)
+    func testLegacyEngineValuesAreIgnored() throws {
+        // 历史引擎值（kokoro / zipvoiceClone / cosyvoice / 未知值）不再有对应类型：
+        // 解码时忽略该键，CosyVoice3 是唯一引擎。
+        for legacy in ["kokoro", "zipvoiceClone", "cosyvoice", "whisper-tts"] {
+            let json = Data(#"{"engine":"\#(legacy)","cosyVoiceVoiceID":"loli"}"#.utf8)
+            let settings = try JSONDecoder().decode(VoiceSettings.self, from: json)
+            XCTAssertEqual(settings.cosyVoiceVoiceID, "loli", "legacy=\(legacy)")
+            XCTAssertEqual(settings.effectiveCosyVoiceVoiceID, "loli", "legacy=\(legacy)")
+        }
     }
 
     func testInvalidCosyVoiceEndpointFallsBackToDefault() {
@@ -196,47 +196,28 @@ final class CosyVoiceTests: XCTestCase {
         XCTAssertEqual(list.voices[1].description, "")
     }
 
-    func testFallbackPlanner() {
-        // CosyVoice 就绪：先 Cosy，再 Kokoro 兜底。
-        XCTAssertEqual(
-            VoiceFallbackPlanner.attempts(
-                for: .cosyVoice, cosyVoiceInstalled: true,
-                cosyVoiceServiceReady: true, kokoroReady: true, zipvoiceReady: false),
-            [.cosyVoice, .kokoro])
-        // 服务未运行：直接回退 Kokoro。
-        XCTAssertEqual(
-            VoiceFallbackPlanner.attempts(
-                for: .cosyVoice, cosyVoiceInstalled: true,
-                cosyVoiceServiceReady: false, kokoroReady: true, zipvoiceReady: false),
-            [.kokoro])
-        // 服务未运行且 Kokoro 也没下载：文字。
-        XCTAssertEqual(
-            VoiceFallbackPlanner.attempts(
-                for: .cosyVoice, cosyVoiceInstalled: true,
-                cosyVoiceServiceReady: false, kokoroReady: false, zipvoiceReady: false),
-            [.text])
-        // 未安装：文字（UI 引导安装），不静默改发 Kokoro。
-        XCTAssertEqual(
-            VoiceFallbackPlanner.attempts(
-                for: .cosyVoice, cosyVoiceInstalled: false,
-                cosyVoiceServiceReady: true, kokoroReady: true, zipvoiceReady: false),
-            [.text])
-        // 其他引擎保持原行为。
-        XCTAssertEqual(
-            VoiceFallbackPlanner.attempts(
-                for: .kokoro, cosyVoiceInstalled: true,
-                cosyVoiceServiceReady: true, kokoroReady: true, zipvoiceReady: false),
-            [.kokoro])
-        XCTAssertEqual(
-            VoiceFallbackPlanner.attempts(
-                for: .kokoro, cosyVoiceInstalled: false,
-                cosyVoiceServiceReady: false, kokoroReady: false, zipvoiceReady: true),
-            [.text])
-        XCTAssertEqual(
-            VoiceFallbackPlanner.attempts(
-                for: .zipvoiceClone, cosyVoiceInstalled: false,
-                cosyVoiceServiceReady: false, kokoroReady: true, zipvoiceReady: true),
-            [.zipvoiceClone])
+    func testVoiceEngineAvailability() {
+        // CosyVoice3 是唯一引擎：安装 + 服务就绪 + 已选音色才可合成，否则直接改发文字。
+        XCTAssertTrue(
+            VoiceEngineAvailability.canSynthesize(
+                cosyVoiceInstalled: true,
+                cosyVoiceServiceReady: true,
+                hasVoice: true))
+        XCTAssertFalse(
+            VoiceEngineAvailability.canSynthesize(
+                cosyVoiceInstalled: false,
+                cosyVoiceServiceReady: true,
+                hasVoice: true))
+        XCTAssertFalse(
+            VoiceEngineAvailability.canSynthesize(
+                cosyVoiceInstalled: true,
+                cosyVoiceServiceReady: false,
+                hasVoice: true))
+        XCTAssertFalse(
+            VoiceEngineAvailability.canSynthesize(
+                cosyVoiceInstalled: true,
+                cosyVoiceServiceReady: true,
+                hasVoice: false))
     }
 
     func testDecideVoiceReplyUsesModelsReady() {
@@ -988,10 +969,20 @@ final class CosyVoiceTests: XCTestCase {
             voicesDirectory: fixture, client: client, serviceReady: { true })
         let audio = try makeAudioFile(
             in: FileManager.default.temporaryDirectory, seconds: 6, amplitude: 0.5)
-        addTeardownBlock { try? FileManager.default.removeItem(at: audio) }
+        let audio2 = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 7, amplitude: 0.4)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: audio)
+            try? FileManager.default.removeItem(at: audio2)
+        }
         do {
+            // 多条参考音频新增失败时，manifest 与整个音色目录（含 refs/）都要回滚。
             _ = try await store.add(
-                name: "重载失败", audioURL: audio, referenceText: "",
+                name: "重载失败",
+                references: [
+                    .newAudio(audio, text: "A"),
+                    .newAudio(audio2, text: "B"),
+                ],
                 description: "")
             XCTFail("服务 reload 失败应回滚并抛错")
         } catch let error as CosyVoiceVoiceStoreError {
@@ -1006,6 +997,8 @@ final class CosyVoiceTests: XCTestCase {
         XCTAssertEqual(listed.map(\.id), ["girl", "loli", "onee"])
         XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: fixture.path)
             .contains { $0.hasPrefix("custom-") })
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: fixture.appendingPathComponent("refs").path))
     }
 
     func testVoiceStoreManifestFallbackScansDirectories() async throws {
@@ -1034,7 +1027,8 @@ final class CosyVoiceTests: XCTestCase {
             .compactMap { $0["id"] as? String } ?? []
         XCTAssertEqual(Set(ids), Set(["girl", "loli", "onee", added.id]),
                        "manifest 缺失时应从目录扫描重建，而不是丢掉内置音色")
-        XCTAssertEqual(manifest["version"] as? Int, 1)
+        XCTAssertEqual(manifest["version"] as? Int, 2,
+                       "重建后的清单带 references，版本应为 v2")
     }
 
     func testVoiceStoreAddAndUpdateWithoutConsentKeepsPersonalUse() async throws {
@@ -1255,6 +1249,662 @@ final class CosyVoiceTests: XCTestCase {
             CosyVoiceVoiceStore.exportDestination(
                 alreadyZip, defaultFileName: "fallback.zip").lastPathComponent,
             "backup.ZIP")
+    }
+
+    // MARK: - 6.7 多条参考音频（1–5 条）
+
+    func testVoiceStoreAddMultipleReferenceClips() async throws {
+        let fixture = try makeVoicesFixture()
+        addTeardownBlock { try? FileManager.default.removeItem(at: fixture) }
+        let store = makeVoiceStore(voicesDirectory: fixture)
+        let first = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 6, amplitude: 0.4)
+        let second = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 7, amplitude: 0.5)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+
+        let added = try await store.add(
+            name: "多条参考音色",
+            references: [
+                .newAudio(first, text: "  A  "),
+                .newAudio(second, text: "B"),
+            ],
+            description: "两条参考音频"
+        )
+        XCTAssertEqual(added.referenceCount, 2)
+        XCTAssertEqual(added.referenceText, "A\nB")
+        XCTAssertEqual(added.mode, CosyVoiceManagedVoice.modeZeroShot)
+        XCTAssertEqual(added.duration ?? 0, 13.25, accuracy: 0.05)
+
+        let fileManager = FileManager.default
+        let directory = fixture.appendingPathComponent(added.id)
+        let refsDirectory = directory.appendingPathComponent("refs")
+        for number in 1...2 {
+            XCTAssertTrue(
+                fileManager.fileExists(atPath: refsDirectory
+                    .appendingPathComponent("ref-\(number).wav").path),
+                "缺少 ref-\(number).wav")
+            XCTAssertTrue(
+                fileManager.fileExists(atPath: refsDirectory
+                    .appendingPathComponent("ref-\(number).txt").path),
+                "缺少 ref-\(number).txt")
+        }
+        XCTAssertEqual(
+            try String(
+                contentsOf: refsDirectory.appendingPathComponent("ref-1.txt"),
+                encoding: .utf8),
+            "A")
+        XCTAssertEqual(
+            try String(
+                contentsOf: refsDirectory.appendingPathComponent("ref-2.txt"),
+                encoding: .utf8),
+            "B")
+        XCTAssertEqual(
+            try String(
+                contentsOf: directory.appendingPathComponent("prompt.txt"),
+                encoding: .utf8),
+            "A\nB")
+
+        // 合并 prompt = 6 + 7 + 0.25（片段间静音）。
+        let prompt = try CosyVoiceWAVDecoder.decode(
+            try Data(contentsOf: directory.appendingPathComponent("prompt.wav")))
+        XCTAssertEqual(prompt.sampleRate, 24_000)
+        XCTAssertEqual(prompt.channels, 1)
+        XCTAssertEqual(prompt.duration, 13.25, accuracy: 0.15)
+        let firstRef = try CosyVoiceWAVDecoder.decode(
+            try Data(contentsOf: refsDirectory.appendingPathComponent("ref-1.wav")))
+        XCTAssertEqual(firstRef.duration, 6.0, accuracy: 0.1)
+
+        // voices.json：references 相对 voices 目录 + 保留兼容字段。
+        let manifest = try readJSONObject(fixture.appendingPathComponent("voices.json"))
+        XCTAssertEqual(manifest["version"] as? Int, 2, "写出 references 后清单版本应为 v2")
+        let entry = try XCTUnwrap(
+            (manifest["voices"] as? [[String: Any]])?
+                .first { ($0["id"] as? String) == added.id })
+        let manifestReferences = try XCTUnwrap(entry["references"] as? [[String: Any]])
+        XCTAssertEqual(manifestReferences.count, 2)
+        XCTAssertEqual(
+            manifestReferences.compactMap { $0["audio"] as? String },
+            ["\(added.id)/refs/ref-1.wav", "\(added.id)/refs/ref-2.wav"])
+        XCTAssertEqual(manifestReferences.compactMap { $0["text"] as? String }, ["A", "B"])
+        XCTAssertEqual(entry["prompt_wav"] as? String, "\(added.id)/prompt.wav")
+        XCTAssertEqual(entry["prompt_text"] as? String, "A\nB")
+        XCTAssertEqual(entry["mode"] as? String, CosyVoiceManagedVoice.modeZeroShot)
+
+        // meta.json：references 相对音色目录。
+        let meta = try readJSONObject(directory.appendingPathComponent("meta.json"))
+        let metaReferences = try XCTUnwrap(meta["references"] as? [[String: Any]])
+        XCTAssertEqual(
+            metaReferences.compactMap { $0["audio"] as? String },
+            ["refs/ref-1.wav", "refs/ref-2.wav"])
+        XCTAssertEqual(meta["reference_text"] as? String, "A\nB")
+        XCTAssertEqual(meta["duration"] as? Double ?? 0, 13.25, accuracy: 0.05)
+
+        // list() 读回。
+        let listed = try await store.voice(id: added.id)
+        let voice = try XCTUnwrap(listed)
+        XCTAssertEqual(voice.referenceCount, 2)
+        XCTAssertEqual(voice.referenceText, "A\nB")
+        XCTAssertEqual(voice.mode, CosyVoiceManagedVoice.modeZeroShot)
+        XCTAssertEqual(voice.duration ?? 0, 13.25, accuracy: 0.15)
+        XCTAssertEqual(voice.references.map(\.text), ["A", "B"])
+    }
+
+    func testVoiceStoreMultipleReferencesCrossLingual() async throws {
+        let fixture = try makeVoicesFixture()
+        addTeardownBlock { try? FileManager.default.removeItem(at: fixture) }
+        let store = makeVoiceStore(voicesDirectory: fixture)
+        let first = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 6, amplitude: 0.4)
+        let second = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 7, amplitude: 0.5)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+
+        let added = try await store.add(
+            name: "跨语种多条",
+            references: [
+                .newAudio(first, text: ""),
+                .newAudio(second, text: "   "),
+            ],
+            description: "",
+            crossLingual: true
+        )
+        XCTAssertEqual(added.mode, CosyVoiceManagedVoice.modeCrossLingual)
+        XCTAssertEqual(added.referenceText, "")
+        let directory = fixture.appendingPathComponent(added.id)
+        XCTAssertEqual(
+            try String(
+                contentsOf: directory.appendingPathComponent("prompt.txt"),
+                encoding: .utf8),
+            "")
+        XCTAssertEqual(
+            try String(
+                contentsOf: directory.appendingPathComponent("refs/ref-1.txt"),
+                encoding: .utf8),
+            "")
+
+        // cross-lingual 下文本不参与合成：部分填写也允许，模式仍为 cross_lingual。
+        let mixed = try await store.add(
+            name: "跨语种混合",
+            references: [
+                .newAudio(first, text: "A"),
+                .newAudio(second, text: ""),
+            ],
+            description: "",
+            crossLingual: true
+        )
+        XCTAssertEqual(mixed.mode, CosyVoiceManagedVoice.modeCrossLingual)
+        XCTAssertEqual(mixed.referenceText, "A")
+    }
+
+    func testVoiceStoreMultipleReferenceValidation() async throws {
+        let fixture = try makeVoicesFixture()
+        addTeardownBlock { try? FileManager.default.removeItem(at: fixture) }
+        let store = makeVoiceStore(voicesDirectory: fixture)
+        let audio = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 6, amplitude: 0.4)
+        let longAudio = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 25, amplitude: 0.4)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: audio)
+            try? FileManager.default.removeItem(at: longAudio)
+        }
+
+        do {
+            _ = try await store.add(name: "零条", references: [], description: "")
+            XCTFail("0 条参考音频应被拒绝")
+        } catch let error as CosyVoiceVoiceStoreError {
+            guard case .missingReferences = error else {
+                return XCTFail("错误类型不对：\(error)")
+            }
+        }
+        do {
+            let tooMany = Array(
+                repeating: CosyVoiceReferenceInput.newAudio(audio, text: "A"), count: 6)
+            _ = try await store.add(name: "六条", references: tooMany, description: "")
+            XCTFail("6 条参考音频应被拒绝")
+        } catch let error as CosyVoiceVoiceStoreError {
+            guard case .tooManyReferences(let max) = error else {
+                return XCTFail("错误类型不对：\(error)")
+            }
+            XCTAssertEqual(max, 5)
+        }
+        do {
+            _ = try await store.add(
+                name: "部分文本",
+                references: [
+                    .newAudio(audio, text: "A"),
+                    .newAudio(audio, text: "  "),
+                ],
+                description: ""
+            )
+            XCTFail("部分填写参考文本应被拒绝")
+        } catch let error as CosyVoiceVoiceStoreError {
+            guard case .inconsistentReferenceText = error else {
+                return XCTFail("错误类型不对：\(error)")
+            }
+        }
+        do {
+            let tooLong = Array(
+                repeating: CosyVoiceReferenceInput.newAudio(longAudio, text: "A"), count: 3)
+            _ = try await store.add(name: "总长过长", references: tooLong, description: "")
+            XCTFail("合并总时长 75.5 秒应被拒绝")
+        } catch let error as CosyVoiceVoiceStoreError {
+            guard case .referenceTotalTooLong(let seconds) = error else {
+                return XCTFail("错误类型不对：\(error)")
+            }
+            XCTAssertEqual(seconds, 75.5, accuracy: 0.2)
+        }
+        // CosyVoice3 speech tokenizer 硬限制 30s：6 + 25 + 0.25 = 31.25s 也必须拒绝。
+        do {
+            _ = try await store.add(
+                name: "超过 30 秒",
+                references: [
+                    .newAudio(audio, text: "A"),
+                    .newAudio(longAudio, text: "B"),
+                ],
+                description: ""
+            )
+            XCTFail("合并总时长 31.25 秒应被拒绝（CosyVoice3 参考音上限 30s）")
+        } catch let error as CosyVoiceVoiceStoreError {
+            guard case .referenceTotalTooLong(let seconds) = error else {
+                return XCTFail("错误类型不对：\(error)")
+            }
+            XCTAssertEqual(seconds, 31.25, accuracy: 0.2)
+        }
+
+        let single = try await store.add(
+            name: "合法单条", audioURL: audio, referenceText: "A", description: "")
+        let outside = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 6, amplitude: 0.5)
+        addTeardownBlock { try? FileManager.default.removeItem(at: outside) }
+        do {
+            _ = try await store.update(
+                id: single.id,
+                references: [.existing(id: "evil", audioPath: "../evil.wav", text: "A")])
+            XCTFail("逃逸音色目录的片段路径应被拒绝")
+        } catch let error as CosyVoiceVoiceStoreError {
+            guard case .invalidReference(let reason) = error else {
+                return XCTFail("错误类型不对：\(error)")
+            }
+            XCTAssertTrue(reason.contains("音色目录"), "reason=\(reason)")
+        }
+        do {
+            _ = try await store.update(
+                id: single.id,
+                references: [.existing(id: "outside", audioPath: outside.path, text: "A")])
+            XCTFail("音色目录外的绝对路径应被拒绝")
+        } catch let error as CosyVoiceVoiceStoreError {
+            guard case .invalidReference = error else {
+                return XCTFail("错误类型不对：\(error)")
+            }
+        }
+
+        // 失败的校验不应留下音色。
+        let listed = try await store.list()
+        XCTAssertEqual(listed.map(\.id).prefix(3), ["girl", "loli", "onee"])
+        XCTAssertEqual(listed.count, 4, "只有「合法单条」被写入，其余校验失败不能落盘")
+    }
+
+    func testVoiceStoreUpdateReplacesReferenceClips() async throws {
+        let fixture = try makeVoicesFixture()
+        addTeardownBlock { try? FileManager.default.removeItem(at: fixture) }
+        let store = makeVoiceStore(voicesDirectory: fixture)
+        let first = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 6, amplitude: 0.4)
+        let second = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 7, amplitude: 0.5)
+        let replacement = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 8, amplitude: 0.6)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+            try? FileManager.default.removeItem(at: replacement)
+        }
+
+        let added = try await store.add(
+            name: "替换片段",
+            references: [
+                .newAudio(first, text: "A"),
+                .newAudio(second, text: "B"),
+            ],
+            description: "")
+        do {
+            _ = try await store.update(id: added.id, referenceText: "X")
+            XCTFail("多条参考音频时旧入口应拒绝")
+        } catch let error as CosyVoiceVoiceStoreError {
+            guard case .invalidReference(let reason) = error else {
+                return XCTFail("错误类型不对：\(error)")
+            }
+            XCTAssertTrue(reason.contains("多条参考音频"), "reason=\(reason)")
+        }
+
+        let loaded = try await store.voice(id: added.id)
+        let current = try XCTUnwrap(loaded)
+        XCTAssertEqual(current.referenceCount, 2)
+        let preservedPath = try XCTUnwrap(current.references.first?.audioPath)
+        let updated = try await store.update(
+            id: added.id,
+            name: "替换片段 2",
+            references: [
+                .existing(id: current.references[0].id, audioPath: preservedPath, text: "A"),
+                .newAudio(replacement, text: "C"),
+            ],
+            crossLingual: false
+        )
+        XCTAssertEqual(updated.name, "替换片段 2")
+        XCTAssertEqual(updated.referenceCount, 2)
+        XCTAssertEqual(updated.referenceText, "A\nC")
+        XCTAssertEqual(updated.duration ?? 0, 14.25, accuracy: 0.05)
+
+        let directory = fixture.appendingPathComponent(added.id)
+        let refsDirectory = directory.appendingPathComponent("refs")
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: refsDirectory.path).sorted(),
+            ["ref-1.txt", "ref-1.wav", "ref-2.txt", "ref-2.wav"])
+        XCTAssertEqual(
+            try String(
+                contentsOf: refsDirectory.appendingPathComponent("ref-2.txt"),
+                encoding: .utf8),
+            "C")
+        XCTAssertEqual(
+            try String(
+                contentsOf: directory.appendingPathComponent("prompt.txt"),
+                encoding: .utf8),
+            "A\nC")
+        let prompt = try CosyVoiceWAVDecoder.decode(
+            try Data(contentsOf: directory.appendingPathComponent("prompt.wav")))
+        XCTAssertEqual(prompt.duration, 14.25, accuracy: 0.15)
+
+        // 2 条 → 1 条：ref-2 被清理，prompt.txt 只剩该条文本。
+        let reloaded = try await store.voice(id: added.id)
+        let latest = try XCTUnwrap(reloaded)
+        let keptPath = try XCTUnwrap(latest.references.first?.audioPath)
+        let single = try await store.update(
+            id: added.id,
+            references: [.existing(
+                id: latest.references[0].id, audioPath: keptPath, text: "A")],
+            crossLingual: nil
+        )
+        XCTAssertEqual(single.referenceCount, 1)
+        XCTAssertEqual(single.referenceText, "A")
+        XCTAssertEqual(single.mode, CosyVoiceManagedVoice.modeZeroShot,
+                       "文本非空时按文本推断为 zero_shot")
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: refsDirectory.path).sorted(),
+            ["ref-1.txt", "ref-1.wav"])
+        XCTAssertEqual(
+            try String(
+                contentsOf: directory.appendingPathComponent("prompt.txt"),
+                encoding: .utf8),
+            "A")
+        let singlePrompt = try CosyVoiceWAVDecoder.decode(
+            try Data(contentsOf: directory.appendingPathComponent("prompt.wav")))
+        XCTAssertEqual(singlePrompt.duration, 6.0, accuracy: 0.15)
+
+        let manifest = try readJSONObject(fixture.appendingPathComponent("voices.json"))
+        let entry = try XCTUnwrap(
+            (manifest["voices"] as? [[String: Any]])?
+                .first { ($0["id"] as? String) == added.id })
+        XCTAssertEqual((entry["references"] as? [[String: Any]])?.count, 1)
+        XCTAssertEqual(entry["prompt_text"] as? String, "A")
+    }
+
+    func testVoiceStoreLoadsLegacyVoiceAsSingleReferenceAndRenameKeepsAudio() async throws {
+        let fixture = try makeVoicesFixture()
+        addTeardownBlock { try? FileManager.default.removeItem(at: fixture) }
+        let store = makeVoiceStore(voicesDirectory: fixture)
+        let girlDirectory = fixture.appendingPathComponent("girl")
+        let promptBefore = try Data(
+            contentsOf: girlDirectory.appendingPathComponent("prompt.wav"))
+
+        let loaded = try await store.voice(id: "girl")
+        let voice = try XCTUnwrap(loaded)
+        XCTAssertEqual(voice.referenceCount, 1)
+        XCTAssertEqual(voice.referenceText, "内置参考文本 girl。")
+        let audioPath = try XCTUnwrap(voice.references.first?.audioPath)
+        XCTAssertEqual(
+            URL(fileURLWithPath: audioPath).standardizedFileURL,
+            girlDirectory.appendingPathComponent("prompt.wav").standardizedFileURL,
+            "旧音色的唯一片段应指向 prompt.wav")
+
+        // 只改名：不重写音频、不迁移 refs/。
+        let renamed = try await store.update(id: "girl", name: "少女·改名")
+        XCTAssertEqual(renamed.referenceCount, 1)
+        XCTAssertEqual(renamed.referenceText, "内置参考文本 girl。")
+        XCTAssertEqual(
+            try Data(contentsOf: girlDirectory.appendingPathComponent("prompt.wav")),
+            promptBefore,
+            "只改名不应重写参考音频")
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: girlDirectory.appendingPathComponent("refs").path),
+            "只改名不应迁移到 refs/ 布局")
+        let manifest = try readJSONObject(fixture.appendingPathComponent("voices.json"))
+        XCTAssertEqual(manifest["version"] as? Int, 1, "旧清单未迁移时应保持原版本")
+    }
+
+    func testVoiceStoreParsesReferenceEntriesAndSkipsInvalidClips() async throws {
+        let fixture = try makeVoicesFixture()
+        addTeardownBlock { try? FileManager.default.removeItem(at: fixture) }
+        let store = makeVoiceStore(voicesDirectory: fixture)
+        let first = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 6, amplitude: 0.4)
+        let second = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 7, amplitude: 0.5)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+        let added = try await store.add(
+            name: "清单解析",
+            references: [
+                .newAudio(first, text: "A"),
+                .newAudio(second, text: "B"),
+            ],
+            description: "")
+
+        func rewriteReferences(_ transform: (inout [[String: Any]]) -> Void) throws {
+            let url = fixture.appendingPathComponent("voices.json")
+            var manifest = try readJSONObject(url)
+            var entries = try XCTUnwrap(manifest["voices"] as? [[String: Any]])
+            let index = try XCTUnwrap(
+                entries.firstIndex { ($0["id"] as? String) == added.id })
+            var references = try XCTUnwrap(
+                entries[index]["references"] as? [[String: Any]])
+            transform(&references)
+            entries[index]["references"] = references
+            manifest["voices"] = entries
+            let data = try JSONSerialization.data(
+                withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url, options: .atomic)
+        }
+
+        try rewriteReferences { $0[1]["audio"] = "../escape.wav" }
+        let parsedOne = try await store.voice(id: added.id)
+        let one = try XCTUnwrap(parsedOne)
+        XCTAssertEqual(one.referenceCount, 1, "逃逸路径的片段应被跳过")
+        XCTAssertEqual(one.referenceText, "A")
+
+        try rewriteReferences {
+            $0[0]["audio"] = "../escape.wav"
+            $0[1]["audio"] = "\(added.id)/refs/missing-ref.wav"
+        }
+        let parsedFallback = try await store.voice(id: added.id)
+        let fallback = try XCTUnwrap(parsedFallback)
+        XCTAssertEqual(fallback.referenceCount, 1, "全部片段失效时回退旧 prompt")
+        XCTAssertEqual(fallback.referenceText, "A\nB", "回退时使用条目 prompt_text")
+        let fallbackPath = try XCTUnwrap(fallback.references.first?.audioPath)
+        XCTAssertEqual(URL(fileURLWithPath: fallbackPath).lastPathComponent, "prompt.wav")
+    }
+
+    func testVoiceStoreScanDirectoriesReadsRefsLayout() async throws {
+        let fixture = try makeVoicesFixture()
+        addTeardownBlock { try? FileManager.default.removeItem(at: fixture) }
+        try FileManager.default.removeItem(at: fixture.appendingPathComponent("voices.json"))
+        let store = makeVoiceStore(voicesDirectory: fixture)
+
+        let id = "custom-scan-refs"
+        let directory = fixture.appendingPathComponent(id)
+        let refsDirectory = directory.appendingPathComponent("refs")
+        try FileManager.default.createDirectory(
+            at: refsDirectory, withIntermediateDirectories: true)
+        _ = try makeAudioFile(
+            in: refsDirectory, seconds: 6, amplitude: 0.4, fileName: "ref-1.wav")
+        try Data("片段一".utf8)
+            .write(to: refsDirectory.appendingPathComponent("ref-1.txt"))
+        _ = try makeAudioFile(
+            in: refsDirectory, seconds: 7, amplitude: 0.5, fileName: "ref-2.wav")
+        let meta: [String: Any] = [
+            "id": id,
+            "name": "扫描音色",
+            "description": "",
+            "mode": "zero_shot",
+            "duration": 13.25,
+            "source": "app-import",
+            "references": [
+                ["audio": "refs/ref-1.wav", "text": "片段一"],
+                ["audio": "refs/ref-2.wav", "text": "片段二"],
+            ],
+        ]
+        let metaData = try JSONSerialization.data(
+            withJSONObject: meta, options: [.prettyPrinted, .sortedKeys])
+        try metaData.write(to: directory.appendingPathComponent("meta.json"))
+
+        // 无 prompt.wav 也能展示（hasPromptWAV=false）；ref-2 文本从 meta 兜底。
+        let voices = try await store.list()
+        let parsed = try XCTUnwrap(voices.first { $0.id == id })
+        XCTAssertEqual(parsed.referenceCount, 2)
+        XCTAssertEqual(parsed.referenceText, "片段一\n片段二")
+        XCTAssertEqual(parsed.mode, CosyVoiceManagedVoice.modeZeroShot)
+        XCTAssertEqual(parsed.duration ?? 0, 13.25, accuracy: 0.05)
+        XCTAssertFalse(parsed.hasPromptWAV, "prompt.wav 缺失时仍可展示但不应报告可用")
+
+        // 补上 prompt.wav 后 hasPromptWAV 恢复。
+        _ = try makeAudioFile(
+            in: directory, seconds: 6, amplitude: 0.4, fileName: "prompt.wav")
+        let refreshedVoice = try await store.voice(id: id)
+        let refreshed = try XCTUnwrap(refreshedVoice)
+        XCTAssertTrue(refreshed.hasPromptWAV)
+    }
+
+    func testVoiceStoreExportsMultipleReferences() async throws {
+        let fixture = try makeVoicesFixture()
+        addTeardownBlock { try? FileManager.default.removeItem(at: fixture) }
+        let store = makeVoiceStore(voicesDirectory: fixture)
+        let first = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 6, amplitude: 0.4)
+        let second = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 7, amplitude: 0.5)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+        let added = try await store.add(
+            name: "导出多条参考音",
+            references: [
+                .newAudio(first, text: "A"),
+                .newAudio(second, text: "B"),
+            ],
+            description: "两条参考音频")
+        let directory = fixture.appendingPathComponent(added.id)
+        let manifestBefore = try Data(contentsOf: fixture.appendingPathComponent("voices.json"))
+        let directoryBefore = try FileManager.default.contentsOfDirectory(
+            atPath: directory.path).sorted()
+
+        let destination = Self.makeTempDirectory()
+        addTeardownBlock { try? FileManager.default.removeItem(at: destination) }
+        let result = try await store.exportVoice(id: added.id, to: destination)
+        let entries = try zipEntries(result.zipURL)
+        for expected in [
+            "\(added.id)/prompt.wav", "\(added.id)/prompt.txt",
+            "\(added.id)/refs/ref-1.wav", "\(added.id)/refs/ref-1.txt",
+            "\(added.id)/refs/ref-2.wav", "\(added.id)/refs/ref-2.txt",
+            "\(added.id)/meta.json", "\(added.id)/voice.json",
+            "\(added.id)/README.txt", "export.json",
+        ] {
+            XCTAssertTrue(entries.contains(expected), "zip 缺少 \(expected)，实际：\(entries)")
+        }
+        let voiceJSON = try JSONSerialization.jsonObject(
+            with: try readZipEntry(result.zipURL, path: "\(added.id)/voice.json"))
+            as? [String: Any]
+        XCTAssertEqual(voiceJSON?["reference_count"] as? Int, 2)
+        let meta = try JSONSerialization.jsonObject(
+            with: try readZipEntry(result.zipURL, path: "\(added.id)/meta.json"))
+            as? [String: Any]
+        let references = try XCTUnwrap(meta?["references"] as? [[String: Any]])
+        XCTAssertEqual(references.count, 2)
+        XCTAssertEqual(
+            references.compactMap { $0["audio"] as? String },
+            ["refs/ref-1.wav", "refs/ref-2.wav"])
+        XCTAssertEqual(meta?["reference_text"] as? String, "A\nB")
+        XCTAssertEqual(meta?["prompt_text"] as? String, "A\nB")
+        let readme = String(
+            data: try readZipEntry(result.zipURL, path: "\(added.id)/README.txt"),
+            encoding: .utf8) ?? ""
+        XCTAssertTrue(readme.contains("refs/"), "README 应说明 refs/ 内容")
+        XCTAssertTrue(readme.contains("多条参考音频"), "README 应说明多条参考音频")
+
+        // 导出不修改原目录/manifest。
+        XCTAssertEqual(
+            try Data(contentsOf: fixture.appendingPathComponent("voices.json")),
+            manifestBefore)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(),
+            directoryBefore)
+    }
+
+    func testVoiceStoreExportLegacyVoiceKeepsOriginalLayout() async throws {
+        let fixture = try makeVoicesFixture()
+        addTeardownBlock { try? FileManager.default.removeItem(at: fixture) }
+        let store = makeVoiceStore(voicesDirectory: fixture)
+        let legacyID = "custom-legacy-layout"
+        try makeLegacyCustomVoice(
+            in: fixture, id: legacyID, name: "旧布局音色", text: "旧参考文本")
+
+        let destination = Self.makeTempDirectory()
+        addTeardownBlock { try? FileManager.default.removeItem(at: destination) }
+        let result = try await store.exportVoice(id: legacyID, to: destination)
+        let entries = try zipEntries(result.zipURL)
+        XCTAssertTrue(entries.contains("\(legacyID)/prompt.wav"))
+        XCTAssertTrue(entries.contains("\(legacyID)/prompt.txt"))
+        XCTAssertTrue(entries.contains("\(legacyID)/meta.json"))
+        XCTAssertFalse(entries.contains { $0.contains("/refs/") },
+                       "旧音色导出不应包含 refs/：\(entries)")
+        let voiceJSON = try JSONSerialization.jsonObject(
+            with: try readZipEntry(result.zipURL, path: "\(legacyID)/voice.json"))
+            as? [String: Any]
+        XCTAssertEqual(voiceJSON?["reference_count"] as? Int, 1)
+        let meta = try JSONSerialization.jsonObject(
+            with: try readZipEntry(result.zipURL, path: "\(legacyID)/meta.json"))
+            as? [String: Any]
+        XCTAssertNil(meta?["references"])
+        XCTAssertEqual(meta?["reference_text"] as? String, "旧参考文本")
+    }
+
+    func testVoiceStoreUpdateReloadFailureRollsBack() async throws {
+        let fixture = try makeVoicesFixture()
+        addTeardownBlock { try? FileManager.default.removeItem(at: fixture) }
+        let store = makeVoiceStore(voicesDirectory: fixture)
+        let audio = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 6, amplitude: 0.4)
+        let replacement = try makeAudioFile(
+            in: FileManager.default.temporaryDirectory, seconds: 7, amplitude: 0.5)
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: audio)
+            try? FileManager.default.removeItem(at: replacement)
+        }
+        let added = try await store.add(
+            name: "更新回滚", references: [.newAudio(audio, text: "A")], description: "")
+        let directory = fixture.appendingPathComponent(added.id)
+        let refsDirectory = directory.appendingPathComponent("refs")
+        let manifestBefore = try Data(contentsOf: fixture.appendingPathComponent("voices.json"))
+        let promptBefore = try Data(contentsOf: directory.appendingPathComponent("prompt.wav"))
+        let promptTextBefore = try Data(
+            contentsOf: directory.appendingPathComponent("prompt.txt"))
+        let refsBefore = try FileManager.default.contentsOfDirectory(
+            atPath: refsDirectory.path).sorted()
+
+        FakeCosyVoiceURLProtocol.setHandler { _ in
+            .http(status: 500, body: Data(#"{"error":"reload_failed","detail":"boom"}"#.utf8),
+                  headers: ["Content-Type": "application/json"])
+        }
+        let failingStore = CosyVoiceVoiceStore(
+            voicesDirectory: fixture, client: makeClient(), serviceReady: { true })
+        do {
+            _ = try await failingStore.update(
+                id: added.id,
+                references: [.newAudio(replacement, text: "B")],
+                crossLingual: false)
+            XCTFail("服务 reload 失败应回滚并抛错")
+        } catch let error as CosyVoiceVoiceStoreError {
+            guard case .reloadFailed = error else {
+                return XCTFail("错误类型不对：\(error)")
+            }
+        }
+
+        XCTAssertEqual(
+            try Data(contentsOf: fixture.appendingPathComponent("voices.json")),
+            manifestBefore, "manifest 必须逐字节回滚")
+        XCTAssertEqual(
+            try Data(contentsOf: directory.appendingPathComponent("prompt.wav")),
+            promptBefore, "合并 prompt 必须回滚")
+        XCTAssertEqual(
+            try Data(contentsOf: directory.appendingPathComponent("prompt.txt")),
+            promptTextBefore)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: refsDirectory.path).sorted(),
+            refsBefore, "refs/ 必须回滚")
+        let listed = try await store.voice(id: added.id)
+        let voice = try XCTUnwrap(listed)
+        XCTAssertEqual(voice.referenceCount, 1)
+        XCTAssertEqual(voice.referenceText, "A")
     }
 
     func testVoiceOldResponseDefaultsPersonalAndBuiltin() throws {
@@ -1741,6 +2391,43 @@ final class CosyVoiceTests: XCTestCase {
             withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: directory.appendingPathComponent("voices.json"), options: .atomic)
         return directory
+    }
+
+    /// 旧布局（只有 prompt.wav/prompt.txt、manifest 无 references）的自定义音色。
+    private func makeLegacyCustomVoice(
+        in fixture: URL,
+        id: String,
+        name: String,
+        text: String
+    ) throws {
+        let directory = fixture.appendingPathComponent(id)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        _ = try makeAudioFile(
+            in: directory, seconds: 6, amplitude: 0.4, fileName: "prompt.wav")
+        try Data(text.utf8)
+            .write(to: directory.appendingPathComponent("prompt.txt"))
+        try Data(#"{"id":"\#(id)","name":"\#(name)","mode":"zero_shot"}"#.utf8)
+            .write(to: directory.appendingPathComponent("meta.json"))
+        let manifestURL = fixture.appendingPathComponent("voices.json")
+        var manifest = try readJSONObject(manifestURL)
+        var entries = (manifest["voices"] as? [[String: Any]]) ?? []
+        entries.append([
+            "id": id,
+            "name": name,
+            "description": "",
+            "prompt_wav": "\(id)/prompt.wav",
+            "prompt_text": text,
+            "mode": "zero_shot",
+            "personal_use_only": true,
+            "builtin": false,
+            "duration": 6.0,
+            "source": "app-import",
+        ])
+        manifest["voices"] = entries
+        let data = try JSONSerialization.data(
+            withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: manifestURL, options: .atomic)
     }
 
     /// 生成指定时长/幅度的 16k mono WAV（store 内部会转 24k）。

@@ -1,13 +1,15 @@
-# CosyVoice3 本地旁路（devtools）
+# CosyVoice3 本地 TTS（devtools）
 
-Fun-CosyVoice3-0.5B-2512 的本地推理运行时与 HTTP sidecar。**仓库不提供任何音色或参考音频**，
-用户需在 App 的「语音 → CosyVoice3 → 管理音色」中导入自己的 5–30s 参考音。
+Fun-CosyVoice3-0.5B-2512 的本地推理运行时与 HTTP sidecar，也是 App 唯一的语音引擎。
+**仓库不提供任何音色或参考音频**，用户需在 App 的「语音 → 语音引擎与音色 → 管理音色…」中
+导入自己的 5–30s 参考音。
 
 ```
 devtools/cosyvoice/
   server.py           # FastAPI/uvicorn 服务：预加载模型，/health /voices /voices/reload /tts（24k WAV）
                       # 零音色可启动（ready + /voices 空 + /tts 400 no_voices）
   CONTRACT.md         # HTTP 契约（App 对接以此为准）
+  test_server.py      # 音色元数据解析单测（标准库 unittest，无 torch/fastapi 依赖）
   patch_repo.py       # 幂等打上游 macOS 补丁（modelscope/pyworld 惰性导入、flow 步数可配置）
   bench.py            # smoke / 本机音色样音 / 性能基准
   perf.py             # 性能探针：CPU/MPS(hybrid)、flow 步数、LLM/flow/hift 分项
@@ -23,7 +25,7 @@ scripts/run_cosyvoice.sh --wait-health       # 启动并等 /health 就绪（人
 scripts/run_cosyvoice.sh --require-voices    # 零音色直接报错退出（默认只警告并继续）
 ```
 
-**分发边界**：App 安装包**不内置音色**，也不包含参考音频、`prompt.txt` 或 `voices.json`。
+**分发边界**：App 安装包**不内置音色**，也不包含参考音频、`prompt.txt`、`refs/` 或 `voices.json`。
 普通用户安装后 `voices/` 为空、服务零音色启动（`/voices` 空、`/tts` 400 `no_voices`），
 在 App 音色管理添加后 `POST /voices/reload` 即可生效。
 
@@ -47,7 +49,8 @@ scripts/run_cosyvoice.sh --require-voices    # 零音色直接报错退出（默
 | CPU + flow 4 步（`COSYVOICE_FLOW_STEPS=4`，速度优先） | 6.5s | 1.50 |
 | MPS hybrid（llm+flow GPU） | 7.1s | 1.43 |
 
-结论：**不是实时 TTS**，适合高质量/离线生成；实时聊天默认仍用 Kokoro。
+结论：**不是实时 TTS**，适合高质量/离线生成；它也是 App 唯一的语音引擎，合成不可用时该条回复
+自动改发文字。
 MPS 只在 flow 上有收益（2.8x），LLM 放 MPS 反而更慢；hift 有 `float64` + `torch.stft` 限制只能留 CPU。
 ASR 复核 flow 4/6/8/10 步输出文本一致。
 
@@ -67,7 +70,12 @@ ASR 复核 flow 4/6/8/10 步输出文本一致。
 
 ## 音色与重载
 
-- `/voices` 每个音色带 `personal_use_only`（默认 `true`，内部元数据）、`builtin`、`source` 字段。
+- `/voices` 每个音色带 `personal_use_only`（默认 `true`，内部元数据）、`builtin`、`source`、
+  `reference_count`（参考音频条数，1–5）字段。
+- **多条参考音频（v2）**：一个音色可保存 1–5 条参考音频（每条 5–30s，合并总时长 ≤30s）。
+  服务端**不做运行时拼接**：App 保存时按顺序合并为单条 `prompt.wav`（片段间 0.25s 静音），
+  文本用 `\n` 连接写入 `prompt.txt`；`refs/ref-N.wav|txt` 只是原始片段的 authoring 副本，
+  `/tts` 始终只读合并后的 `prompt.wav`。旧音色（无 `refs/`、无 `references`）视为 1 条。
 - 服务只做本机合成，不提供网络导出/打包接口；App 可在本机导出自定义音色做备份。
 - 新增音色：放 `voices/custom-<name>/prompt.wav` + `prompt.txt`，在 `voices.json` 追加条目
   （`id` 自定义、`personal_use_only` 默认 true、`builtin` 默认 false），然后
@@ -87,6 +95,9 @@ _local/cosyvoice/venv/bin/python devtools/cosyvoice/bench.py voices --device cpu
 # 性能探针：flow 步数扫描
 COSYVOICE_FLOW_STEPS=6 _local/cosyvoice/venv/bin/python devtools/cosyvoice/perf.py \
   --mode cpu --steps 10,8,6,4 --chars 20 --runs 2
+
+# 服务端音色元数据单测（标准库 unittest，无 torch/fastapi/numpy 依赖）
+python3 devtools/cosyvoice/test_server.py
 ```
 
 ## 目录（运行时数据，均 gitignore）
@@ -94,6 +105,9 @@ COSYVOICE_FLOW_STEPS=6 _local/cosyvoice/venv/bin/python devtools/cosyvoice/perf.
 ```
 _local/cosyvoice/
   venv/  repo/  models/Fun-CosyVoice3-0.5B-2512/
-  voices/<id>/{prompt.wav,prompt.txt,meta.json} + voices.json
+  voices/<id>/{prompt.wav,prompt.txt,meta.json,refs/ref-*.wav,refs/ref-*.txt} + voices.json
   bench/  samples/  logs/  .installed
 ```
+
+`prompt.wav` / `prompt.txt` 是合并后的合成用 prompt，`refs/` 是多条参考音频的原始片段
+（编辑/导出/回放用，服务端不读取）。

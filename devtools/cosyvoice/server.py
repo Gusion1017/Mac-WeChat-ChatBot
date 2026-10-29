@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"  # 1.1.0：/voices 增加 reference_count（音色参考音频条数）
 MAX_TEXT_CHARS = 500
 MAX_INSTRUCT_CHARS = 200
 MIN_SPEED = 0.5
@@ -48,6 +48,11 @@ DEFAULT_PORT = 5051
 DEFAULT_MODEL_NAME = "Fun-CosyVoice3-0.5B-2512"
 # 内置音色 id；其余（custom-* / 用户新增）builtin=false
 BUILTIN_VOICE_IDS = ("girl", "loli", "onee")
+# v2 音色布局：`<id>/prompt.wav` 是 App 合并出的合成用 prompt，原始参考片段在 `<id>/refs/` 下。
+# 服务端不做运行时音频拼接，只在元数据里统计 reference_count，合成仍然只读 prompt.wav。
+REFERENCE_DIR_NAME = "refs"
+# references 条目里可接受的音频路径键（`audio`/`audio_path` 二选一，兼容旧写法 `prompt_wav`）
+REFERENCE_AUDIO_KEYS = ("audio", "audio_path", "prompt_wav")
 
 # CosyVoice3 的“系统提示”前缀：官方 example.py 里 zero_shot / cross_lingual /
 # instruct 三种用法都要求带上它 + <|endofprompt|>，否则质量明显下降。
@@ -151,6 +156,9 @@ class Voice:
     builtin: bool = True
     # 可选来源说明（用户原创/授权自某个 TTS 声线等），仅供元数据展示
     source: str = ""
+    # v2：该音色保存的参考音频条数（旧音色/无 references = 1）。仅元数据展示：
+    # 合成仍只用合并后的 prompt_wav，服务端不做多条参考音的运行时拼接。
+    reference_count: int = 1
 
     @property
     def effective_prompt_text(self) -> str:
@@ -166,6 +174,8 @@ class Voice:
             "description": self.description,
             "mode": self.mode,
             "duration_s": round(self.duration_s, 2),
+            # 参考音频条数（v2 元数据；旧音色/无 references = 1）。合成仍只用 prompt_wav。
+            "reference_count": max(1, int(self.reference_count or 1)),
             "has_prompt_text": bool(self.prompt_text.strip()),
             # 个人使用 / 来源标记（App 只读展示，服务不提供导出/分发）
             "personal_use_only": bool(self.personal_use_only),
@@ -174,56 +184,166 @@ class Voice:
         }
 
 
+def _resolve_manifest_path(raw: Any, base_dir: Path) -> Optional[Path]:
+    """解析清单里的路径：支持绝对路径与相对 base_dir；空值/非法值返回 None。"""
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    try:
+        path = Path(value)
+        if not path.is_absolute():
+            path = base_dir / path
+        return path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _is_relative_to(path: Path, directory: Path) -> bool:
+    """path 是否位于 directory 之内（两者的 resolve 结果）。"""
+    try:
+        path.relative_to(directory)
+        return True
+    except ValueError:
+        return False
+
+
+def _reference_audio_path(ref: Any, voices_root: Path, voice_id: str, index: int) -> Optional[Path]:
+    """取一条 references 条目的有效音频路径；无效（缺失/越界/不存在）返回 None。"""
+    if not isinstance(ref, dict):
+        log.warning("音色 %s 的第 %d 条参考音频不是对象（跳过）", voice_id, index)
+        return None
+    raw = next((ref[key] for key in REFERENCE_AUDIO_KEYS if ref.get(key)), None)
+    if raw is None:
+        log.warning("音色 %s 的第 %d 条参考音频缺少路径（audio/audio_path，跳过）", voice_id, index)
+        return None
+    path = _resolve_manifest_path(raw, voices_root)
+    if path is None:
+        log.warning("音色 %s 的第 %d 条参考音频路径无效：%r（跳过）", voice_id, index, raw)
+        return None
+    if not _is_relative_to(path, voices_root):
+        log.warning("音色 %s 的第 %d 条参考音频不在 voices 目录内：%s（跳过）", voice_id, index, path)
+        return None
+    if not path.is_file():
+        log.warning("音色 %s 的第 %d 条参考音频不存在：%s（跳过）", voice_id, index, path)
+        return None
+    return path
+
+
+def _manifest_reference_count(refs: Any, voices_root: Path, voice_id: str) -> int:
+    """voices.json 条目的参考音频条数：无 references / 全部无效时按 1 条。"""
+    if refs is None:
+        return 1
+    if not isinstance(refs, list):
+        log.warning("音色 %s 的 references 不是数组（按 1 条参考音处理）", voice_id)
+        return 1
+    valid = 0
+    for index, ref in enumerate(refs, 1):
+        if _reference_audio_path(ref, voices_root, voice_id, index) is not None:
+            valid += 1
+    if valid == 0:
+        if refs:
+            log.warning("音色 %s 的 references 没有有效参考音频（回退为 1 条）", voice_id)
+        return 1
+    return valid
+
+
+def _scan_reference_count(voice_dir: Path, voices_root: Path) -> int:
+    """目录扫描兜底：统计 `<id>/refs/ref-*.wav`（文件需存在且仍在 voices 目录内）。"""
+    refs_dir = voice_dir / REFERENCE_DIR_NAME
+    if not refs_dir.is_dir():
+        return 0
+    count = 0
+    for child in sorted(refs_dir.iterdir()):
+        if not child.name.startswith("ref-") or child.suffix.lower() != ".wav":
+            continue
+        try:
+            resolved = child.resolve()
+        except (OSError, RuntimeError):
+            continue
+        if not child.is_file() or not _is_relative_to(resolved, voices_root):
+            continue
+        count += 1
+    return count
+
+
+def _voice_from_manifest_entry(item: Any, voices_root: Path) -> Optional[Voice]:
+    """把一条 voices.json 条目转成 Voice；不可用时记录 warning 并返回 None。"""
+    if not isinstance(item, dict):
+        log.warning("voices.json 里有非对象条目（跳过）：%r", item)
+        return None
+    voice_id = str(item.get("id") or "").strip()
+    if not voice_id:
+        log.warning("voices.json 里有缺少 id 的条目（跳过）")
+        return None
+    has_references = isinstance(item.get("references"), list) and bool(item["references"])
+    wav = _resolve_manifest_path(item.get("prompt_wav"), voices_root)
+    if wav is None or not wav.is_file():
+        if has_references:
+            # 有 references 但合成用的合并 prompt 缺失：宁可跳过，也不要拿错误的单片段 prompt 合成。
+            log.warning("音色 %s 有 references 但合并 prompt.wav 缺失：%s（跳过该音色）",
+                        voice_id, item.get("prompt_wav") or "<未填写>")
+        else:
+            log.warning("音色 %s 的参考音不存在：%s（跳过）", voice_id,
+                        item.get("prompt_wav") or "<未填写>")
+        return None
+    duration, rate, channels = read_wav_info(wav)
+    return Voice(
+        id=voice_id,
+        name=str(item.get("name") or voice_id),
+        description=str(item.get("description") or ""),
+        prompt_wav=wav,
+        prompt_text=str(item.get("prompt_text") or ""),
+        mode=str(item.get("mode") or ("zero_shot" if item.get("prompt_text") else "cross_lingual")),
+        duration_s=duration,
+        sample_rate=rate,
+        channels=channels,
+        # 缺省：personal_use_only=true；builtin 仅 girl/loli/onee
+        personal_use_only=bool(item.get("personal_use_only", True)),
+        builtin=bool(item.get("builtin", voice_id in BUILTIN_VOICE_IDS)),
+        source=str(item.get("source") or ""),
+        reference_count=_manifest_reference_count(item.get("references"), voices_root, voice_id),
+    )
+
+
 def load_voices(voices_dir: Path, strict_manifest: bool = False) -> List[Voice]:
     """读取音色。
 
-    优先 `voices.json`（安装脚本生成，字段见 CONTRACT.md），否则扫描子目录：
+    优先 `voices.json`（安装脚本/App 生成，字段见 CONTRACT.md），否则扫描子目录：
     每个子目录里必须有 `prompt.wav`；`prompt.txt` 存在则作为参考文本。
+
+    多条参考音频（v2 布局 `<id>/refs/ref-*.wav`）只影响元数据：`Voice.reference_count`
+    用于 `/voices` 展示；服务端**不做运行时音频拼接**，合成仍只用合并后的 `prompt.wav`。
+    旧条目没有 `references` 时按 1 条处理。
 
     `strict_manifest=True`（/voices/reload 用）时，manifest 解析失败直接抛错，
     避免把「清单写坏了」静默降级成目录扫描（音色名/描述会丢）；启动加载仍宽松，
     保证服务能起来。
     """
     voices: List[Voice] = []
-    manifest = voices_dir / "voices.json"
+    voices_root = voices_dir.resolve()
+    manifest = voices_root / "voices.json"
     if manifest.is_file():
         try:
             data = json.loads(manifest.read_text(encoding="utf-8"))
             entries = data.get("voices", data) if isinstance(data, dict) else data
+            if not isinstance(entries, list):
+                raise ValueError("voices.json 顶层应为数组，或包含 voices 数组的对象")
             for item in entries:
-                wav = Path(item["prompt_wav"])
-                if not wav.is_absolute():
-                    wav = voices_dir / wav
-                if not wav.is_file():
-                    log.warning("音色 %s 的参考音不存在：%s（跳过）", item.get("id"), wav)
-                    continue
-                duration, rate, channels = read_wav_info(wav)
-                voice_id = str(item["id"])
-                voices.append(Voice(
-                    id=voice_id,
-                    name=str(item.get("name") or voice_id),
-                    description=str(item.get("description") or ""),
-                    prompt_wav=wav,
-                    prompt_text=str(item.get("prompt_text") or ""),
-                    mode=str(item.get("mode") or ("zero_shot" if item.get("prompt_text") else "cross_lingual")),
-                    duration_s=duration,
-                    sample_rate=rate,
-                    channels=channels,
-                    # 缺省：personal_use_only=true；builtin 仅 girl/loli/onee
-                    personal_use_only=bool(item.get("personal_use_only", True)),
-                    builtin=bool(item.get("builtin", voice_id in BUILTIN_VOICE_IDS)),
-                    source=str(item.get("source") or ""),
-                ))
+                voice = _voice_from_manifest_entry(item, voices_root)
+                if voice is not None:
+                    voices.append(voice)
             log.info("从 voices.json 载入 %d 个音色", len(voices))
             return voices
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 解析失败按既有策略回退/抛错
             if strict_manifest:
                 raise EngineError(f"解析 {manifest} 失败：{exc}") from exc
             log.error("解析 %s 失败（回退到目录扫描）：%s", manifest, exc)
 
-    if not voices_dir.is_dir():
+    if not voices_root.is_dir():
         return voices
-    for child in sorted(voices_dir.iterdir()):
+    for child in sorted(voices_root.iterdir()):
         if not child.is_dir() or child.name.startswith("."):
             continue
         wav = child / "prompt.wav"
@@ -232,7 +352,10 @@ def load_voices(voices_dir: Path, strict_manifest: bool = False) -> List[Voice]:
         text = ""
         text_file = child / "prompt.txt"
         if text_file.is_file():
-            text = text_file.read_text(encoding="utf-8").strip()
+            try:
+                text = text_file.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                log.warning("读取 %s 失败：%s（按无参考文本处理）", text_file, exc)
         duration, rate, channels = read_wav_info(wav)
         voices.append(Voice(
             id=child.name,
@@ -246,6 +369,8 @@ def load_voices(voices_dir: Path, strict_manifest: bool = False) -> List[Voice]:
             channels=channels,
             personal_use_only=True,
             builtin=child.name in BUILTIN_VOICE_IDS,
+            # 目录扫描兜底：refs/ref-*.wav 存在时按实际条数计，否则旧音色 = 1 条
+            reference_count=max(1, _scan_reference_count(child, voices_root)),
         ))
     order = {"girl": 0, "loli": 1, "onee": 2}
     voices.sort(key=lambda v: (order.get(v.id, 99), v.id))
@@ -371,6 +496,10 @@ class Engine:
                 voice.cached = True
                 reused += 1
                 continue
+            if voice.duration_s > 30.0:
+                # CosyVoice3 speech tokenizer 的硬限制：>30s 的 prompt 无法提取 speech token。
+                log.warning("音色 %s 的参考音 %.1fs 超过 CosyVoice3 的 30s 硬上限，"
+                            "特征提取会失败；请把参考音裁到 ≤30s", voice.id, voice.duration_s)
             try:
                 self.model.add_zero_shot_spk(voice.effective_prompt_text, str(voice.prompt_wav), voice.id)
                 voice.cached = True

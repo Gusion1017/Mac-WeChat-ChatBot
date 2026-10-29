@@ -85,7 +85,7 @@
 ### 2.1 运行期数据目录（多微信账号，2026-10-27）
 
 App 的聊天数据、机器人配置与新媒体按**当前登录的微信账号**隔离；AI/Hook/OneBot/Keychain/
-语音模型/日志文件仍全局共享。完整行为、隔离矩阵与排障见 [`accounts.md`](accounts.md)。
+CosyVoice3 安装与音色、日志文件仍全局共享。完整行为、隔离矩阵与排障见 [`accounts.md`](accounts.md)。
 
 ```
 ~/Library/Application Support/WeChatAI/
@@ -109,7 +109,7 @@ App 的聊天数据、机器人配置与新媒体按**当前登录的微信账�
 │       ├── logs/                   # 预留（当前为空）
 │       └── legacy-migration.json   # 仅旧版迁移目标有
 ├── media/                          # 旧版遗留媒体（只读保留，不迁移、不删除）
-├── backups/ runtime/ cosyvoice/ voice-clones/ models/
+├── backups/ runtime/ cosyvoice/    # 备份、运行期 Hook 配置、CosyVoice3 安装（运行环境/模型/音色）
 └── chatbot.sqlite                  # 旧版单库（迁移后保留，不删）
 ```
 
@@ -437,7 +437,7 @@ bridge 推送的 JSON（`WechatMessage`，字段可能缺省）：
 5. 重启 App/微信后能恢复连接；日志可查；数据本地持久化。
 6. 空闲时 App 内存占用低（目标 < 150MB），bridge < 80MB；无忙轮询。
 7. 多微信账号：换微信账号后聊天/记忆卡/会话设置/机器人配置切到该账号档案，AI/Hook/OneBot/
-   Keychain/语音模型保持全局；升级旧单库时只 copy 不删；旧媒体路径仍可读。验收细节见
+   Keychain/CosyVoice3 安装与音色保持全局；升级旧单库时只 copy 不删；旧媒体路径仍可读。验收细节见
    [`accounts.md`](accounts.md) §11。
 
 ## 8. 运行时资源布局与安装契约（App bundle）

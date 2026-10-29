@@ -15,14 +15,15 @@
 | 入站音频获取 | `POST /fetch_voice`：`triggerDownload(fileType=15)` → AES-ECB → SILK 校验 → 落盘 `.silk` + 16k WAV | ✅ 2026-10-26 真机验证：3 条真实语音全部成功（含 3.8s/7.0s/4.2s），fileType **15 (0x0F)** 是关键 |
 | 语音转写 | `VoiceTranscriptionService`（SpeechAnalyzer / SpeechTranscriber，zh_CN，本地、离线） | ✅ 真机端到端验证：入站 WAV 正常转写；系统语音资源可由 App 内按钮直接下载 |
 | 语音气泡/记忆/引用 | 转写落库、气泡展示、可关闭、进上下文/长期记忆、引用语音带转写 | ✅ 单测覆盖；真机待音频链路 |
-| 出站 TTS | sherpa-onnx 静态链接 + Kokoro multi-lang v1_1（内置音色）+ ZipVoice distill int8（零样本克隆）；`rule_fsts` 数字/日期/电话规范化 + 整段一次合成 | ✅ 单测 + 本机样本；Kokoro 默认、ZipVoice 克隆较慢（见 §6） |
-| 出站发送 | App 传引擎原生 24k WAV（兼容旧 16k WAV/裸 PCM）→ bridge 按 WAV 头识别采样率（16k 才重采样）→ **官方 SILK SDK（-tencent）编码** → CDN 上传 → R3 `uploadvoice` 任务（0x7F / WxSendVoiceMsg） | ✅ 2026-10-26 真机：TTS 5s 语音正常播放；关键是从 go-silk 换成官方 24k SILK 编码 |
+| 出站 TTS | **CosyVoice3 是唯一引擎**：本地 Python 旁路（Fun-CosyVoice3-0.5B-2512，24 kHz，零样本克隆），App 通过回环 HTTP 调用；文本清洗后一次请求合成 | ✅ 单测 + 本机样本；需用户显式安装（约 8GB），非实时（见 §6） |
+| 出站发送 | App 传 CosyVoice3 原生 24k WAV（兼容旧 16k WAV/裸 PCM）→ bridge 按 WAV 头识别采样率（16k 才重采样）→ **官方 SILK SDK（-tencent）编码** → CDN 上传 → R3 `uploadvoice` 任务（0x7F / WxSendVoiceMsg） | ✅ 2026-10-26 真机：TTS 5s 语音正常播放；关键是从 go-silk 换成官方 24k SILK 编码 |
 | 语音长度设置 | 全局设置，默认上限 30s（5–60），超限改文字或按句截断 | ✅ 设置与单测 |
 | 语音回复策略 | 全局开关、概率、对等、仅短回复（全局设置） | ✅ 决策纯函数 + 单测 |
 
 > 一句话：**入站转写与出站语音发送都已真机打通。**
 > 入站关键是语音下载 `fileType=15`；出站关键是官方 SILK SDK 的 24k WeChat 兼容编码 +
 > `uploadvoice` 任务（header/voiceFileId 已按真实请求对齐）。
+> 出站 TTS 只保留 CosyVoice3（本地 Python 旁路）；未安装、服务未启动或合成失败时，本条改发文字。
 > 中文语音资源缺失时，「机器人 → 语音」提供“下载中文语音资源”按钮；下载后无需重启系统即可转写。
 
 ## 2. 数据流
@@ -42,12 +43,12 @@
 ### 出站（说）
 
 ```
-AI 回复文本 → decideVoiceReply（开关/概率/对等/短回复/模型就绪）
+AI 回复文本 → decideVoiceReply（开关/概率/对等/短回复/CosyVoice3 就绪）
  → 已确定语音：跳过拟人化随机延迟（「语音回复免拟人化延迟」，默认开）
- → VoiceSynthesisService（Kokoro / ZipVoice / CosyVoice）→ 24k WAV
+ → VoiceSynthesisService（CosyVoice3，HTTP 127.0.0.1:5051）→ 24k WAV
  → POST /send_voice {"user_id"/"group_id","pcm16k","duration_ms"}
  → bridge 官方 SILK SDK（`bridge/silkenc`）编码 24k Tencent SILK → uploadvoice → send_voice
- → 失败（含 voice_send_unsupported）→ 自动改发文字，不重试语音
+ → 任一环节失败（CosyVoice3 未安装/服务未启动/合成失败/voice_send_unsupported）→ 本条改发文字，不重试语音
 ```
 
 ### 提示词里的语音标注与出站清洗（2026-10-26）
@@ -102,33 +103,33 @@ AI 回复文本 → decideVoiceReply（开关/概率/对等/短回复/模型就�
 ## 4. 设置
 
 > 语音设置面板只位于「机器人 → 语音」，复用共用组件 `VoiceSettingsPanel`；设置页不再提供「语音」分类。
-> **会话详情菜单不提供语音设置**：转写、语音回复、概率、对等、仅短回复、引擎与音色均为全局设置。
+> **会话详情菜单不提供语音设置**：转写、语音回复、概率、对等、仅短回复、音色与语速均为全局设置。
 
 > 语音发送复用「R3 原生发送」开关。首次启用后，App 会要求捕获文本/语音句柄、显示启动倒计时；
 > 未就绪或发送失败时自动降级文字。首次启用后，请先在本机微信手动发一条文字 + 一条语音捕获句柄。
 > 开启「允许语音回复」时立即检测句柄并弹出捕获引导；bridge 启动后若已开启语音回复但句柄缺失，
 > 也会自动提示一次（同一 App 会话最多一次）。
 
-### 4.1 界面（2026-10-27 精简）
+### 4.1 界面（2026-10-29 收敛为 CosyVoice3）
 
 - **语音转写**：三个开关 + 「转写资源」行；资源未安装时在行内直接「下载」，不再额外占一块提醒。
 - **语音回复**：默认只显示总开关；开启后才展开概率、对等、短回复阈值、最长时长、超限处理
   与「语音回复免拟人化延迟」。
-- **语音引擎与音色**（原「语音引擎（TTS）」+「语音模型与克隆音色」合并）：
-  - 引擎：Kokoro / ZipVoice 克隆 / CosyVoice3（本地旁路，可选下载）；Kokoro 仍为默认；
-  - 音色：Kokoro 使用官方 103 个内置音色的 **sid → name** 映射（中文女声 55 / 中文男声 45 /
-    英文女声 3），支持搜索、分组与逐项试听；ZipVoice 用克隆档案菜单选择，不再手填档案 ID；
-    CosyVoice3 使用本机 `voices.json` 里的音色（**App 不内置音色**，
-    普通用户安装后为空），并提供「管理音色…」：可导入 5–30s 参考音新增自定义音色、
-    编辑/删除（内置不可删）、自动转写参考文本与试听；自定义音色可导出 `.zip` 备份（内置不可导出）；
-  - 语速：Kokoro 提供 1.0× / 1.25× / 1.5× 三档快捷（默认 1.25×，0.5×–2.0× 仍可由设置写入）；
-    整段合成下 1.5× 会偏快，1.25× 是自然度优先的默认值；
-  - 模型：只展示当前引擎真正需要的那份（Kokoro 1 个；ZipVoice = 主模型 + 声码器），
-    同一行下载/取消/重试/删除；首次下载弹确认框（记录 `modelDownloadConsent`），
-    去掉「下载全部」与逐模型行；
-- **试听**：复用真实 `VoiceSynthesisService`（同引擎/音色/语速/原生 24k WAV），本地 `AVAudioPlayer`
+- **语音引擎与音色**：只剩 CosyVoice3 一组行（引擎选择器已移除，CosyVoice3 是唯一 TTS 引擎）：
+  - 本地服务：状态（运行中/启动中/未运行/异常/未检测）+ 「启动」/「停止」+「重新检测」；
+  - 运行环境与模型：安装/重新安装/删除，合计约 8GB（运行环境约 2–3GB + 模型约 5–7GB）；
+    首次安装弹确认框，安装中可取消、失败可重试；
+  - 音色：本机音色菜单 + 「管理音色…」（无音色时显示「添加音色…」）；**App 不内置音色**，
+    普通用户安装后为空，导入 1–5 条参考音（每条 5–30s，合计 ≤30s）新增自定义音色、编辑/删除
+    （内置不可删）、自动转写参考文本与试听；多条参考文本需同时填写或同时留空（全空即
+    `cross_lingual`，只克隆音色）；自定义音色可导出 `.zip` 备份（含 `refs/` 原始片段，内置不可导出）；
+  - 语速：0.5×–2.0×（步进 0.05），默认 1.0×；
+  - 自动启动：开关；**仅当「允许语音回复」开启、本开关开启、CosyVoice3 已安装且有音色时**，
+    启动 App / 打开语音面板会拉起本地服务；面板内仍可手动「启动」；
+  - 服务地址：默认 `http://127.0.0.1:5051`，只接受回环地址；
+- **试听**：直接调用同一个本地 CosyVoice3 HTTP 服务（同音色/语速/原生 24k WAV），本地 `AVAudioPlayer`
   播放，不发往微信、不联网；切换音色/语速、离开页面或再次点按即停止。全局只保留一个播放器。
-   CosyVoice3 试听走本地 HTTP 服务，服务未启动时先提示安装/启动。
+  CosyVoice3 试听走本地 HTTP 服务，服务未启动或未选音色时先提示安装/启动。
 - **语音发送状态**：只在开启「允许语音回复」时出现；去掉与状态摘要重复的两行句柄明细。
 - **句柄引导**：开启「允许语音回复」时先刷新 `/voice_status`，未就绪即弹 `VoiceHandleSetupSheet`；
   bridge 启动后若已开启语音回复且文本/语音句柄缺失，自动提示一次（同一 App 会话最多一次）。
@@ -141,15 +142,15 @@ AI 回复文本 → decideVoiceReply（开关/概率/对等/短回复/模型就�
 - 回复：`replyEnabled`（默认关）、`replyProbability`（0.3）、`mirrorIncomingVoice`、`shortReplyOnly`（开）、
   `shortReplyMaxChars`（80）、`maxVoiceSeconds`（30，5–60）、`overLimit`（text/truncate）、
   `skipHumanizeDelayForVoiceReply`（默认开）
-- 引擎：`engine`（kokoro/zipvoiceClone/cosyVoice）、`kokoroSpeakerID`（0–102，读取/保存时收敛）、
-  `kokoroSpeed`（默认 1.25）、`cloneID`、`modelDownloadConsent`
-- CosyVoice3：`cosyVoiceVoiceID`（本机 voices.json 中的音色 id；未导入时为空）、`cosyVoiceEndpoint`
-  （默认 `http://127.0.0.1:5051`）、`cosyVoiceAutoStart`（默认 true）；模型/运行环境单独下载，
-  不占用 sherpa `modelDownloadConsent`
+- CosyVoice3：`cosyVoiceVoiceID`（本机 `voices.json` 中的音色 id；未导入时为空）、
+  `cosyVoiceEndpoint`（默认 `http://127.0.0.1:5051`，仅回环）、
+  `cosyVoiceAutoStart`（默认 true）、`cosyVoiceSpeed`（0.5–2.0，默认 1.0）
+- 旧键 `engine` / `kokoroSpeakerID` / `kokoroSpeed` / `cloneID` / `modelDownloadConsent`
+  在解码时被忽略，保存时不再写入（旧 `config.json` 仍可正常加载）。
 
 语音开关全部为全局设置（`BotSettings.voice.transcriptionEnabled` / `replyEnabled` 等）：
 关闭转写后不再发起新的语音下载与转写，已有转写仍可显示并参与上下文；关闭语音回复后只发文字。
-概率、对等、短回复、引擎与音色同样由全局设置控制。
+概率、对等、短回复、音色与语速同样由全局设置控制。
 
 `skipHumanizeDelayForVoiceReply` 默认开启：`decideVoiceReply` 命中语音后直接进入 TTS 合成，
 不再叠加 `[minDelayMs, maxDelayMs]` 的随机等待（否则「合成耗时 + 拟人化延迟」会让用户等两次）；
@@ -157,56 +158,49 @@ AI 回复文本 → decideVoiceReply（开关/概率/对等/短回复/模型就�
 
 ## 5. 语音模型
 
-- 目录：`~/Library/Application Support/WeChatAI/models/`（不入库、不打包）。
-- **首次下载需在「机器人 → 语音」中确认并联网下载**；全部模型合计约 **528MB**
-  （Kokoro≈365MB + ZipVoice≈109MB + vocoder≈54MB），只启用所需引擎时体积更小。
-- **模型不会自动下载**：启动 App、打开语音页、收到语音消息都不会触发联网；只有用户点「下载」并确认后才开始。
-- 下载入口按当前引擎聚合：Kokoro 只需 365MB；ZipVoice 需要主模型 + 声码器约 163MB。
-  确认框会写明本次下载的模型与体积，同意后写入 `modelDownloadConsent`；
-  下载中可取消，失败可重试，已就绪的模型不会重复下载。模型行右侧菜单可删除当前引擎模型，
-  不会误删另一个引擎的文件。
-- 「允许下载语音模型」只约束下载入口；模型文件已就绪（如重装 App、恢复配置）时直接使用，
-  不要求重新同意，也不会再次下载。
-- 模型体积：
-  | 模型 | 体积 | 用途 |
+- **唯一 TTS 引擎是 CosyVoice3**：模型 `Fun-CosyVoice3-0.5B-2512` 与 Python 3.10 + PyTorch
+  运行环境由 App 内的独立安装器管理，保存在
+  `~/Library/Application Support/WeChatAI/cosyvoice/`（源码运行时为 `_local/cosyvoice/`），
+  与 App 分发包分离；安装细节见 [`cosyvoice.md`](cosyvoice.md)。
+- **安装需用户显式确认**：在「机器人 → 语音 → 语音引擎与音色 → 运行环境与模型」点「下载并安装…」，
+  确认框写明体积（合计约 8GB：运行环境约 2–3GB + 模型约 5–7GB）；安装中可取消，失败可重试，
+  已安装可删除。App 不再有「模型下载同意」（`modelDownloadConsent`）与「下载全部」，
+  也不再下载旧引擎的模型；旧 `~/Library/Application Support/WeChatAI/models/` 目录不再由 App 使用。
+- 资源体积：
+  | 资源 | 体积 | 用途 |
   | --- | --- | --- |
-  | `kokoro-multi-lang-v1_1` | 约 365 MB | 默认引擎，103 个内置音色（官方 sid → name 映射） |
-  | `sherpa-onnx-zipvoice-distill-int8-zh-en-emilia` | 约 109 MB | 零样本克隆（参考音频 + 参考文本） |
-  | `vocos_24khz.onnx` | 约 54 MB | ZipVoice 声码器 |
-  | `Fun-CosyVoice3-0.5B-2512` | 约 5–7 GB | 可选高保真引擎（本地 Python 旁路，零样本克隆） |
-  | CosyVoice 运行环境（Python 3.10 + PyTorch） | 约 2–3 GB | CosyVoice3 推理服务，独立安装 |
-- **数字/日期/电话**：Kokoro 模型目录自带 `date-zh.fst` / `phone-zh.fst` / `number-zh.fst`，
-  App 会把它们按 `date → phone → number` 的顺序传给 `rule_fsts`。顺序不能反：`phone` 必须在
-  `number` 前面，否则手机号会被读成“一百三十八亿…”。`%` 不在 FST 处理范围内，进 TTS 前会先转
-  成“百分之 N”。
-- **CosyVoice3**：模型与运行环境由独立安装器管理（「机器人 → 语音」的「下载/安装」），不写入
-  `modelDownloadConsent`、不进入 sherpa 模型清单；模型缺失或服务未启动时回退 Kokoro。
-- 模型就绪判定按实际文件（Kokoro 的 model/voices/tokens、ZipVoice 的 tokens/encoder/decoder），
-  不再只看解包目录；tar 中途失败留下的半截目录会被视为未就绪，下载不会跳过。
-- 下载失败、磁盘不足或模型缺失时，语音回复自动降级为文字，不影响文本回复；可在「机器人 → 语音」重试下载。
+  | `Fun-CosyVoice3-0.5B-2512` | 约 5–7 GB | 唯一 TTS 引擎（本地 Python 旁路，零样本克隆） |
+  | CosyVoice 运行环境（Python 3.10 + PyTorch） | 约 2–3 GB | CosyVoice3 推理服务，随安装器独立部署 |
+- **音色**：App 不内置任何音色，安装后音色列表为空；在「管理音色…」导入 1–5 条单人参考
+  音频（每条 5–30s、合计 ≤30s；wav/m4a/aiff，不支持 mp3）新增自定义音色。参考音频可拖入或
+  一次多选批量导入，导入时即校验格式与时长；片段可上移/下移调整合并顺序。每条参考音频配一段
+  逐字对应的参考文本（可逐条或「自动转写全部」后修正），多条文本必须同时填写或同时留空；
+  全部留空即 `cross_lingual`（只克隆音色）。保存时 App 按顺序把多条音频拼接为一条 `prompt.wav`
+  （片段间 0.25s 静音）、各条文本用换行连接为 `prompt.txt`，原始片段保存在 `refs/`；服务端
+  仍按单条 prompt 合成。**CosyVoice3 的 speech tokenizer 硬限制参考音 ≤30 秒**（含间隔静音），
+  超过会合成失败，App 保存时会拦截；导入前可先裁掉首尾静音。旧单参考音色继续可用，音色只存本机。
+- **数字/日期/电话**：旧引擎依赖的 `rule_fsts`（`date-zh` / `phone-zh` / `number-zh`）随旧引擎
+  一并移除，不再有 FST 文件；CosyVoice3 侧的数字/日期读法实测正常。
+  语音文本清洗仍在：Markdown/emoji/URL、`[语音 Ns]` 标注、`%` → 百分之、货币口语化等（见 §2）。
 - **系统中文语音资源**：转写依赖系统语音资源，部分机器需先在 系统设置 → 辅助功能 → 朗读内容
   下载中文语音；「机器人 → 语音」也提供「下载中文语音资源」按钮（调用 `AssetInventory`）。
-  系统语音资源与上表 TTS 模型是两套独立资源。
-- 失败降级：TTS 模型缺失、合成失败、发送句柄未就绪或微信侧拒绝时，自动改发文字，不重试语音。
-- 下载后校验 SHA256（`scripts/fetch_sherpa.sh` 负责运行库；模型由 App 下载）。
+  系统语音资源与上表 TTS 资源是两套独立资源。
+- 失败降级：CosyVoice3 未安装、运行环境/模型缺失、服务未启动、合成失败、发送句柄未就绪或
+  微信侧拒绝时，自动改发文字，不重试语音；不影响文本回复。可在「机器人 → 语音」重试安装或启动服务。
 - 模型、参考音频、转写与合成音频都只存本机，不上传、无遥测；详见 §8。
-- 克隆：导入 10–30s 单人参考音频（wav/m4a），App 用本地 STT 自动生成参考文本（可修正）；
-  ZipVoice 要求参考文本与音频严格对应。
-- 许可：sherpa-onnx Apache-2.0；Kokoro/ZipVoice 权重许可以 model card 为准，发行前需复核；
-  Fun-CosyVoice3-0.5B-2512 为 Apache-2.0。
+- 许可：`Fun-CosyVoice3-0.5B-2512` 为 Apache-2.0（模型卡）；CosyVoice 上游代码与运行依赖
+  许可以各自仓库为准。
 
 ## 6. 性能与限制
 
 - STT：9.2s → 0.23s；46.6s → 0.51s（RTF 0.011–0.043）；峰值内存约 22 MB；完全离线。
-- TTS（debug 构建、4 线程、模型已缓存）：Kokoro RTF≈0.43（5.8s 音频约 2.5s）、ZipVoice distill int8 RTF≈0.92（3.2s 音频约 3.0s）；首次加载额外 1–3s，release 会更快。
-- 引擎内存与空闲释放（2026-10-28）：Kokoro 常驻约 350–700MB、ZipVoice 约 150–250MB；
-  最后一次合成后 10 分钟无新请求会自动 `unloadEngines()`，下次合成重新加载（1–3s）。
-  单测可断言 `loadedEngineCount` 前后变化。
-- 整段合成（关闭内部按标点切分）会比逐段合成略慢：49 字回复 Kokoro 仍约 2–3s；换来的是
-  句内语气连续、停顿自然。极端长文本（>300 字）仍建议用 `maxVoiceSeconds`/短回复策略限制。
-- CosyVoice3（本地 Python 旁路，可选）：启动到 ready 约 22s，常驻 RSS 约 8.65GB；
-  CPU 6 步热态 RTF≈1.83、4 步≈1.50，5–10s 语音通常 8–12s 出结果；**定位高质量/离线，
-  不是实时聊天默认**。详见 [`cosyvoice.md`](cosyvoice.md)。
+- TTS（CosyVoice3，本地 Python 旁路，**非实时**）：启动到 `/health` ready 实测约 22s
+  （含 import、模型加载与预热）；常驻 RSS 约 8.65GB；20 字（约 4.5s 音频）热态 CPU 6 步
+  RTF≈1.83、4 步≈1.50（约 9.1s / 6.5s）；5–10s 语音在 CPU 6 步下通常 8–12s 出结果。
+  `COSYVOICE_FLOW_STEPS=4` 可换速度（质量略降）。详见 [`cosyvoice.md`](cosyvoice.md) §7。
+- 长回复会显著拉长合成时间：极端长文本（>300 字）仍建议用 `maxVoiceSeconds`/短回复策略限制。
+- 输出：CosyVoice3 原生 24k 单声道 16-bit WAV 直通（16k 输入才由 bridge 线性重采样），
+  首尾 5 ms 淡入淡出避免 WAV 边界爆音。
 - SILK：5.2s/16k PCM → 9,921 B；编码约 0.04s、解码约 0.005s（pilk 实测）；bridge 静态链接官方 SILK SDK（`bridge/silkenc`），无 ffmpeg/pilk 运行时依赖。
 - 微信语音消息限制 60s；超限按设置改文字/截断。
 - 语音回复不保留系统「@ 提及」；群聊带 @ 时直接走文字（避免丢失提及）。AI 自己写进正文的
@@ -262,43 +256,12 @@ AI 回复文本 → decideVoiceReply（开关/概率/对等/短回复/模型就�
 - 回归测试：`VoiceReadTests` 覆盖出站语音提示词、记忆转录与回复清洗；
   `CoreServicesTests` 覆盖 `buildMessages` 里出站语音历史不带标注、system 提示禁止输出。
 
-### 7.4 语音“不连贯/吞字”（2026-10-27 已修）
-
-真机聆听与本地可控 A/B 定位到三个叠加问题：
-
-1. **数字整段被吞**：Kokoro 词表没有 ASCII 数字，App 没有传 `rule_fsts`，
-   `3`/`2026`/`13800138000`/`85%` 全部被当作 OOV **静默跳过**（不是读错，是没读）。
-   修复：`VoiceModelStore.kokoroConfig()` 把模型目录里的 `date-zh.fst`、`phone-zh.fst`、
-   `number-zh.fst` 按 `date → phone → number` 传入 `SherpaOnnxOfflineTtsConfig.rule_fsts`。
-   `phone` 必须在 `number` 之前，否则手机号会读成“一百三十八亿…”；`%` 不在 FST 内，
-   由朗读稿清洗先转成“百分之 N”。
-2. **按标点碎片化合成**：Kokoro 默认按 `。！？，；：` 切句、`min_words=5`/`max_words=20`
-   （中文每字算 1 word），49 字回复被切成 4 段独立合成后首尾相接，每段重新起调、句尾拖长。
-   修复：generation `extra` 覆盖为 `min_words_in_sentence=10000`、`max_words_in_sentence=10000`，
-   整段一次合成；ZipVoice 同步改成 `min/max_words_in_sentence`（旧 `min_char_in_sentence`
-   在 v2.0.0 已不是有效键）。
-3. **停顿被压没/采样率往返**：`silence_scale=0.2` 把句读停顿压到 20%，逐段拼接时又靠碎片拖长
-   掩盖；App 强制 16k 再由 bridge 线性插值回 24k。修复：`silence_scale=0.8`、Kokoro 默认
-   语速改 1.25×（1.0/1.25/1.5 三档）、App 直接输出引擎原生 24k WAV，bridge 以 WAV 头采样率
-   为准（16k 才重采样），并加 5ms 淡入淡出。
-
-证据（`_local/voice-lab/`，gitignored）：
-
-- 4 个碎片单独合成 1.66+2.30+1.44+1.77 = **7.17s**，与整段拼接 7.18s 吻合；
-- 同一句“3点半到2026年10月26日，电话13800138000，涨了85%”现状只读出“点半到年月日，电话，
-  涨了”（3.25s）；修复后 9.92s，读出“三点半/二零二六年十月二十六日/幺三八…/百分之八十五”；
-- 整段 + `speed 1.25 + silence 0.8` 实测约 6.2 字/秒、停顿 200–540ms；`speed 1.5 + silence 0.2`
-  会到 10.4 字/秒、无停顿。
-
-回归测试：`VoiceSynthesisTests` 覆盖朗读稿清洗（@前缀/百分号/货币/破折号）、24k WAV、
-FST 顺序与整段合成的参数；bridge `voice_test.go` 覆盖 16k/24k WAV 解码与编码。
-
 ## 8. 隐私与安全
 
-- 音频、转写、参考音频只存本机；日志不打印转写原文、音频字节、aeskey、CDN key。
+- 音频、转写、参考音频（含 `refs/` 原始片段与合并 prompt）只存本机；日志不打印转写原文、音频字节、aeskey、CDN key。
 - 转写展示/记忆可分别关闭；删除消息/会话时随本地存储清理。
 - 首次启用或微信重启后需捕获发送句柄；默认 `replyEnabled=false`，句柄/倒计时未就绪时失败自动降级文字。
-- 模型下载是用户显式同意后的网络请求，不上传任何用户数据。
+- CosyVoice3 安装与模型下载是用户显式确认后的网络请求，不上传任何用户数据。
 
 ## 9. 代码位置
 
@@ -308,9 +271,9 @@ FST 顺序与整段合成的参数；bridge `voice_test.go` 覆盖 16k/24k WAV �
 | Bridge | `bridge/voice.go`、`bridge/voice_test.go`、`bridge/incoming.go`、`bridge/http.go`、`bridge/main.go`、`bridge/param.go` |
 | STT | `app/Sources/WeChatBot/Services/VoiceTranscriptionService.swift`、`VoiceFetcher.swift` |
 | 回复决策 | `app/Sources/WeChatBot/Services/VoiceReplyDecision.swift` |
-| TTS | `app/Sources/WeChatBot/Services/VoiceSynthesisService.swift`、`VoiceSynthesisAudio.swift`、`VoiceSynthesisText.swift`、`VoiceModelStore.swift`、`VoiceCloneStore.swift`、`Services/Sherpa/` |
-| 音色/试听 | `Models/KokoroVoiceCatalog.swift`（官方 sid → name）、`Services/VoicePreviewController.swift`（共享试听播放器） |
-| CosyVoice3 | `Services/CosyVoice{Client,Runtime,Installer}.swift`、`Models/CosyVoiceVoice.swift`、`devtools/cosyvoice/`、`scripts/{install,run}_cosyvoice.sh`；详见 [`cosyvoice.md`](cosyvoice.md) |
+| TTS | `app/Sources/WeChatBot/Services/VoiceSynthesisService.swift`、`VoiceSynthesisAudio.swift`、`VoiceSynthesisText.swift`（唯一引擎 CosyVoice3，HTTP 客户端见 CosyVoice3 行） |
+| 音色/试听 | `Services/VoicePreviewController.swift`（共享试听播放器，走本地 CosyVoice3 HTTP 服务） |
+| CosyVoice3 | `Services/CosyVoice{Client,Runtime,Installer}.swift`、`Models/CosyVoiceVoice.swift`、`Models/CosyVoiceReference.swift`、`Services/CosyVoiceVoiceStore.swift`、`Views/Components/CosyVoiceVoiceManagerSheet.swift`、`devtools/cosyvoice/`、`scripts/{install,run}_cosyvoice.sh`；详见 [`cosyvoice.md`](cosyvoice.md) |
 | UI | `Views/VoiceSettingsPanel.swift`、`Views/Components/MessageBubble.swift`、`Views/ConversationsView.swift` |
 | 数据 | `Models/Models.swift`、`Services/MemoryStore.swift`、`Core/AppStore+Runtime.swift` |
 
@@ -321,6 +284,6 @@ bash scripts/check.sh --with-go        # 静态 + Swift 全量 + Go
 cd app && SWIFT_DISABLE_SANDBOX=1 swift test --scratch-path .build-lead
 ```
 
-当前：Swift 504 项执行（496 通过 / 8 项按环境跳过：模型未下载/联网/真实 E2E；含音色目录、CosyVoice 集成、语音合成/发送回归、记忆 v2）；
-Go 64 顶层 / 76 子测试通过；release App 约 189MB。
+当前：Swift 566 项执行（564 通过 / 2 项按环境跳过：真实 CosyVoice3 服务 E2E；含 CosyVoice 集成、语音合成/发送回归、记忆 v2）；
+Go 64 顶层 / 76 子测试通过；release App 约 168MB（不再静态链接 sherpa-onnx，二进制约 17MB）。
 语音实现与测试细节见 `bridge/voice.go`、`bridge/voice_test.go`；入站/出站契约与限制见本文件与 [`bridge.md`](bridge.md)。

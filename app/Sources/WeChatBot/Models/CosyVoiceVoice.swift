@@ -403,43 +403,17 @@ enum CosyVoiceServiceState: Equatable, Sendable {
     }
 }
 
-
-// MARK: - 出站语音的引擎回退计划
-
-/// 一次出站语音合成可能尝试的引擎（顺序即优先级，`text` 表示最终降级文字）。
-enum VoiceSynthesisAttempt: Equatable, Sendable {
-    case cosyVoice
-    case kokoro
-    case zipvoiceClone
-    case text
-}
-
-/// 出站语音引擎回退决策（纯函数，便于单测）。
+/// 出站语音引擎可用性（纯函数，便于单测）。
 ///
-/// 产品约定：
-/// - CosyVoice3 可选，Kokoro 仍默认；
-/// - 选了 CosyVoice3 但服务不可用时，先回退 Kokoro，Kokoro 也失败才发文字；
-/// - CosyVoice3 未安装＝引擎不可用，直接文字（UI 会引导安装）；
-/// - Kokoro/ZipVoice 保持原行为：失败即文字，不跨引擎回退。
-enum VoiceFallbackPlanner {
-    static func attempts(
-        for engine: VoiceEngineKind,
+/// CosyVoice3 是唯一 TTS 引擎，因此只有「可合成」与「改发文字」两种结果：
+/// 未安装、服务未就绪、没有选择音色时一律直接改发文字，不再跨引擎回退。
+enum VoiceEngineAvailability {
+    /// 本次回复能否尝试语音合成。
+    static func canSynthesize(
         cosyVoiceInstalled: Bool,
         cosyVoiceServiceReady: Bool,
-        kokoroReady: Bool,
-        zipvoiceReady: Bool
-    ) -> [VoiceSynthesisAttempt] {
-        switch engine {
-        case .cosyVoice:
-            guard cosyVoiceInstalled else { return [.text] }
-            var attempts: [VoiceSynthesisAttempt] = []
-            if cosyVoiceServiceReady { attempts.append(.cosyVoice) }
-            if kokoroReady { attempts.append(.kokoro) }
-            return attempts.isEmpty ? [.text] : attempts
-        case .kokoro:
-            return kokoroReady ? [.kokoro] : [.text]
-        case .zipvoiceClone:
-            return zipvoiceReady ? [.zipvoiceClone] : [.text]
-        }
+        hasVoice: Bool
+    ) -> Bool {
+        cosyVoiceInstalled && cosyVoiceServiceReady && hasVoice
     }
 }

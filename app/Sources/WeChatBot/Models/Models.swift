@@ -185,6 +185,16 @@ enum ConversationName {
         "officialaccounts": "公众号"
     ]
 
+    /// 微信内置/系统会话（文件传输助手、服务通知、公众号聚合等）。
+    /// 这些会话没有长期记忆价值，运行时自动建记忆卡时会跳过（手动
+    /// 「为现有会话创建记忆卡」同样跳过）。
+    static func isSystemAccount(_ conversationID: String) -> Bool {
+        let value = conversationID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return !value.isEmpty && systemNames[value] != nil
+    }
+
     /// 占位标题（空、裸 ID、`wxid_*`、`*@chatroom`、旧版「群聊 <id>」）不展示也不入库。
     static func isPlaceholderTitle(
         _ title: String,
@@ -1122,27 +1132,16 @@ struct VoiceSettings: Codable, Hashable {
     var maxVoiceSeconds: Int = 30
     /// 超过时长上限时的处理方式。
     var overLimit: VoiceOverLimit = .text
-    /// TTS 引擎（由 T3 的 `VoiceEngineKind` 定义）。
-    var engine: VoiceEngineKind = .kokoro
-    /// Kokoro 音色编号。
-    var kokoroSpeakerID: Int = 0
-    /// Kokoro 语速（0.5–2.0，默认 1.25：三档快捷里的「自然」档）。
-    var kokoroSpeed: Double = 1.25
-    /// 克隆音色档案 ID（engine == .zipvoiceClone 时使用）。
-    var cloneID: String?
-    /// 是否已同意按需下载语音模型（默认关闭，下载前必须为 true）。
-    var modelDownloadConsent: Bool = false
-
-    // MARK: CosyVoice3 本地服务（2026-10-27，全部可选以兼容旧配置）
+    // MARK: CosyVoice3 本地服务（唯一 TTS 引擎）
 
     /// CosyVoice3 音色 ID（来自本机 voices.json / 服务端 `/voices`）。
     /// **不设默认音色**：App 不内置任何音色，空字符串表示「未选择音色」。
     var cosyVoiceVoiceID: String = ""
     /// 本地服务地址（默认 `http://127.0.0.1:5051`；改端口时同步改这里）。
     var cosyVoiceEndpoint: String = "http://127.0.0.1:5051"
-    /// 启动 App / 切换到 CosyVoice3 时自动拉起本地服务（默认开启）。
+    /// 允许语音回复时自动拉起本地服务（默认开启）。
     var cosyVoiceAutoStart: Bool = true
-    /// CosyVoice3 语速（0.5–2.0，默认 1.0；与 Kokoro 语速互相独立）。
+    /// CosyVoice3 语速（0.5–2.0，默认 1.0）。
     var cosyVoiceSpeed: Double = 1.0
 
     // MARK: 生效值
@@ -1163,12 +1162,6 @@ struct VoiceSettings: Codable, Hashable {
         return min(max(replyProbability, 0), 1)
     }
 
-    /// 生效的 Kokoro 语速（0.5...2.0，默认 1.25）。
-    var effectiveKokoroSpeed: Double {
-        guard kokoroSpeed.isFinite else { return 1.25 }
-        return min(max(kokoroSpeed, 0.5), 2.0)
-    }
-
     /// 生效的 CosyVoice3 音色 ID：空白保持空（未选择音色），不自动回退到 girl。
     var effectiveCosyVoiceVoiceID: String {
         CosyVoiceVoiceCatalog.resolvedVoiceID(cosyVoiceVoiceID)
@@ -1183,9 +1176,6 @@ struct VoiceSettings: Codable, Hashable {
         return min(max(cosyVoiceSpeed, 0.5), 2.0)
     }
 
-    /// 是否启用 CosyVoice3 引擎。
-    var usesCosyVoice: Bool { engine == .cosyVoice }
-
     /// 用户填写的服务地址是否可解析（http/https + host）。
     var hasValidCosyVoiceEndpoint: Bool {
         CosyVoiceClient.normalizedEndpoint(cosyVoiceEndpoint) != nil
@@ -1194,16 +1184,6 @@ struct VoiceSettings: Codable, Hashable {
     /// 生效的 CosyVoice3 服务地址：非法/空白回退默认 `127.0.0.1:5051`。
     var effectiveCosyVoiceEndpoint: URL {
         CosyVoiceClient.normalizedEndpoint(cosyVoiceEndpoint) ?? CosyVoiceClient.defaultEndpoint
-    }
-
-    /// 生效的 Kokoro 音色编号（收敛到模型内置的 103 个音色）。
-    var effectiveKokoroSpeakerID: Int {
-        KokoroVoiceCatalog.clampedSpeakerID(kokoroSpeakerID)
-    }
-
-    /// 是否启用克隆引擎且填写了档案 ID。
-    var usesCloneVoice: Bool {
-        engine == .zipvoiceClone && !(cloneID ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
@@ -1222,11 +1202,6 @@ extension VoiceSettings {
         case shortReplyMaxChars
         case maxVoiceSeconds
         case overLimit
-        case engine
-        case kokoroSpeakerID
-        case kokoroSpeed
-        case cloneID
-        case modelDownloadConsent
         case cosyVoiceVoiceID
         case cosyVoiceEndpoint
         case cosyVoiceAutoStart
@@ -1260,16 +1235,9 @@ extension VoiceSettings {
         // 未知 raw value 回退到默认，避免手改配置导致整份 config 解码失败。
         overLimit = (try container.decodeIfPresent(String.self, forKey: .overLimit))
             .flatMap { VoiceOverLimit(rawValue: $0) } ?? defaults.overLimit
-        engine = (try container.decodeIfPresent(String.self, forKey: .engine))
-            .flatMap { VoiceEngineKind(rawValue: $0) } ?? defaults.engine
-        kokoroSpeakerID = try container.decodeIfPresent(Int.self, forKey: .kokoroSpeakerID)
-            ?? defaults.kokoroSpeakerID
-        kokoroSpeed = try container.decodeIfPresent(Double.self, forKey: .kokoroSpeed)
-            ?? defaults.kokoroSpeed
-        cloneID = try container.decodeIfPresent(String.self, forKey: .cloneID)
-        modelDownloadConsent = try container.decodeIfPresent(Bool.self, forKey: .modelDownloadConsent)
-            ?? defaults.modelDownloadConsent
-        // CosyVoice3：旧配置没有这些键时全部走默认值（girl / 127.0.0.1:5051 / 自动启动 / 1.0）。
+        // CosyVoice3 是唯一 TTS 引擎：旧配置里的 engine/kokoroSpeakerID/kokoroSpeed/
+        // cloneID/modelDownloadConsent 已移除，解码时直接忽略（不再写入）。
+        // 旧配置没有 cosyVoice* 键时全部走默认值（空音色 / 127.0.0.1:5051 / 自动启动 / 1.0）。
         cosyVoiceVoiceID = try container.decodeIfPresent(String.self, forKey: .cosyVoiceVoiceID)
             ?? defaults.cosyVoiceVoiceID
         cosyVoiceEndpoint = try container.decodeIfPresent(String.self, forKey: .cosyVoiceEndpoint)
@@ -1283,8 +1251,6 @@ extension VoiceSettings {
         maxVoiceSeconds = effectiveMaxVoiceSeconds
         shortReplyMaxChars = effectiveShortReplyMaxChars
         replyProbability = effectiveReplyProbability
-        kokoroSpeed = effectiveKokoroSpeed
-        kokoroSpeakerID = effectiveKokoroSpeakerID
         cosyVoiceVoiceID = effectiveCosyVoiceVoiceID
         cosyVoiceSpeed = effectiveCosyVoiceSpeed
     }
@@ -1302,11 +1268,6 @@ extension VoiceSettings {
         try container.encode(effectiveShortReplyMaxChars, forKey: .shortReplyMaxChars)
         try container.encode(effectiveMaxVoiceSeconds, forKey: .maxVoiceSeconds)
         try container.encode(overLimit.rawValue, forKey: .overLimit)
-        try container.encode(engine.rawValue, forKey: .engine)
-        try container.encode(effectiveKokoroSpeakerID, forKey: .kokoroSpeakerID)
-        try container.encode(effectiveKokoroSpeed, forKey: .kokoroSpeed)
-        try container.encodeIfPresent(cloneID, forKey: .cloneID)
-        try container.encode(modelDownloadConsent, forKey: .modelDownloadConsent)
         try container.encode(effectiveCosyVoiceVoiceID, forKey: .cosyVoiceVoiceID)
         try container.encode(CosyVoiceClient.normalizedEndpoint(cosyVoiceEndpoint)?.absoluteString
             ?? cosyVoiceEndpoint, forKey: .cosyVoiceEndpoint)

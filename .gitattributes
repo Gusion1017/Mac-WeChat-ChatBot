@@ -31,7 +31,6 @@ docs/images/*.png binary
 bridge/proto/** linguist-generated=true
 *.pb.go linguist-generated=true
 bridge/silkenc/** linguist-vendored=true
-app/Sources/CSherpaOnnx/** linguist-vendored=true
 
 # 许可与声明文本保持普通文本统计
 LICENSES/*.txt text eol=lf

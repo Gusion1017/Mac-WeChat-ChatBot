@@ -341,9 +341,15 @@ final class VoiceReadTests: XCTestCase {
             "replyProbability": 7.5,
             "maxVoiceSeconds": 999,
             "shortReplyMaxChars": 0,
-            "kokoroSpeed": -2,
             "overLimit": "bogus",
-            "engine": "unknown-engine"
+            // 已移除的引擎字段：解码时忽略，不能让整份配置解码失败。
+            "kokoroSpeed": -2,
+            "kokoroSpeakerID": 7,
+            "cloneID": "old-clone",
+            "modelDownloadConsent": true,
+            "engine": "unknown-engine",
+            "cosyVoiceVoiceID": "  onee  ",
+            "cosyVoiceSpeed": 9.5
         ]
         object["bot"] = bot
 
@@ -354,13 +360,21 @@ final class VoiceReadTests: XCTestCase {
         XCTAssertEqual(voice.effectiveReplyProbability, 1.0, "概率收敛到 0...1")
         XCTAssertEqual(voice.effectiveMaxVoiceSeconds, 60, "时长收敛到 5...60")
         XCTAssertEqual(voice.effectiveShortReplyMaxChars, 1)
-        XCTAssertEqual(voice.effectiveKokoroSpeed, 0.5)
         XCTAssertEqual(voice.overLimit, .text, "未知枚举回退默认")
-        XCTAssertEqual(voice.engine, .kokoro, "未知引擎回退默认")
-        XCTAssertFalse(voice.modelDownloadConsent)
         XCTAssertTrue(voice.transcriptionEnabled, "缺失字段用默认值")
         XCTAssertTrue(voice.skipHumanizeDelayForVoiceReply, "缺失字段用默认值：语音回复默认免拟人化延迟")
-        XCTAssertEqual(voice.kokoroSpeakerID, 0)
+        // CosyVoice3（唯一引擎）字段正常解码并收敛。
+        XCTAssertEqual(voice.effectiveCosyVoiceVoiceID, "onee")
+        XCTAssertEqual(voice.effectiveCosyVoiceSpeed, 2.0, accuracy: 0.0001)
+        // 已移除的旧引擎字段被忽略（不再有对应属性）。
+        let encoded = try JSONEncoder().encode(voice)
+        let encodedObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertNil(encodedObject["engine"])
+        XCTAssertNil(encodedObject["kokoroSpeed"])
+        XCTAssertNil(encodedObject["kokoroSpeakerID"])
+        XCTAssertNil(encodedObject["cloneID"])
+        XCTAssertNil(encodedObject["modelDownloadConsent"])
     }
 
     func testVoiceSettingsRoundtrip() throws {
@@ -377,11 +391,10 @@ final class VoiceReadTests: XCTestCase {
         voice.shortReplyMaxChars = 120
         voice.maxVoiceSeconds = 45
         voice.overLimit = .truncate
-        voice.engine = .zipvoiceClone
-        voice.kokoroSpeakerID = 7
-        voice.kokoroSpeed = 1.25
-        voice.cloneID = "clone-1"
-        voice.modelDownloadConsent = true
+        voice.cosyVoiceVoiceID = "loli"
+        voice.cosyVoiceEndpoint = "http://127.0.0.1:6060"
+        voice.cosyVoiceAutoStart = false
+        voice.cosyVoiceSpeed = 1.35
         settings.bot.voice = voice
 
         let data = try JSONEncoder().encode(settings)

@@ -5,9 +5,8 @@
 
 | 文件 | 适用组件 |
 | --- | --- |
-| `Apache-2.0.txt` | sherpa-onnx、kaldi-decoder-core、kaldi-native-fbank、fst、sentencepiece、Kokoro-82M、ZipVoice |
-| `MIT.txt` | zerolog、lumberjack、onnxruntime、utf8proc、kn007/silk-v3-decoder 封装、Kokoro/ZipVoice 工具链中的 MIT 组件 |
-| `MIT-Vocos.txt` | Vocos 24 kHz 声码器（Copyright (c) 2023 Charactr Inc.） |
+| `Apache-2.0.txt` | CosyVoice3 运行环境与模型（Fun-CosyVoice3-0.5B-2512，按需下载、不随包分发） |
+| `MIT.txt` | zerolog、lumberjack、kn007/silk-v3-decoder 封装 |
 | `BSD-3-Clause.txt` | gorilla/websocket、google/uuid、protobuf-go、wdvxdr1123/go-silk、kissfft |
 | `ISC.txt` | frida-go（Copyright (c) 2025 frida-go contributors） |
 | `wxWindows-Library-Licence-3.1.txt` | Frida / frida-gadget / frida-core |
