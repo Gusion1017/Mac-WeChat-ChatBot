@@ -140,13 +140,6 @@ final class RuntimeCoordinator {
     /// 停止/切号代际：定时器与启动补跑在挂起返回后据此丢弃过期回调。
     private var memoryLifecycleGeneration: UInt64 = 0
     private var lastSchedulerTasks: [ScheduledTask] = []
-    /// 主动聊天：运行期状态（今日计数 / 等待回复 / 上次发送时间）与轮询任务。
-    private var proactiveState = ProactiveChatRuntimeState()
-    private var proactiveTask: Task<Void, Never>?
-    /// 主动消息生成/发送中：避免 AI 请求较慢时下一轮 tick 重复发送。
-    private var proactiveSending = false
-    /// 主动聊天状态在账号数据库 settings 表中的键。
-    private static let proactiveStateKey = "proactive.state"
     /// 最近一次可用的通讯录目录（内存副本）；数据库缓存由 `MemoryStore` 负责。
     /// nil / `ok == false` 时行为与没有该功能完全一致：会话标题继续走 `ConversationName` 兜底。
     private var contactDirectory: ContactDirectorySnapshot?
@@ -529,7 +522,6 @@ final class RuntimeCoordinator {
             try? await memory.replaceSchedules(store.schedules)
         }
 
-        await loadProactiveState()
         scheduleSelfMentionBackfill()
         scheduleRemainingMessagePrefetch()
     }
@@ -1145,7 +1137,6 @@ final class RuntimeCoordinator {
             }
         )
         await scheduler.start(tasks: normalizedSchedules)
-        startProactiveChatLoop()
         // 记忆维护补跑：完成上次运行遗留的历史聊天补总结与不足一批的待提取。
         scheduleStartupMemoryCatchUp()
 
@@ -1196,7 +1187,6 @@ final class RuntimeCoordinator {
         memoryMaintenancePending.removeAll()
         maintenanceTasks.forEach { $0.cancel() }
         for task in maintenanceTasks { await task.value }
-        stopProactiveChatLoop()
         await scheduler.stop()
         if store.settings.hook.autoStartBridge {
             hookManager.stopBridge()
@@ -1206,7 +1196,6 @@ final class RuntimeCoordinator {
         log(.info, "Bot", "机器人运行时已停止")
         // Flush coalesced logs (UI + SQLite) before the runtime goes idle.
         await LogPipeline.shared.flushNow()
-        await persistProactiveState()
         await persistStats()
         await SettingsPersistence.shared.flush()
     }
@@ -1425,13 +1414,6 @@ final class RuntimeCoordinator {
         memoryIdleFlushTasks.removeAll()
         memoryPartialFlushRequested.removeAll()
         lastSchedulerTasks = []
-        stopProactiveChatLoop()
-        proactiveState = ProactiveChatRuntimeState()
-        proactiveSending = false
-        store.proactiveSentToday = 0
-        store.proactiveLastSentAt = nil
-        store.proactiveLastCheckAt = nil
-        store.proactiveLastCheckNote = ""
         lastVoiceTranscriptionEnabled = nil
         didAutoPromptVoiceSetup = false
         contactDirectory = nil
@@ -1628,9 +1610,6 @@ final class RuntimeCoordinator {
         if !event.isSelf {
             store.stats.receivedToday += 1
             scheduleStatsPersist()
-            // 对方回话了：清除「上一条主动消息等待回复」标记，让之后的主动聊天
-            // 不再因为 unanswered 被跳过（历史回放也算，避免重启后状态失真）。
-            noteProactiveIncoming(conversationID)
         }
 
         let preview = chatMessage.text.isEmpty ? "[\(chatMessage.kind.rawValue)]" : String(chatMessage.text.prefix(80))
@@ -3575,242 +3554,6 @@ final class RuntimeCoordinator {
         store.persist()
         Task { [weak self] in
             try? await self?.memory.replaceSchedules(tasks)
-        }
-    }
-
-    // MARK: Proactive chat
-
-    /// 机器人运行期间启动主动聊天轮询。是否真正发送完全由设置决定，
-    /// 因此常驻一个轻量循环（60 秒一跳）比反复启停更简单可靠。
-    private func startProactiveChatLoop() {
-        stopProactiveChatLoop()
-        proactiveTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(
-                    for: .seconds(ProactiveChatPlanner.tickInterval),
-                    tolerance: .seconds(15)
-                )
-                guard !Task.isCancelled, let self else { return }
-                await self.runProactiveChatTick()
-            }
-        }
-    }
-
-    private func stopProactiveChatLoop() {
-        proactiveTask?.cancel()
-        proactiveTask = nil
-    }
-
-    /// 读取当前账号的主动聊天运行期状态（今日计数 / 等待回复 / 上次发送时间）。
-    private func loadProactiveState() async {
-        guard let text = try? await memory.setting(key: Self.proactiveStateKey),
-              let data = text.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode(ProactiveChatRuntimeState.self, from: data)
-        else {
-            proactiveState = ProactiveChatRuntimeState()
-            reactiveProactiveCounters()
-            return
-        }
-        var state = decoded
-        state.beginDay()
-        proactiveState = state
-        reactiveProactiveCounters()
-        if state.totalSentToday > 0 {
-            log(.debug, "Proactive", "今日已主动发送 \(state.totalSentToday) 条")
-        }
-    }
-
-    /// 把运行期状态同步到可观察属性，供「机器人 → 主动」页实时展示。
-    private func reactiveProactiveCounters() {
-        store.proactiveSentToday = proactiveState.totalSentToday
-        store.proactiveLastSentAt = proactiveState.conversations.values
-            .compactMap(\.lastSentAt)
-            .max()
-    }
-
-    private func persistProactiveState() async {
-        guard let data = try? JSONEncoder().encode(proactiveState),
-              let text = String(data: data, encoding: .utf8)
-        else { return }
-        try? await memory.setSetting(key: Self.proactiveStateKey, value: text)
-    }
-
-    /// 对方发来消息：清除「等待回复」状态。只有状态真的变化时才落盘。
-    private func noteProactiveIncoming(_ conversationID: String) {
-        guard proactiveState.noteIncoming(conversationID) else { return }
-        Task { [weak self] in
-            await self?.persistProactiveState()
-        }
-    }
-
-    /// 每分钟检查一次：选一个满足所有条件的会话主动发一条。
-    /// 同一 tick 最多发一条，避免多个会话同时被「唤醒」造成刷屏。
-    private func runProactiveChatTick() async {
-        guard !proactiveSending else { return }
-        guard store.isBotRunning, store.gatewayConnected else {
-            recordProactiveCheck("机器人未运行或 OneBot 未连接")
-            return
-        }
-        let settings = store.settings.bot.proactiveSettings
-        guard settings.enabled else {
-            recordProactiveCheck("主动聊天未启用")
-            return
-        }
-        guard !settings.normalizedConversationIDs.isEmpty else {
-            recordProactiveCheck("未选择主动对象")
-            return
-        }
-
-        let now = Date()
-        proactiveState.beginDay(now)
-        reactiveProactiveCounters()
-
-        var best: (conversation: Conversation, lastActivity: Date)?
-        var firstSkipReason: String?
-        let targets = Set(settings.normalizedConversationIDs)
-        for conversation in store.conversations {
-            let decision = ProactiveChatPlanner.evaluate(
-                settings: settings,
-                bot: store.settings.bot,
-                conversation: conversation,
-                messages: store.messages[conversation.id] ?? [],
-                state: proactiveState,
-                now: now
-            )
-            guard decision.shouldSend else {
-                // 只记录「主动对象」里的会话原因，避免把无关会话的「不在名单」当结论。
-                if firstSkipReason == nil, targets.contains(conversation.id) {
-                    firstSkipReason = decision.reason
-                }
-                continue
-            }
-            let activity = conversation.lastMessageAt ?? .distantPast
-            if let best, best.lastActivity <= activity { continue }
-            best = (conversation, activity)
-        }
-        guard let chosen = best?.conversation else {
-            recordProactiveCheck(firstSkipReason.map { "没有发送：\($0)" } ?? "没有满足条件的会话")
-            return
-        }
-        log(.debug, "Proactive", "满足主动条件：\(chosen.displayTitle)，开始生成")
-        let result = await sendProactiveMessage(to: chosen, reason: "静默到时")
-        recordProactiveCheck(result)
-    }
-
-    /// 记录最近一次检查结论，供「机器人 → 主动」解释为什么没有发送。
-    private func recordProactiveCheck(_ note: String) {
-        store.proactiveLastCheckAt = Date()
-        store.proactiveLastCheckNote = note
-    }
-
-    /// 生成并发送一条主动消息；返回给 UI 的简短结果文案。
-    private func sendProactiveMessage(to conversation: Conversation, reason: String) async -> String {
-        guard !proactiveSending else { return "正在生成另一条主动消息，请稍候" }
-        proactiveSending = true
-        defer { proactiveSending = false }
-        let epoch = accountEpoch
-
-        // 先记录一次尝试：配置缺失/生成失败/发送失败也进入 30 分钟固定退避，
-        // 避免每分钟重试并反复烧 token / 刷日志。
-        proactiveState.beginDay()
-        proactiveState.noteAttempt(conversation.id)
-        await persistProactiveState()
-
-        let settingsProvider = store.settings.provider(
-            id: conversation.providerID ?? store.settings.bot.defaultProviderID)
-        guard let settingsProvider else { return "未找到可用 AI 服务" }
-        var provider = settingsProvider
-        let persona = store.settings.persona(
-            id: conversation.personaID ?? store.settings.bot.defaultPersonaID)
-        if let model = conversation.model, !model.isEmpty { provider.model = model }
-        if let personaModel = persona?.model, !personaModel.isEmpty { provider.model = personaModel }
-
-        let credentialState = await credentialStateOffMain(for: provider)
-        guard credentialState == .available else {
-            let message = "「\(provider.name)」未配置 API Key，无法主动聊天"
-            store.lastError = message
-            log(.warning, "Proactive", message)
-            return message
-        }
-
-        beginReplyProgress(
-            conversationID: conversation.id,
-            providerName: provider.name,
-            model: provider.model
-        )
-        updateReplyProgress(conversationID: conversation.id, stage: .generating)
-
-        let history = Array((store.messages[conversation.id] ?? [])
-            .suffix(ChatEngine.shortTermMemoryLimit))
-        do {
-            let plan = try await chatEngine.generateProactiveReply(
-                conversation: conversation,
-                settings: store.settings,
-                persona: persona,
-                provider: provider,
-                history: history,
-                dryRun: store.settings.bot.dryRun
-            )
-            guard epoch == accountEpoch else { return "账号已切换，已取消" }
-            guard store.isBotRunning else {
-                forgetReplyProgress(conversationID: conversation.id)
-                return "机器人已停止，已取消主动发送"
-            }
-
-            if plan.dryRun {
-                log(.info, "Proactive",
-                    "（dry-run）将主动发送 → \(conversation.displayTitle)：\(plan.fullText)（\(reason)）")
-                completeReplyProgress(conversationID: conversation.id, note: "演练完成（未实际发送）")
-                return "演练完成：\(plan.fullText)"
-            }
-
-            var sentCount = 0
-            for (index, segment) in plan.segments.enumerated() {
-                guard epoch == accountEpoch else { break }
-                updateReplyProgress(
-                    conversationID: conversation.id,
-                    stage: .sending,
-                    segmentIndex: index + 1,
-                    segmentCount: plan.segments.count
-                )
-                let sent = await sendOutgoingText(
-                    segment,
-                    conversation: conversation,
-                    epoch: epoch
-                )
-                if sent { sentCount += 1 }
-            }
-            guard epoch == accountEpoch else { return "账号已切换，已取消" }
-
-            guard sentCount > 0 else {
-                failReplyProgress(conversationID: conversation.id, error: "主动消息发送失败，详见运行日志")
-                return "发送失败，详见运行日志"
-            }
-            if sentCount < plan.segments.count {
-                completeReplyProgress(
-                    conversationID: conversation.id,
-                    note: "已主动发送 \(sentCount)/\(plan.segments.count) 段（部分失败）"
-                )
-            } else {
-                completeReplyProgress(
-                    conversationID: conversation.id,
-                    note: "已主动发送 \(sentCount) 段"
-                )
-            }
-
-            proactiveState.noteSent(conversation.id)
-            reactiveProactiveCounters()
-            await persistProactiveState()
-            log(.info, "Proactive",
-                "已主动聊天 → \(conversation.displayTitle)：\(plan.fullText.prefix(80))"
-                + "（\(reason)，今日第 \(proactiveState.totalSentToday) 条）")
-            return "已主动发送：\(plan.fullText)"
-        } catch {
-            guard epoch == accountEpoch else { return "账号已切换，已取消" }
-            store.lastError = error.localizedDescription
-            log(.error, "Proactive", "主动聊天生成失败：\(error.localizedDescription)")
-            failReplyProgress(conversationID: conversation.id, error: error.localizedDescription)
-            return "主动聊天生成失败：\(error.localizedDescription)"
         }
     }
 

@@ -2,7 +2,7 @@ import SwiftUI
 
 /// 定时任务（嵌入「机器人 → 定时」子栏目）：列表 + 新建/编辑 + 下次执行时间。
 ///
-/// 侧边栏不再单列「定时任务」页，改为机器人设置内的子栏目，与主动聊天、语音等
+/// 侧边栏不再单列「定时任务」页，改为机器人设置内的子栏目，与语音等
 /// 自动化能力放在一起；调度器与 `ScheduledTask` 持久化逻辑完全不变。
 struct SchedulesPanel: View {
     @Environment(AppStore.self) private var store

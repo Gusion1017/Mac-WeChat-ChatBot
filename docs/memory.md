@@ -99,7 +99,7 @@ accounts/<微信账号 id>/
 
 ### 3.2 记忆卡的创建
 
-- 会话收到第一条消息（或首次为该会话生成回复/主动聊天）时，调用方按
+- 会话收到第一条消息（或首次为该会话生成回复）时，调用方按
   `conversation.personaID ?? bot.defaultPersonaID` 解析人格设定，再调用
   `CharacterStore.ensureCharacter(conversation:persona:activationTimestamp:)`：
   1. 新建角色目录、建 `memory.sqlite`（新卡为空，只写 meta）；
@@ -586,7 +586,7 @@ score       = max(0.0001, base × recency × usage × decay)
 ## 14. 验证
 
 单测（`app/Tests/WeChatAITests/CharacterMemoryTests.swift`、`ChatEngineV2Tests.swift`，
-临时目录，不碰真实网络/数据），当前 `swift test` **567 项**（2 项按环境跳过）：
+临时目录，不碰真实网络/数据），当前 `swift test` **525 项**（2 项按环境跳过）：
 
 - 目录 key 编码/超长哈希/特殊字符；
 - 创建角色：只生成 `memory.sqlite`（不生成 `persona.md`），**新卡 0 条记忆**
@@ -616,7 +616,7 @@ score       = max(0.0001, base × recency × usage × decay)
 
 ```bash
 cd app && SWIFT_DISABLE_SANDBOX=1 swift build --build-tests
-cd app && SWIFT_DISABLE_SANDBOX=1 swift test          # 567 项（2 项按环境跳过）
+cd app && SWIFT_DISABLE_SANDBOX=1 swift test          # 525 项（2 项按环境跳过）
 bash scripts/check.sh                                 # 文档/脚本/符号检查
 ```
 

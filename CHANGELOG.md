@@ -6,6 +6,16 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 
 ## [Unreleased]
 
+## [2.0.2] — 2026-10-30
+
+### 移除
+
+- **移除主动聊天（2026-10-30）**：删除「机器人 → 主动」子栏目、`ProactiveChatPanel`、
+  `ProactiveChatPlanner`、`ProactiveChatSettings` / 运行期状态、60 秒主动轮询与相关测试/文档。
+  账号 `profile.json` 里的 `bot.proactive` 与账号库里的 `proactive.state` 不再读取，但保留一个版本
+  以免回滚丢配置；历史主动消息保留为普通出站消息。主动聊天与「定时任务」的区别说明不再适用。
+  机器人页子栏目恢复为 7 个（常规 / 触发 / 互动 / 名单 / 节奏 / 定时 / 语音）。
+
 ## [2.0.1] — 2026-10-29
 
 ### 变更
@@ -115,7 +125,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
   安全边界：默认关闭、空名单不发送、黑名单优先、公众号跳过、静默周期 + 单会话每日上限 +
   失败退避 + 未回复保护，并随账号隔离。新增 `ProactiveChatTests` 单测覆盖设置收敛、Codable 兼容、
   运行期状态、决策矩阵与主动聊天提示词；文档新增
-  [`docs/proactive-chat.md`](docs/proactive-chat.md)，并同步
+  `docs/proactive-chat.md`，并同步
   [`docs/README.md`](docs/README.md)、根 `README.md` 与 `en.lproj` 英文文案。
 
 ### 变更
@@ -839,7 +849,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 - 发送绕过微信本地 DB，Mac 端不回显；R3 首次使用需本机手动发一条消息捕获句柄。
 - 仅支持微信 4.1.12.53 / 4.1.15.55 与 Apple Silicon + macOS 26+。
 
-[Unreleased]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/compare/v2.0.2...HEAD
 [1.3.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.3.0
 [1.4.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.4.0
 [1.5.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.5.0
@@ -852,6 +862,7 @@ Hook / 微信版本相关的变更会注明目标微信版本与验证方式。
 [1.8.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v1.8.0
 [2.0.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v2.0.0
 [2.0.1]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v2.0.1
+[2.0.2]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/releases/tag/v2.0.2
 [1.0.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.0.0
 [1.1.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.1.0
 [1.2.0]: https://github.com/Gusion1017/WeChat-ChatBot-Mac/tree/v1.2.0

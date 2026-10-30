@@ -2,7 +2,7 @@ import SwiftUI
 
 /// 「机器人」页的子栏目。2026-10-26 起把原本的单页长列表拆成子栏目：
 /// 状态与基础开关、触发方式、唤醒与互动、名单、节奏（频率/时段/拟人化）、
-/// 主动聊天（2026-10-28）与语音。
+/// 定时任务与语音。
 enum BotTab: String, CaseIterable, Identifiable, PageTabItem {
     case general
     case trigger
@@ -10,7 +10,6 @@ enum BotTab: String, CaseIterable, Identifiable, PageTabItem {
     case lists
     case rhythm
     case schedules
-    case proactive
     case voice
 
     var id: String { rawValue }
@@ -23,7 +22,6 @@ enum BotTab: String, CaseIterable, Identifiable, PageTabItem {
         case .lists: "名单"
         case .rhythm: "节奏"
         case .schedules: "定时"
-        case .proactive: "主动"
         case .voice: "语音"
         }
     }
@@ -36,7 +34,6 @@ enum BotTab: String, CaseIterable, Identifiable, PageTabItem {
         case .lists: "checklist"
         case .rhythm: "gauge.with.dots.needle.33percent"
         case .schedules: "calendar.badge.clock"
-        case .proactive: "hand.wave.fill"
         case .voice: "waveform"
         }
     }
@@ -49,13 +46,12 @@ enum BotTab: String, CaseIterable, Identifiable, PageTabItem {
         case .lists: "白名单与黑名单"
         case .rhythm: "频率、工作时间与拟人化"
         case .schedules: "定时向指定会话发送固定内容"
-        case .proactive: "会话静默后由 AI 主动发起聊天"
         case .voice: "语音转写、TTS 与音色"
         }
     }
 }
 
-/// 机器人：状态、策略、名单、节奏、主动聊天与语音，按子栏目组织，减少单页滚动。
+/// 机器人：状态、策略、名单、节奏、定时任务与语音，按子栏目组织，减少单页滚动。
 struct BotView: View {
     @Environment(AppStore.self) private var store
     @Environment(ToastCenter.self) private var toast
@@ -145,8 +141,6 @@ struct BotView: View {
             humanizeCard
         case .schedules:
             SchedulesPanel()
-        case .proactive:
-            ProactiveChatPanel()
         case .voice:
             VoiceSettingsPanel()
         }
